@@ -1446,7 +1446,25 @@ function renderError(e) {
 // ─────────────────────────────────────
 // init
 // ─────────────────────────────────────
+function applyTheme(mode) {
+  const m = (mode === 'dark') ? 'dark' : 'light';
+  document.documentElement.setAttribute('data-theme', m);
+  localStorage.setItem('valve_theme', m);
+  const btn = document.getElementById('themeToggle');
+  if (btn) btn.textContent = m === 'dark' ? '☀' : '☾';
+}
+
 (async function init() {
+  // theme 초기값 (저장된 값 → 시스템 prefers-color-scheme → light)
+  const savedTheme = localStorage.getItem('valve_theme');
+  const sysDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  applyTheme(savedTheme || (sysDark ? 'dark' : 'light'));
+  const tgl = document.getElementById('themeToggle');
+  if (tgl) tgl.addEventListener('click', () => {
+    const cur = document.documentElement.getAttribute('data-theme') || 'light';
+    applyTheme(cur === 'dark' ? 'light' : 'dark');
+  });
+
   // nav tab clicks
   $$('.tab').forEach((b) => b.addEventListener('click', () => route(b.dataset.tab)));
 

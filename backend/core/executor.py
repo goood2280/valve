@@ -83,14 +83,26 @@ class ChunkExecutor:
                 return {"ok": True, "rows": len(df)}
             except Exception as e:
                 is_timeout = "Timeout" in type(e).__name__ or "timeout" in str(e).lower()
+                status = "timeout_reshard" if is_timeout else "failed"
                 self.state.update_chunk(chunk.chunk_id, self._chunk_meta(
                     chunk,
-                    status="timeout_reshard" if is_timeout else "failed",
+                    status=status,
                     ended_at=time.time(),
                     error_type=type(e).__name__,
                     error=str(e)[:500],
                     duration_sec=round(time.time() - t_start, 2),
                 ))
+                # best-effort webhook — import 위에 두지 않는 이유: 테스트/단독 실행 시 ops 미로드 허용
+                try:
+                    from backend.routers import ops as _ops
+                    import asyncio as _asyncio
+                    _asyncio.create_task(_ops.emit_failure_webhook({
+                        "chunk_id": chunk.chunk_id,
+                        "product": chunk.product, "source": chunk.source, "date": chunk.date,
+                        "status": status, "error_type": type(e).__name__, "error": str(e)[:300],
+                    }))
+                except Exception:
+                    pass
                 raise
 
     def _chunk_meta(self, chunk: Chunk, **update) -> dict:

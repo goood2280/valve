@@ -144,6 +144,30 @@ def main():
     check("browser has at least staging root",
           any((r.get("name") == "staging") for r in roots) if isinstance(roots, list) else False)
 
+    # Ops (metrics + alerts)
+    section("ops: metrics + alerts")
+    st, d = _req("GET", "/api/metrics")
+    check("GET /api/metrics 200", st == 200 and isinstance(d, dict))
+    check("metrics has chunk_status", isinstance(d, dict) and "chunk_status" in d)
+    st, d = _req("GET", "/api/metrics/prom")
+    check("GET /api/metrics/prom 200", st == 200 and isinstance(d, str) and "valve_total_chunks" in d)
+
+    # Agent scaffolding
+    section("agent: diagnose + catalog + audit")
+    st, d = _req("GET", "/api/agent/actions")
+    check("GET /api/agent/actions 200", st == 200 and isinstance(d, dict))
+    acts = {a["action"] for a in (d.get("actions") or [])} if isinstance(d, dict) else set()
+    for name in ("retry_chunk", "retry_partition", "toggle_probe_skip",
+                 "invalidate_probe_cache"):
+        check(f"agent action '{name}'", name in acts)
+
+    st, d = _req("GET", "/api/agent/diagnose")
+    check("GET /api/agent/diagnose 200", st == 200 and isinstance(d, dict))
+
+    st, d = _req("POST", "/api/agent/apply-fix",
+                  body={"action": "not_allowed", "args": {}})
+    check("agent unknown action → 400", st == 400)
+
     # Static frontend assets
     section("frontend static")
     st, d = _req("GET", "/style.css")

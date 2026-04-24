@@ -33,9 +33,13 @@ from backend.routers import schedule as schedule_router
 from backend.routers import browser as browser_router
 from backend.routers import query as query_router
 from backend.routers import probe_preview as probe_preview_router
+from backend.routers import ops as ops_router
+from backend.routers import agent as agent_router
 
 
-ROOT = Path(__file__).parent.resolve()
+# 테스트/임베디드 실행을 위해 VALVE_ROOT 환경변수로 ROOT 재지정 가능.
+import os
+ROOT = Path(os.environ.get("VALVE_ROOT") or Path(__file__).parent).resolve()
 CONFIG_DIR = ROOT / "config"
 LOGS_DIR = ROOT / "logs"
 STAGING_DIR = ROOT / "staging"
@@ -78,6 +82,9 @@ schedule_router.deps(PRODUCTS, SETTINGS, ROOT)
 browser_router.deps(STAGING_DIR, S3_LOCAL_DIR)
 query_router.deps(STAGING_DIR, S3_LOCAL_DIR)
 probe_preview_router.deps(planner, PRODUCTS)
+ops_router.deps(state, SETTINGS)
+SETTINGS["_root"] = str(ROOT)  # agent 가 products.yaml 경로 역추적할 때 사용
+agent_router.deps(state, SETTINGS, PRODUCTS, planner, executor, LOGS_DIR / "agent_audit.jsonl")
 
 app.include_router(jobs_router.router)
 app.include_router(settings_router.router)
@@ -85,6 +92,8 @@ app.include_router(schedule_router.router)
 app.include_router(browser_router.router)
 app.include_router(query_router.router)
 app.include_router(probe_preview_router.router)
+app.include_router(ops_router.router)
+app.include_router(agent_router.router)
 
 
 @app.get("/api/health")
@@ -98,12 +107,15 @@ def health():
     }
 
 
+_MODULE_DIR = Path(__file__).parent.resolve()
+
 @app.get("/api/version")
 def version():
+    # VERSION.json 은 소스와 함께 배포됨 → ROOT(운영 데이터 디렉터리) 아닌 모듈 디렉터리에서 읽기
     try:
-        return json.loads((ROOT / "VERSION.json").read_text(encoding="utf-8"))
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+        return json.loads((_MODULE_DIR / "VERSION.json").read_text(encoding="utf-8"))
+    except Exception:
+        return {"name": "Valve", "version": "0.1.0"}
 
 
 # ─── frontend static (v0.2 에서 index.html 추가 예정) ───
