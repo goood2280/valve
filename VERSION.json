@@ -1,0 +1,27 @@
+{
+  "name": "Valve",
+  "version": "0.1.0",
+  "codename": "valve",
+  "pairs_with": "flow",
+  "purpose": "DataLake 수도꼭지 — 사내 API 에서 데이터를 뽑아 S3 로 흘려 flow 에 공급",
+  "tagline": "turn the valve · feed the flow",
+  "created": "2026-04-24",
+  "changelog": [
+    {
+      "version": "0.1.0",
+      "date": "2026-04-24",
+      "tag": "feat",
+      "title": "initial skeleton — Mock lake_api + Probe-First planner + asyncio executor(3 concurrent) + atomic S3 uploader + SSE state + web config",
+      "changes": [
+        "core/lake_api.py: Mock query(params, custom_col, user) + Real adapter + rate limit + retry(HY000 재시도) + timeout(4분50초)",
+        "core/planner.py: Sample Window probe(1시간 샘플 → 하루 추정) + 7일 cache + shard-balanced chunking",
+        "core/executor.py: asyncio worker pool max_concurrent=3 + staging parquet + completeness check + timeout fallback",
+        "core/s3_up.py: atomic put (tmp → final rename) + fake_local_path 모드 (개발 즉시 가능)",
+        "core/state.py: jobs.jsonl append-only + SSE broadcast + crash recovery(in_progress→pending)",
+        "routers: jobs/settings/schedule/browser/query/probe_preview 6종",
+        "config 웹 CRUD (secret_key 는 write-only 마스킹)",
+        "rolling backfill_days 기본 3 (3~5 조정 가능), daily replace"
+      ]
+    }
+  ]
+}

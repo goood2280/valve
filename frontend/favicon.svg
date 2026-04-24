@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="12" fill="#0f172a"/>
+  <text x="9" y="48" font-family="Outfit, 'Pretendard', 'Inter', sans-serif"
+        font-weight="900" font-size="44" fill="#FF5E00"
+        letter-spacing="-2.5">v<tspan fill="#e2e8f0">.</tspan></text>
+</svg>

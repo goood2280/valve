@@ -1,0 +1,122 @@
+"""
+Valve · app.py
+--------------
+FastAPI entry. 라우터 mount + dep injection + static frontend.
+
+Valve — DataLake 의 수도꼭지. 사내 API 에서 데이터를 뽑아 S3 로 흘려 flow 에 공급.
+
+실행:
+    uvicorn app:app --host 0.0.0.0 --port 8090 --reload
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import yaml
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
+
+# core
+from backend.core.lake_api import LakeAPI
+from backend.core.planner import Planner
+from backend.core.s3_up import S3Uploader
+from backend.core.state import StateStore
+from backend.core.executor import ChunkExecutor
+
+# routers
+from backend.routers import jobs as jobs_router
+from backend.routers import settings as settings_router
+from backend.routers import schedule as schedule_router
+from backend.routers import browser as browser_router
+from backend.routers import query as query_router
+from backend.routers import probe_preview as probe_preview_router
+
+
+ROOT = Path(__file__).parent.resolve()
+CONFIG_DIR = ROOT / "config"
+LOGS_DIR = ROOT / "logs"
+STAGING_DIR = ROOT / "staging"
+S3_LOCAL_DIR = ROOT / "s3_local"
+FRONTEND_DIR = ROOT / "frontend"
+PROBE_CACHE = CONFIG_DIR / "probe_cache.json"
+
+# ─── load config ───
+SETTINGS = json.loads((CONFIG_DIR / "settings.json").read_text(encoding="utf-8"))
+PRODUCTS = yaml.safe_load((CONFIG_DIR / "products.yaml").read_text(encoding="utf-8")) or {"products": []}
+
+# CWD 이슈 fix: fake_local_path 가 상대경로면 Valve ROOT 기준으로 절대화
+_fl = (SETTINGS.get("s3") or {}).get("fake_local_path") or ""
+if _fl and not Path(_fl).is_absolute():
+    SETTINGS["s3"]["fake_local_path"] = str((ROOT / _fl).resolve())
+
+
+# ─── init components ───
+api = LakeAPI(SETTINGS)
+s3 = S3Uploader(SETTINGS)
+state = StateStore(LOGS_DIR / "jobs.jsonl")
+planner = Planner(api, SETTINGS, PROBE_CACHE)
+executor = ChunkExecutor(api, planner, s3, state, SETTINGS, STAGING_DIR)
+
+
+# ─── FastAPI ───
+app = FastAPI(title="Valve", version="0.1.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ─── router dep injection ───
+jobs_router.deps(state, executor, planner, PRODUCTS, SETTINGS, LOGS_DIR / "jobs.jsonl")
+settings_router.deps(ROOT, SETTINGS, api, s3)
+schedule_router.deps(PRODUCTS, SETTINGS, ROOT)
+browser_router.deps(STAGING_DIR, S3_LOCAL_DIR)
+query_router.deps(STAGING_DIR, S3_LOCAL_DIR)
+probe_preview_router.deps(planner, PRODUCTS)
+
+app.include_router(jobs_router.router)
+app.include_router(settings_router.router)
+app.include_router(schedule_router.router)
+app.include_router(browser_router.router)
+app.include_router(query_router.router)
+app.include_router(probe_preview_router.router)
+
+
+@app.get("/api/health")
+def health():
+    return {
+        "ok": True,
+        "version": "0.1.0",
+        "lake_mode": SETTINGS["lake_api"].get("mode"),
+        "s3_fake": bool(SETTINGS["s3"].get("fake_local_path") and not SETTINGS["s3"].get("endpoint_url")),
+        "staging": str(STAGING_DIR),
+    }
+
+
+@app.get("/api/version")
+def version():
+    try:
+        return json.loads((ROOT / "VERSION.json").read_text(encoding="utf-8"))
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# ─── frontend static (v0.2 에서 index.html 추가 예정) ───
+if FRONTEND_DIR.exists() and any(FRONTEND_DIR.iterdir()):
+    app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
+else:
+    @app.get("/")
+    def root():
+        return {
+            "app": "Valve",
+            "tagline": "turn the valve · feed the flow",
+            "version": "0.1.0",
+            "note": "frontend not yet built — v0.2. see /docs for API.",
+            "health": "/api/health",
+            "api_docs": "/docs",
+        }

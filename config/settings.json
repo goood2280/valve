@@ -1,0 +1,36 @@
+{
+  "lake_api": {
+    "mode": "mock",
+    "module": "valve.mock:query",
+    "user": "pipe-runner",
+    "timeout_sec": 290,
+    "min_interval_sec": 1,
+    "max_concurrent": 3,
+    "retry": {
+      "attempts": 3,
+      "backoff_sec": [10, 30, 120]
+    },
+    "retryable_errors": ["HY000", "ConnectionError", "TimeoutError", "Timeout", "5xx"]
+  },
+  "s3": {
+    "endpoint_url": "",
+    "bucket": "flow-datalake",
+    "prefix": "",
+    "access_key": "",
+    "secret_key": "",
+    "fake_local_path": "./s3_local"
+  },
+  "schedule": {
+    "backfill_days": 3,
+    "interval_hours": 24,
+    "force_overwrite": true,
+    "tolerance_pct": 0.5
+  },
+  "probe": {
+    "strategy": "sample_window",
+    "window_hours": 1,
+    "cache_days": 7,
+    "adaptive_correction": true,
+    "fallback_on_timeout": true
+  }
+}

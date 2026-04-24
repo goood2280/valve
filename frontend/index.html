@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1.0">
+  <title>Valve</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/style.css">
+  <meta name="theme-color" content="#FF5E00">
+</head>
+<body>
+  <header class="nav">
+    <div class="brand" title="turn the valve · feed the flow">
+      valve<span class="brand-dot">.</span>
+    </div>
+    <nav class="tabs">
+      <button class="tab active" data-tab="monitor"><span class="tab-ico">📊</span>모니터</button>
+      <button class="tab" data-tab="products"><span class="tab-ico">📦</span>제품</button>
+      <button class="tab" data-tab="logs"><span class="tab-ico">📜</span>로그</button>
+      <button class="tab" data-tab="settings"><span class="tab-ico">⚙️</span>설정</button>
+      <button class="tab" data-tab="browser"><span class="tab-ico">📂</span>탐색기</button>
+    </nav>
+    <div class="status">
+      <span class="status-item">
+        <span class="mode-badge" id="modeBadge">mock</span>
+      </span>
+      <span class="status-item" title="실시간 이벤트 연결">
+        <span class="sse-dot" id="sseDot"></span>
+        <span class="sse-label" id="sseLabel">연결 중</span>
+      </span>
+    </div>
+  </header>
+
+  <main id="main">
+    <div class="loading">Loading…</div>
+  </main>
+
+  <footer class="foot">
+    <span>Valve — turn the valve · feed the flow</span>
+    <span class="foot-sep">·</span>
+    <a href="/docs" target="_blank">API docs</a>
+    <span class="foot-sep">·</span>
+    <span>pairs with <span class="flow-mark">flow<span style="color:#1e293b">.</span></span></span>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>

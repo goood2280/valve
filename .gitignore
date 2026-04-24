@@ -1,0 +1,30 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+.env.local
+
+# runtime data
+/staging/
+/logs/*.jsonl
+/s3_local/
+/data/
+
+# probe/state caches
+/config/probe_cache.json
+/config/settings.local.json
+
+# python envs
+.venv/
+venv/
+
+# editor / os
+.vscode/
+.idea/
+*.swp
+*.tmp
+.DS_Store
+Thumbs.db
+
+# claude code
+.claude/

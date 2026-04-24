@@ -1,0 +1,56 @@
+products:
+- product: PRODA
+  enabled: true
+  priority: 10
+  sources:
+  - name: FAB
+    table: RAW_FAB_DATA
+    shard_hierarchy: []
+    target_chunk_rows: 500000
+  - name: INLINE
+    table: RAW_INLINE_DATA
+    shard_hierarchy:
+    - root_lot_id
+    target_chunk_rows: 200000
+  - name: ET
+    table: RAW_ET_DATA
+    shard_hierarchy:
+    - root_lot_id
+    - item_id
+    target_chunk_rows: 300000
+  params_template:
+    cata:
+      column: product_code
+      op: eq
+      value: PRODA
+  custom_col:
+  - lot_id
+  - wafer_id
+  - time
+  - item_id
+  - value
+  backfill_days_override: 600
+- product: PRODB
+  enabled: true
+  priority: 20
+  sources:
+  - name: FAB
+    table: RAW_FAB_DATA
+    shard_hierarchy: []
+    target_chunk_rows: 500000
+  - name: INLINE
+    table: RAW_INLINE_DATA
+    shard_hierarchy:
+    - root_lot_id
+    target_chunk_rows: 200000
+  params_template:
+    cata:
+      column: product_code
+      op: eq
+      value: PRODB
+  custom_col:
+  - lot_id
+  - wafer_id
+  - time
+  - item_id
+  - value
