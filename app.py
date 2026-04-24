@@ -133,6 +133,10 @@ state = StateStore(LOGS_DIR / "jobs.jsonl")
 planner = Planner(api, SETTINGS, PROBE_CACHE)
 executor = ChunkExecutor(api, planner, s3, state, SETTINGS, STAGING_DIR)
 
+# S3 업로드 큐 (immediate 모드면 enqueue 안 됨 — 단순 초기화만)
+from backend.core import s3_queue as _s3queue
+_s3queue.configure(s3, SETTINGS, state, LOGS_DIR / "s3_queue.jsonl", alert_cb=_boot_alert)
+
 
 # ─── FastAPI ───
 app = FastAPI(title="Valve", version="0.1.0")
@@ -167,7 +171,7 @@ app.include_router(agent_router.router)
 
 @app.on_event("startup")
 async def _on_startup():
-    """기동 중 버퍼된 config_sync 알람을 실제 3-채널로 발송."""
+    """기동 중 버퍼된 config_sync 알람 발송 + S3 upload 모드가 interval 이면 백그라운드 루프 시작."""
     buffered = list(_STARTUP_ALERTS)
     _STARTUP_ALERTS.clear()
     for evt in buffered:
@@ -176,6 +180,13 @@ async def _on_startup():
         except Exception:
             pass
     await ops_router.flush_pending_alerts()
+    if (SETTINGS.get("s3") or {}).get("upload_mode") == "interval":
+        _s3queue.start_background()
+
+
+@app.on_event("shutdown")
+async def _on_shutdown():
+    _s3queue.stop_background()
 
 
 @app.get("/api/health")

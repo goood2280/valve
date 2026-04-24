@@ -19,7 +19,10 @@
     "prefix": "",
     "access_key": "",
     "secret_key": "",
-    "fake_local_path": "./s3_local"
+    "fake_local_path": "./s3_local",
+    "upload_mode": "immediate",
+    "upload_interval_sec": 300,
+    "retry_failed_sec": 120
   },
   "schedule": {
     "backfill_days": 3,
@@ -35,9 +38,16 @@
     "fallback_on_timeout": true
   },
   "alerts": {
+    "enabled": true,
+    "min_severity": "warn",
     "webhook_url": "",
+    "webhook_enabled": true,
     "flow_notify_url": "",
+    "flow_enabled": true,
     "s3_prefix": "valve-alerts",
-    "config_prefix": "valve-config"
+    "s3_enabled": true,
+    "config_prefix": "valve-config",
+    "max_per_hour": 60,
+    "dedupe_window_sec": 60
   }
 }

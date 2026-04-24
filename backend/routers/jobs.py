@@ -166,6 +166,21 @@ def probe_invalidate(req: dict):
     return {"ok": True}
 
 
+@router.get("/s3-pending")
+def s3_pending():
+    """S3 업로드 대기 큐 상태."""
+    from backend.core import s3_queue
+    return {"pending": s3_queue.pending(), "count": len(s3_queue.pending())}
+
+
+@router.post("/s3-flush")
+async def s3_flush():
+    """대기 큐를 즉시 플러시 (manual 모드 또는 interval 모드에서 기다리지 않고 실행).
+    반환: {uploaded, failed, skipped, pending}."""
+    from backend.core import s3_queue
+    return await s3_queue.flush_once()
+
+
 @router.get("/history")
 def history(limit: int = 300, product: str = "", source: str = "",
             status: str = "", failed_only: bool = False, kind: str = "chunk"):

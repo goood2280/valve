@@ -182,40 +182,86 @@ def record_alert(evt: dict):
         del _recent_alerts[: len(_recent_alerts) - _MAX_RECENT]
 
 
+_SEV_ORDER = {"info": 0, "warn": 1, "warning": 1, "error": 2, "critical": 3}
+_recent_hour: list[float] = []    # rate limit sliding window (seconds)
+_dedupe_last: dict[str, float] = {}  # (kind|chunk_id|plan_id) → last ts
+
+
+def _alerts_cfg() -> dict:
+    return (_settings or {}).get("alerts") or {}
+
+
+def _should_emit(evt: dict) -> tuple[bool, str]:
+    """severity 필터 + rate limit + dedupe. 결과: (발행_여부, 사유)."""
+    cfg = _alerts_cfg()
+    if cfg.get("enabled") is False:
+        return False, "alerts.enabled=false"
+    min_sev = (cfg.get("min_severity") or "info").lower()
+    sev = (evt.get("severity") or "info").lower()
+    if _SEV_ORDER.get(sev, 0) < _SEV_ORDER.get(min_sev, 0):
+        return False, f"severity<{min_sev}"
+
+    now = time.time()
+    # rate limit — 지난 1시간 건수 기준
+    _recent_hour[:] = [t for t in _recent_hour if now - t < 3600]
+    limit = int(cfg.get("max_per_hour") or 0)
+    if limit > 0 and len(_recent_hour) >= limit:
+        return False, f"rate_limit({limit}/h)"
+
+    # dedupe — 같은 kind + chunk/plan 키에 대해 window 이내 재발행 금지
+    dwin = int(cfg.get("dedupe_window_sec") or 0)
+    if dwin > 0:
+        dkey = f"{evt.get('kind','')}|{evt.get('chunk_id') or evt.get('plan_id') or evt.get('partition_key') or ''}"
+        last = _dedupe_last.get(dkey, 0.0)
+        if now - last < dwin:
+            return False, f"dedupe({dwin}s)"
+        _dedupe_last[dkey] = now
+    _recent_hour.append(now)
+    return True, ""
+
+
 async def dispatch_alert(evt: dict):
-    """3-채널 fan-out. 각 채널 실패가 다른 채널을 막지 않음.
-    각 채널의 성공/실패는 alert 자체의 meta 에 반영(재귀 알람 없음)."""
+    """3-채널 fan-out + severity/rate/dedupe 필터 + per-channel on/off.
+    각 채널 실패가 다른 채널을 막지 않음. 필터에 걸리면 suppressed 표시만 남김."""
     import asyncio
     evt = dict(evt)
     evt.setdefault("ts", time.time())
     evt.setdefault("source", "valve")
+    evt.setdefault("severity", "info")
     record_alert(evt)
 
-    # 1) S3 알람 업로드 (옵션)
+    ok, reason = _should_emit(evt)
+    if not ok:
+        evt["dispatch"] = {"suppressed": reason}
+        return evt
+
+    cfg = _alerts_cfg()
     results = {"s3": None, "flow": None, "webhook": None}
-    if _s3 is not None:
+
+    # 1) S3 알람 업로드 (옵션 + s3_enabled)
+    if _s3 is not None and cfg.get("s3_enabled", True):
         prefix = _alert_s3_prefix()
         if prefix:
             ts_key = time.strftime("%Y%m%dT%H%M%S", time.gmtime(evt["ts"]))
             key = f"{prefix}/{ts_key}-{evt.get('kind','event')}.json"
             try:
-                ok = await asyncio.to_thread(
+                put_ok = await asyncio.to_thread(
                     _s3.put_text, key, json.dumps(evt, ensure_ascii=False, default=str))
-                results["s3"] = {"ok": bool(ok), "key": key}
+                results["s3"] = {"ok": bool(put_ok), "key": key}
             except Exception as e:
                 results["s3"] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
-    # 2) flow 앱 알람 엔드포인트 (옵션)
+    # 2) flow 알림
     flow_url = _flow_notify_url()
-    if flow_url:
-        ok, msg = await _post_webhook(flow_url, evt)
-        results["flow"] = {"ok": ok, "message": msg}
+    if flow_url and cfg.get("flow_enabled", True):
+        flow_ok, msg = await _post_webhook(flow_url, evt)
+        results["flow"] = {"ok": flow_ok, "message": msg}
 
-    # 3) 일반 webhook (옵션) — 기존 경로 재사용
+    # 3) 일반 webhook
     web_url = _webhook_url()
-    if web_url and web_url != flow_url:
-        ok, msg = await _post_webhook(web_url, evt)
-        results["webhook"] = {"ok": ok, "message": msg}
+    if web_url and web_url != flow_url and cfg.get("webhook_enabled", True):
+        web_ok, msg = await _post_webhook(web_url, evt)
+        results["webhook"] = {"ok": web_ok, "message": msg}
 
     evt["dispatch"] = results
     return evt

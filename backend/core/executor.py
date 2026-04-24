@@ -196,16 +196,29 @@ class ChunkExecutor:
         merged_path = date_dir / "_merged.parquet"
         merged.write_parquet(str(merged_path))
 
-        # S3 atomic put
+        # S3 업로드 모드 분기 (immediate / interval / manual)
         s3_key = f"{plan.source}/{plan.product}/date={plan.date}/part-0.parquet"
-        try:
-            await self.s3.put_atomic(merged_path, s3_key)
-        except Exception as e:
-            self.state.update_partition(
-                f"{plan.product}/{plan.source}/{plan.date}",
-                {"status": "upload_failed", "error": str(e)[:300], "completeness": completeness},
-            )
-            return {"ok": False, "reason": f"upload_failed: {e}"}
+        mode = (self.settings.get("s3", {}) or {}).get("upload_mode", "immediate")
+        partition_key = f"{plan.product}/{plan.source}/{plan.date}"
+
+        if mode == "immediate":
+            try:
+                await self.s3.put_atomic(merged_path, s3_key)
+            except Exception as e:
+                self.state.update_partition(
+                    partition_key,
+                    {"status": "upload_failed", "error": str(e)[:300], "completeness": completeness},
+                )
+                return {"ok": False, "reason": f"upload_failed: {e}"}
+            upload_status = "success"
+        else:
+            # interval / manual — pending 큐에 저장, 실제 업로드는 스케줄러/수동
+            try:
+                from backend.core import s3_queue as _s3q
+                _s3q.enqueue(partition_key, str(merged_path), s3_key, mode=mode)
+                upload_status = "pending_upload"
+            except Exception as e:
+                return {"ok": False, "reason": f"queue_error: {e}"}
 
         # staging part 파일 정리 (_merged.parquet 는 유지 — 브라우저에서 확인 가능)
         for p in parts:
@@ -215,7 +228,7 @@ class ChunkExecutor:
                 pass
 
         self.state.update_partition(
-            f"{plan.product}/{plan.source}/{plan.date}",
-            {"status": "success", "total_rows": total_rows, "completeness": completeness, "s3_key": s3_key},
+            partition_key,
+            {"status": upload_status, "total_rows": total_rows, "completeness": completeness, "s3_key": s3_key},
         )
-        return {"ok": True, "rows": total_rows, "s3_key": s3_key}
+        return {"ok": True, "rows": total_rows, "s3_key": s3_key, "upload_status": upload_status}
