@@ -577,6 +577,83 @@ main {
   font-weight: 400;
 }
 .subsection-collapsible > .custom-cols { padding: 0 6px 8px; }
+
+/* ─── 제품 1급 필드 (process_id / line_id / product_code) ─── */
+.product-keyfields { margin-bottom: 8px; }
+.keyfield-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--bg-hover);
+  border-radius: var(--radius);
+  border-left: 3px solid var(--brand-orange);
+  margin-bottom: 8px;
+}
+.keyfield { display: flex; flex-direction: column; gap: 4px; }
+.keyfield-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--brand-orange);
+  font-family: 'JetBrains Mono',monospace;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.keyfield-input {
+  width: 100%;
+  font-size: 12px;
+  padding: 6px 10px;
+}
+.extra-filters { margin-top: 6px; }
+
+@media (max-width: 900px) {
+  .keyfield-grid { grid-template-columns: 1fr; }
+}
+
+/* ─── 소스별 최종 쿼리 미리보기 ─── */
+.query-preview {
+  margin-top: 8px;
+  border-radius: var(--radius);
+  border: 1px dashed var(--border-strong);
+  overflow: hidden;
+}
+.query-preview[open] { border-color: var(--brand-orange); }
+.query-preview > summary {
+  padding: 6px 10px;
+  cursor: pointer;
+  list-style: none;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-secondary);
+  user-select: none;
+}
+.query-preview > summary::-webkit-details-marker { display: none; }
+.query-preview > summary::before {
+  content: '▸';
+  display: inline-block;
+  margin-right: 6px;
+  color: var(--brand-orange);
+  transition: transform 0.15s;
+}
+.query-preview[open] > summary::before { transform: rotate(90deg); }
+.query-preview[open] > summary {
+  background: rgba(255,94,0,0.05);
+  color: var(--brand-orange);
+  border-bottom: 1px dashed var(--border);
+}
+.query-sql {
+  padding: 10px 14px;
+  margin: 0;
+  font-family: 'JetBrains Mono','Fira Code',Menlo,Consolas,monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+}
 .logs-tbl tr:hover { background: rgba(0,0,0,0.02); }
 .logs-reason {
   font-family: 'JetBrains Mono',monospace;

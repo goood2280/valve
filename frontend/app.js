@@ -588,26 +588,128 @@ function productCard(p, pi, draft, rerender) {
       el('button', { class: 'btn ghost small', onclick: deleteProduct }, '🗑 제품 삭제'),
     ),
 
-    el('div', { class: 'subsection-title' },
-      '⚙ 제품 공통 기본',
-      el('span', { class: 'hint' }, `${p.product} 고유 필터·설정값 (process_id, line_id, product_code 등). 모든 소스 쿼리에 WHERE 로 함께 들어감.`),
-    ),
-    paramsEditor(p, rerender),
+    // ─── ⚙ 제품 공통 기본: process_id / line_id 1급 필드 + product_code + 추가 필터
+    productKeyFieldsEditor(p, rerender),
 
-    el('details', { class: 'subsection-collapsible' },
-      el('summary', {},
-        el('span', { class: 'subsection-title-inline' }, '📋 공통 뽑을 컬럼'),
-        el('span', { class: 'hint' }, `(${(p.custom_col || []).length}개) 소스별 override 없을 때 사용`),
-      ),
-      productDefaultsEditor(p, rerender),
-    ),
-
+    // ─── ▤ 소스 × 추출 설정 + 최종 쿼리 미리보기
     el('div', { class: 'subsection-title', style: { marginTop: '14px' } },
-      '▤ 소스 × 추출 설정',
-      el('span', { class: 'hint' }, 'FAB/INLINE/ET/QTIME/EDS/VM 각각의 table·shard·컬럼 override.'),
+      '▤ 추출 소스',
+      el('span', { class: 'hint' }, `${(p.sources || []).length}/${SOURCE_NAMES.length} · 각 소스마다 최종 쿼리 미리보기 제공`),
     ),
     ...((p.sources || []).map((s, si) => sourceCard(p, s, si, rerender))),
     el('button', { class: 'btn ghost small', onclick: addSource, style: { marginTop: '6px' } }, '+ 소스 추가'),
+
+    // ─── 📋 공통 컬럼 (접기) — 부수적이라 접어둠
+    el('details', { class: 'subsection-collapsible' },
+      el('summary', {},
+        el('span', { class: 'subsection-title-inline' }, '📋 공통 뽑을 컬럼 (선택)'),
+        el('span', { class: 'hint' }, `${(p.custom_col || []).length}개 · 소스별 override 없을 때 사용`),
+      ),
+      productDefaultsEditor(p, rerender),
+    ),
+  );
+}
+
+// ─────────────────────────────────────────────────
+// process_id, line_id 를 1급 필드로 승격.
+// params_template 에서 column === 'process_id' / 'line_id' 슬롯을 찾아 직접 편집.
+// 나머지 (product_code 등) 은 "추가 필터" 로 따로.
+// ─────────────────────────────────────────────────
+function productKeyFieldsEditor(p, rerender) {
+  p.params_template = p.params_template || {};
+
+  const findByColumn = (colName) => {
+    for (const slot of Object.keys(p.params_template)) {
+      const entry = p.params_template[slot] || {};
+      if ((entry.column || '').toLowerCase() === colName.toLowerCase()) return slot;
+    }
+    return null;
+  };
+
+  const getValue = (colName) => {
+    const slot = findByColumn(colName);
+    if (!slot) return '';
+    const entry = p.params_template[slot];
+    return Array.isArray(entry.value) ? entry.value.join(', ') : String(entry.value ?? '');
+  };
+
+  const setValue = (colName, rawValue, op = 'eq') => {
+    const trimmed = (rawValue || '').trim();
+    let slot = findByColumn(colName);
+    if (!trimmed) {
+      if (slot) delete p.params_template[slot];
+      return;
+    }
+    const value = trimmed.includes(',')
+      ? trimmed.split(',').map(x => x.trim()).filter(Boolean)
+      : trimmed;
+    const usedOp = Array.isArray(value) ? 'in' : op;
+    if (!slot) {
+      const used = new Set(Object.keys(p.params_template));
+      slot = PARAM_SLOTS.find(s => !used.has(s)) || 'cata';
+    }
+    p.params_template[slot] = { column: colName, op: usedOp, value };
+  };
+
+  const pidSlot = findByColumn('process_id');
+  const lidSlot = findByColumn('line_id');
+  const productCodeSlot = findByColumn('product_code');
+
+  // 1급 필드 외의 추가 필터
+  const extraSlots = Object.keys(p.params_template).filter(
+    s => s !== pidSlot && s !== lidSlot && s !== productCodeSlot,
+  );
+
+  return el('div', { class: 'product-keyfields' },
+    el('div', { class: 'subsection-title' },
+      '⚙ 제품 공통 기본',
+      el('span', { class: 'hint' }, `${p.product} 에 해당하는 모든 DB 쿼리의 WHERE 절에 자동 추가됨`),
+    ),
+
+    el('div', { class: 'keyfield-grid' },
+      // process_id
+      el('div', { class: 'keyfield' },
+        el('label', { class: 'keyfield-label' }, 'process_id',
+          el('span', { class: 'hint' }, '예: P4203 · 쉼표로 여러 개 (IN)')),
+        el('input', {
+          type: 'text', class: 'keyfield-input',
+          value: getValue('process_id'),
+          placeholder: '(없음 — 필터 안 함)',
+          onchange: e => { setValue('process_id', e.target.value); rerender(); },
+        }),
+      ),
+      // line_id
+      el('div', { class: 'keyfield' },
+        el('label', { class: 'keyfield-label' }, 'line_id',
+          el('span', { class: 'hint' }, '예: L01, L02 · 쉼표로 여러 개 (IN)')),
+        el('input', {
+          type: 'text', class: 'keyfield-input',
+          value: getValue('line_id'),
+          placeholder: '(없음 — 필터 안 함)',
+          onchange: e => { setValue('line_id', e.target.value); rerender(); },
+        }),
+      ),
+      // product_code
+      el('div', { class: 'keyfield' },
+        el('label', { class: 'keyfield-label' }, 'product_code',
+          el('span', { class: 'hint' }, '보통 제품명과 동일')),
+        el('input', {
+          type: 'text', class: 'keyfield-input',
+          value: getValue('product_code'),
+          placeholder: p.product || '(없음)',
+          onchange: e => { setValue('product_code', e.target.value); rerender(); },
+        }),
+      ),
+    ),
+
+    // 추가 필터
+    el('details', { class: 'subsection-collapsible extra-filters', ...(extraSlots.length ? { open: '' } : {}) },
+      el('summary', {},
+        el('span', { class: 'subsection-title-inline' }, '⧗ 추가 필터'),
+        el('span', { class: 'hint' }, `${extraSlots.length}건 · 다른 컬럼에 대한 WHERE 조건`),
+      ),
+      paramsEditor(p, rerender, { skipColumns: ['process_id', 'line_id', 'product_code'] }),
+    ),
   );
 }
 
@@ -654,6 +756,49 @@ function sourceCard(p, s, si, rerender) {
       el('button', { class: 'btn ghost small', onclick: deleteSource }, '🗑'),
     ),
     customColsEditor(p, s, rerender),
+    queryPreview(p, s),
+  );
+}
+
+// ─────────────────────────────────────────────────
+// 소스별 최종 쿼리 미리보기 — 제품 공통 기본 + 소스별 override 가 어떻게 합쳐지는지 명시.
+// ─────────────────────────────────────────────────
+function queryPreview(p, s) {
+  const cols = Array.isArray(s.custom_col) ? s.custom_col
+             : Array.isArray(p.custom_col) ? p.custom_col : [];
+  const table = s.table || `RAW_${s.name}_DATA`;
+  const conds = [];
+  for (const e of Object.values(p.params_template || {})) {
+    if (!e || !e.column) continue;
+    const op = (e.op || 'eq').toLowerCase();
+    let right;
+    if (Array.isArray(e.value)) {
+      right = `(${e.value.map(v => `'${String(v).replace(/'/g, "''")}'`).join(', ')})`;
+    } else if (typeof e.value === 'number') {
+      right = String(e.value);
+    } else {
+      right = `'${String(e.value ?? '').replace(/'/g, "''")}'`;
+    }
+    const opSql = { eq: '=', ne: '<>', lt: '<', le: '<=', gt: '>', ge: '>=',
+                    like: 'LIKE', in: 'IN' }[op] || '=';
+    conds.push(`${e.column} ${opSql} ${right}`);
+  }
+  conds.push(`time >= '{dateFrom}'`);
+  conds.push(`time < '{dateTo}'`);
+  const shardNote = (s.shard_hierarchy || []).length
+    ? `\n-- shard: ${(s.shard_hierarchy || []).join(' → ')} (planner 가 chunk 단위로 자동 주입)`
+    : '';
+  const whereBody = conds.map((c, i) => (i === 0 ? `  ${c}` : `  AND ${c}`)).join('\n');
+  const sql = [
+    `SELECT ${cols.length ? cols.join(', ') : '*'}`,
+    `FROM ${table}`,
+    `WHERE`,
+    whereBody,
+  ].join('\n') + shardNote;
+
+  return el('details', { class: 'query-preview', open: '' },
+    el('summary', {}, '🔎 이 소스의 최종 쿼리 미리보기'),
+    el('pre', { class: 'query-sql' }, sql),
   );
 }
 
@@ -766,7 +911,9 @@ function customColsEditor(p, s, rerender) {
   return el('div', { class: 'custom-cols' }, label, chips);
 }
 
-function paramsEditor(p, rerender) {
+function paramsEditor(p, rerender, opts = {}) {
+  // opts.skipColumns: 이 column 으로 표현된 슬롯은 제외 (process_id/line_id 는 1급 필드에서 편집).
+  const skipCols = new Set((opts.skipColumns || []).map(c => c.toLowerCase()));
   p.params_template = p.params_template || {};
   const tbl = el('table', { class: 'tbl params-tbl' },
     el('thead', {}, el('tr', {},
@@ -787,7 +934,10 @@ function paramsEditor(p, rerender) {
     }
     const colOptions = [...allCols];
 
-    const slots = Object.keys(p.params_template);
+    const slots = Object.keys(p.params_template).filter(slot => {
+      const col = (p.params_template[slot]?.column || '').toLowerCase();
+      return !skipCols.has(col);
+    });
     slots.forEach((slot) => {
       const entry = p.params_template[slot] || {};
       const hasCurrent = !entry.column || colOptions.includes(entry.column);
