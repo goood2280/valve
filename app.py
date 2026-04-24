@@ -48,6 +48,15 @@ FRONTEND_DIR = ROOT / "frontend"
 PROBE_CACHE = CONFIG_DIR / "probe_cache.json"
 
 # ─── load config ───
+_STARTUP_ALERTS: list[dict] = []
+
+
+def _boot_alert(evt: dict):
+    """startup 중에는 이벤트루프 전이라 바로 ops.dispatch 호출이 불가 → 버퍼링."""
+    _STARTUP_ALERTS.append(evt)
+
+
+# 1차: 로컬 settings/products 를 일단 읽음 (S3 부트스트랩에 필요)
 SETTINGS = json.loads((CONFIG_DIR / "settings.json").read_text(encoding="utf-8"))
 PRODUCTS = yaml.safe_load((CONFIG_DIR / "products.yaml").read_text(encoding="utf-8")) or {"products": []}
 
@@ -91,6 +100,35 @@ if _fl and not Path(_fl).is_absolute():
 # ─── init components ───
 api = LakeAPI(SETTINGS)
 s3 = S3Uploader(SETTINGS)
+
+# ─── S3 config sync (기동 직후) ───────────────────────────────
+# settings/products/source_types 를 S3 에서 pull. 실패 시 last_good fallback + 알람.
+from backend.core.config_sync import ConfigSync  # noqa: E402
+_cfg_sync = ConfigSync(
+    s3_uploader=s3, root=CONFIG_DIR,
+    s3_prefix=(SETTINGS.get("alerts", {}).get("config_prefix") or "valve-config"),
+    alert_cb=_boot_alert,
+)
+_sync_result = {
+    "settings": _cfg_sync.sync("settings.json", parser=json.loads, kind="json"),
+    "products": _cfg_sync.sync("products.yaml", parser=yaml.safe_load, kind="yaml"),
+    "source_types": _cfg_sync.sync("source_types.yaml", parser=yaml.safe_load, kind="yaml"),
+}
+# 동기화로 파일이 바뀌었으면 메모리 재로드
+if _sync_result["settings"]["changed"]:
+    SETTINGS = json.loads((CONFIG_DIR / "settings.json").read_text(encoding="utf-8"))
+    # fake_local_path 절대화 재적용
+    _fl2 = (SETTINGS.get("s3") or {}).get("fake_local_path") or ""
+    if _fl2 and not Path(_fl2).is_absolute():
+        SETTINGS["s3"]["fake_local_path"] = str((ROOT / _fl2).resolve())
+    api.reload(SETTINGS); s3.reload(SETTINGS)
+if _sync_result["products"]["changed"]:
+    PRODUCTS.clear()
+    PRODUCTS.update(yaml.safe_load((CONFIG_DIR / "products.yaml").read_text(encoding="utf-8")) or {"products": []})
+    if _migrate_params_template(PRODUCTS):
+        (CONFIG_DIR / "products.yaml").write_text(
+            yaml.safe_dump(PRODUCTS, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
 state = StateStore(LOGS_DIR / "jobs.jsonl")
 planner = Planner(api, SETTINGS, PROBE_CACHE)
 executor = ChunkExecutor(api, planner, s3, state, SETTINGS, STAGING_DIR)
@@ -113,7 +151,7 @@ schedule_router.deps(PRODUCTS, SETTINGS, ROOT)
 browser_router.deps(STAGING_DIR, S3_LOCAL_DIR)
 query_router.deps(STAGING_DIR, S3_LOCAL_DIR)
 probe_preview_router.deps(planner, PRODUCTS)
-ops_router.deps(state, SETTINGS)
+ops_router.deps(state, SETTINGS, s3)
 SETTINGS["_root"] = str(ROOT)  # agent 가 products.yaml 경로 역추적할 때 사용
 agent_router.deps(state, SETTINGS, PRODUCTS, planner, executor, LOGS_DIR / "agent_audit.jsonl")
 
@@ -125,6 +163,19 @@ app.include_router(query_router.router)
 app.include_router(probe_preview_router.router)
 app.include_router(ops_router.router)
 app.include_router(agent_router.router)
+
+
+@app.on_event("startup")
+async def _on_startup():
+    """기동 중 버퍼된 config_sync 알람을 실제 3-채널로 발송."""
+    buffered = list(_STARTUP_ALERTS)
+    _STARTUP_ALERTS.clear()
+    for evt in buffered:
+        try:
+            await ops_router.dispatch_alert(evt)
+        except Exception:
+            pass
+    await ops_router.flush_pending_alerts()
 
 
 @app.get("/api/health")

@@ -1321,6 +1321,12 @@ async function renderSettings() {
       ['probe.adaptive_correction', 'bool'],
       ['probe.fallback_on_timeout', 'bool'],
     ]},
+    { key: 'alerts', label: '🔔 알림', rows: [
+      ['alerts.webhook_url', 'text', null, '일반 webhook URL. 실패/이상 시 JSON POST. 비워두면 비활성.'],
+      ['alerts.flow_notify_url', 'text', null, 'flow 앱 알림 엔드포인트 (예: http://flow/api/valve/alert). Valve↔flow 연동용.'],
+      ['alerts.s3_prefix', 'text', null, '알람 JSON 을 S3 에 누적할 prefix. 기본 valve-alerts'],
+      ['alerts.config_prefix', 'text', null, 'S3 에서 settings/products/source_types 를 pull 해올 prefix. 기본 valve-config'],
+    ]},
     { key: 'types', label: '🧩 소스 타입', custom: renderSourceTypesManager },
   ];
 

@@ -22,14 +22,18 @@ router = APIRouter(tags=["ops"])
 
 _state = None
 _settings = None
+_s3 = None                               # S3 알람 업로드용
 _last_webhook_by_chunk: dict[str, float] = {}
 _webhook_cooldown_sec = 60
+_recent_alerts: list[dict] = []          # UI 가 최근 알람 조회 가능하도록 in-memory
+_MAX_RECENT = 200
 
 
-def deps(state, settings):
-    global _state, _settings
+def deps(state, settings, s3=None):
+    global _state, _settings, _s3
     _state = state
     _settings = settings
+    _s3 = s3
 
 
 def _metrics_snapshot() -> dict:
@@ -150,3 +154,105 @@ async def emit_failure_webhook(evt: dict):
         return
     _last_webhook_by_chunk[key] = now
     await _post_webhook(url, {"kind": "valve.failure", "ts": now, **evt})
+
+
+# ─────────────────────────────────────────────────
+# 통합 알람 — 3채널(S3 · flow · generic webhook) 병렬 dispatch.
+# config fallback · chunk 실패 · probe 실패 등 모든 "이상" 이벤트를 여기로.
+# ─────────────────────────────────────────────────
+def _alert_s3_prefix() -> str:
+    if not _settings:
+        return ""
+    return ((_settings.get("alerts") or {}).get("s3_prefix") or "valve-alerts").strip("/")
+
+
+def _flow_notify_url() -> str:
+    if not _settings:
+        return ""
+    return ((_settings.get("alerts") or {}).get("flow_notify_url") or "").strip()
+
+
+def record_alert(evt: dict):
+    """메모리 버퍼에 최근 알람 기록. async 호출 없이 sync 로 바로 저장 — UI 조회용.
+    dispatch_alert 가 내부적으로 호출. 외부에서도 테스트/fallback 용도로 호출 가능."""
+    evt = dict(evt)
+    evt.setdefault("ts", time.time())
+    _recent_alerts.append(evt)
+    if len(_recent_alerts) > _MAX_RECENT:
+        del _recent_alerts[: len(_recent_alerts) - _MAX_RECENT]
+
+
+async def dispatch_alert(evt: dict):
+    """3-채널 fan-out. 각 채널 실패가 다른 채널을 막지 않음.
+    각 채널의 성공/실패는 alert 자체의 meta 에 반영(재귀 알람 없음)."""
+    import asyncio
+    evt = dict(evt)
+    evt.setdefault("ts", time.time())
+    evt.setdefault("source", "valve")
+    record_alert(evt)
+
+    # 1) S3 알람 업로드 (옵션)
+    results = {"s3": None, "flow": None, "webhook": None}
+    if _s3 is not None:
+        prefix = _alert_s3_prefix()
+        if prefix:
+            ts_key = time.strftime("%Y%m%dT%H%M%S", time.gmtime(evt["ts"]))
+            key = f"{prefix}/{ts_key}-{evt.get('kind','event')}.json"
+            try:
+                ok = await asyncio.to_thread(
+                    _s3.put_text, key, json.dumps(evt, ensure_ascii=False, default=str))
+                results["s3"] = {"ok": bool(ok), "key": key}
+            except Exception as e:
+                results["s3"] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    # 2) flow 앱 알람 엔드포인트 (옵션)
+    flow_url = _flow_notify_url()
+    if flow_url:
+        ok, msg = await _post_webhook(flow_url, evt)
+        results["flow"] = {"ok": ok, "message": msg}
+
+    # 3) 일반 webhook (옵션) — 기존 경로 재사용
+    web_url = _webhook_url()
+    if web_url and web_url != flow_url:
+        ok, msg = await _post_webhook(web_url, evt)
+        results["webhook"] = {"ok": ok, "message": msg}
+
+    evt["dispatch"] = results
+    return evt
+
+
+def emit_alert_sync(evt: dict):
+    """sync 컨텍스트(기동 시퀀스 등)에서 알람 발행.
+    이미 돌고 있는 이벤트루프가 있으면 create_task, 없으면 나중 발행 큐에 저장."""
+    import asyncio
+    record_alert(evt)
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is not None and loop.is_running():
+        loop.create_task(dispatch_alert(evt))
+        return
+    # 기동 단계 — 나중에 dispatch 되도록 보류 큐에
+    _pending_alerts.append(evt)
+
+
+_pending_alerts: list[dict] = []
+
+
+async def flush_pending_alerts():
+    """앱 startup 끝난 뒤 FastAPI startup event 에서 호출 — 기동 중 발생한 알람 발행."""
+    import asyncio
+    while _pending_alerts:
+        evt = _pending_alerts.pop(0)
+        try:
+            await dispatch_alert(evt)
+        except Exception:
+            pass
+
+
+@router.get("/api/alerts/recent")
+def alerts_recent(limit: int = 50):
+    """UI·에이전트가 최근 알람 조회."""
+    limit = max(1, min(int(limit or 50), _MAX_RECENT))
+    return {"items": list(reversed(_recent_alerts))[:limit], "count": len(_recent_alerts)}

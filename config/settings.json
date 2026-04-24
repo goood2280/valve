@@ -33,5 +33,11 @@
     "cache_days": 7,
     "adaptive_correction": true,
     "fallback_on_timeout": true
+  },
+  "alerts": {
+    "webhook_url": "",
+    "flow_notify_url": "",
+    "s3_prefix": "valve-alerts",
+    "config_prefix": "valve-config"
   }
 }

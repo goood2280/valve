@@ -92,11 +92,15 @@ class ChunkExecutor:
                     error=str(e)[:500],
                     duration_sec=round(time.time() - t_start, 2),
                 ))
-                # best-effort webhook — import 위에 두지 않는 이유: 테스트/단독 실행 시 ops 미로드 허용
+                # best-effort 통합 알람 (S3 + flow + webhook 병렬 dispatch)
                 try:
                     from backend.routers import ops as _ops
                     import asyncio as _asyncio
-                    _asyncio.create_task(_ops.emit_failure_webhook({
+                    _asyncio.create_task(_ops.dispatch_alert({
+                        "source": "valve.executor",
+                        "kind": "chunk_" + status,
+                        "severity": "error" if status == "failed" else "warn",
+                        "title": f"{chunk.product}/{chunk.source}/{chunk.date} chunk {status}",
                         "chunk_id": chunk.chunk_id,
                         "product": chunk.product, "source": chunk.source, "date": chunk.date,
                         "status": status, "error_type": type(e).__name__, "error": str(e)[:300],

@@ -105,5 +105,46 @@ class S3Uploader:
         except Exception:
             return []
 
+    def get_text(self, key: str) -> str | None:
+        """설정 파일 등 작은 텍스트를 읽어옴. 없거나 실패 시 None (raise 하지 않음).
+        config_sync 가 robustness 를 위해 예외 대신 None 을 기대."""
+        full = self._full_key(key)
+        if self._is_fake():
+            path = Path(self.fake_local).resolve() / self.bucket / full
+            if not path.exists():
+                return None
+            try:
+                return path.read_text(encoding="utf-8")
+            except Exception:
+                return None
+        if self._s3_client is None:
+            return None
+        try:
+            resp = self._s3_client.get_object(Bucket=self.bucket, Key=full)
+            return resp["Body"].read().decode("utf-8", errors="replace")
+        except Exception:
+            return None
+
+    def put_text(self, key: str, text: str) -> bool:
+        """알람/결과 JSON 등 작은 텍스트 업로드. 성공 True."""
+        full = self._full_key(key)
+        data = text.encode("utf-8")
+        if self._is_fake():
+            path = Path(self.fake_local).resolve() / self.bucket / full
+            path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                path.write_bytes(data)
+                return True
+            except Exception:
+                return False
+        if self._s3_client is None:
+            return False
+        try:
+            self._s3_client.put_object(Bucket=self.bucket, Key=full, Body=data,
+                                        ContentType="application/json")
+            return True
+        except Exception:
+            return False
+
     def reload(self, settings: dict):
         self.__init__(settings)
