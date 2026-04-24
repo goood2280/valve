@@ -51,6 +51,37 @@ PROBE_CACHE = CONFIG_DIR / "probe_cache.json"
 SETTINGS = json.loads((CONFIG_DIR / "settings.json").read_text(encoding="utf-8"))
 PRODUCTS = yaml.safe_load((CONFIG_DIR / "products.yaml").read_text(encoding="utf-8")) or {"products": []}
 
+
+def _migrate_params_template(products: dict) -> bool:
+    """구 포맷 {slot: {column, op, value}} → 신 포맷 {column: {op, value}}.
+    slot 명과 실제 컬럼명이 혼동되는 버그를 근본 해결. 변경 발생하면 True.
+    """
+    changed = False
+    for p in products.get("products", []):
+        tpl = p.get("params_template")
+        if not isinstance(tpl, dict):
+            continue
+        new_tpl = {}
+        for key, entry in tpl.items():
+            if not isinstance(entry, dict):
+                continue
+            if "column" in entry:
+                # old format: slot 을 무시하고 column 을 키로 승격
+                col = entry.get("column") or key
+                new_tpl[col] = {k: v for k, v in entry.items() if k != "column"}
+                changed = True
+            else:
+                new_tpl[key] = entry
+        p["params_template"] = new_tpl
+    return changed
+
+
+if _migrate_params_template(PRODUCTS):
+    (CONFIG_DIR / "products.yaml").write_text(
+        yaml.safe_dump(PRODUCTS, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
 # CWD 이슈 fix: fake_local_path 가 상대경로면 Valve ROOT 기준으로 절대화
 _fl = (SETTINGS.get("s3") or {}).get("fake_local_path") or ""
 if _fl and not Path(_fl).is_absolute():

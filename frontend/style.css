@@ -654,6 +654,123 @@ main {
   word-break: break-word;
   overflow-x: auto;
 }
+
+/* ─── Products 좌·우 스플릿 ─── */
+.products-split {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  gap: 14px;
+  align-items: start;
+}
+.products-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  position: sticky;
+  top: 8px;
+}
+.list-title {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 2px 4px 6px;
+}
+.prod-item {
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s;
+}
+.prod-item:hover { background: var(--bg-hover); }
+.prod-item.active {
+  border-color: var(--brand-orange);
+  background: rgba(255,94,0,0.06);
+}
+.prod-item.disabled { opacity: 0.5; }
+.prod-item-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 3px;
+}
+.prod-item-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--brand-orange);
+  font-family: 'JetBrains Mono',monospace;
+}
+.prod-item-sub {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-family: 'JetBrains Mono',monospace;
+  margin-bottom: 4px;
+}
+.prod-item-sources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+.prod-item-srcchip {
+  font-size: 9px;
+  font-family: 'JetBrains Mono',monospace;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+}
+.prod-item.active .prod-item-srcchip {
+  background: rgba(255,94,0,0.12);
+  color: var(--brand-orange);
+  border-color: rgba(255,94,0,0.3);
+}
+.product-detail {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+}
+
+/* ─── 소스 탭 바 (제품 상세 안) ─── */
+.source-tabs {
+  display: flex;
+  gap: 4px;
+  margin: 8px 0;
+  flex-wrap: wrap;
+}
+.source-tab {
+  padding: 5px 12px;
+  border-radius: var(--radius) var(--radius) 0 0;
+  border: 1px solid var(--border);
+  border-bottom: 2px solid transparent;
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  font-family: 'JetBrains Mono',monospace;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.source-tab:hover { color: var(--text-primary); background: var(--bg-card); }
+.source-tab.active {
+  background: var(--bg-card);
+  color: var(--brand-orange);
+  border-bottom: 2px solid var(--brand-orange);
+}
+.source-tab.add {
+  border-style: dashed;
+  color: var(--brand-orange);
+  padding: 5px 10px;
+}
+
+@media (max-width: 900px) {
+  .products-split { grid-template-columns: 1fr; }
+  .products-list { position: static; }
+}
 .logs-tbl tr:hover { background: rgba(0,0,0,0.02); }
 .logs-reason {
   font-family: 'JetBrains Mono',monospace;

@@ -14,7 +14,7 @@ _settings: dict = None
 _api = None
 _s3 = None
 
-MASKED_KEYS = {"secret_key", "access_key"}
+MASKED_KEYS = {"secret_key", "access_key", "api_key"}
 
 
 def deps(root: Path, settings: dict, api, s3):
@@ -27,10 +27,11 @@ def deps(root: Path, settings: dict, api, s3):
 
 def _mask(cfg: dict) -> dict:
     out = deepcopy(cfg)
-    s3_cfg = out.get("s3", {})
-    for k in MASKED_KEYS:
-        if s3_cfg.get(k):
-            s3_cfg[k] = "****"
+    for section in ("s3", "lake_api"):
+        cfg_sec = out.get(section, {})
+        for k in MASKED_KEYS:
+            if cfg_sec.get(k):
+                cfg_sec[k] = "****"
     return out
 
 
@@ -76,7 +77,8 @@ def get_schema():
         "lake_api": {
             "mode": ["mock", "real"],
             "module": "str (예: mycorp.datalake:query)",
-            "user": "str",
+            "user": "str (사내 query 함수 호출 시 user 파라미터)",
+            "api_key": "str (write-only, 사내 API 인증 키가 있는 경우)",
             "timeout_sec": "int (<300)",
             "min_interval_sec": "float",
             "max_concurrent": "int (1~5 권장)",

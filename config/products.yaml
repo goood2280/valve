@@ -19,8 +19,7 @@ products:
     - item_id
     target_chunk_rows: 300000
   params_template:
-    cata:
-      column: product_code
+    product_code:
       op: eq
       value: PRODA
   custom_col:
@@ -29,7 +28,6 @@ products:
   - time
   - item_id
   - value
-  backfill_days_override: 600
 - product: PRODB
   enabled: true
   priority: 20
@@ -44,8 +42,7 @@ products:
     - root_lot_id
     target_chunk_rows: 200000
   params_template:
-    cata:
-      column: product_code
+    product_code:
       op: eq
       value: PRODB
   custom_col:

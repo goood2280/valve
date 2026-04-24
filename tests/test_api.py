@@ -36,7 +36,7 @@ def test_products_round_trip(app_client, sample_products):
             {"product": "PRODC", "enabled": True, "priority": 30,
              "sources": [{"name": "FAB", "table": "RAW_FAB_DATA",
                           "shard_hierarchy": [], "target_chunk_rows": 500_000}],
-             "params_template": {"cata": {"column": "product_code", "op": "eq", "value": "PRODC"}},
+             "params_template": {"product_code": {"op": "eq", "value": "PRODC"}},
              "custom_col": ["lot_id", "wafer_id"]}
         ]
     }

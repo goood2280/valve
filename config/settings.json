@@ -3,6 +3,7 @@
     "mode": "mock",
     "module": "valve.mock:query",
     "user": "pipe-runner",
+    "api_key": "",
     "timeout_sec": 290,
     "min_interval_sec": 1,
     "max_concurrent": 3,

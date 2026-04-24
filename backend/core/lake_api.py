@@ -81,10 +81,11 @@ class _MockQueryEngine:
             "RAW_ET_DATA": 40000,
         }.get(table, 5000)
 
-        # shard filter 가 걸리면 row 축소
+        # shard filter 가 걸리면 row 축소 — IN 연산자 걸린 모든 컬럼을 shard 로 간주
         shard_factor = 1.0
-        for slot in ("catb", "catc", "catd", "cate"):
-            sv = params.get(slot)
+        for key, sv in params.items():
+            if key in ("table", "dateFrom", "dateTo"):
+                continue
             if isinstance(sv, dict) and sv.get("op") == "in":
                 n = len(sv.get("value") or [])
                 if n:
@@ -138,6 +139,7 @@ class LakeAPI:
         self.settings = settings
         lk = settings["lake_api"]
         self.user = lk["user"]
+        self.api_key = lk.get("api_key") or ""
         self.timeout_sec = int(lk["timeout_sec"])
         self.min_interval = float(lk["min_interval_sec"])
         self.retry_attempts = int(lk["retry"]["attempts"])
@@ -154,13 +156,15 @@ class LakeAPI:
         self._rate_lock = asyncio.Lock()
 
     async def query(self, params: dict, custom_col: list) -> pl.DataFrame:
-        """결과는 항상 polars.DataFrame. pandas 반환한 real 어댑터도 내부에서 변환."""
+        """결과는 항상 polars.DataFrame. pandas 반환한 real 어댑터도 내부에서 변환.
+        사내 query 시그니처: query(params, custom_col, user, api_key=None).
+        api_key 를 받지 않는 old-style 함수를 위해 TypeError 발생 시 3-인자로 폴백."""
         last_err: Exception | None = None
         for attempt in range(self.retry_attempts):
             try:
                 await self._wait_min_interval()
                 df = await asyncio.wait_for(
-                    asyncio.to_thread(self._fn, params, custom_col, self.user),
+                    asyncio.to_thread(self._invoke, params, custom_col),
                     timeout=self.timeout_sec,
                 )
                 return self._to_polars(df)
@@ -178,6 +182,16 @@ class LakeAPI:
 
         assert last_err is not None
         raise last_err
+
+    def _invoke(self, params: dict, custom_col: list):
+        """실제 함수 호출 — api_key 가 있으면 kwarg 로 전달, 없으면 3-인자."""
+        if self.api_key:
+            try:
+                return self._fn(params, custom_col, self.user, api_key=self.api_key)
+            except TypeError:
+                # 어댑터가 api_key kwarg 를 안 받는 구버전
+                return self._fn(params, custom_col, self.user)
+        return self._fn(params, custom_col, self.user)
 
     @staticmethod
     def _to_polars(df) -> pl.DataFrame:

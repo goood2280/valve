@@ -73,7 +73,7 @@ def sample_products():
                      "shard_hierarchy": ["root_lot_id"], "target_chunk_rows": 200_000},
                 ],
                 "params_template": {
-                    "cata": {"column": "product_code", "op": "eq", "value": "PRODA"},
+                    "product_code": {"op": "eq", "value": "PRODA"},
                 },
                 "custom_col": ["lot_id", "wafer_id", "time", "value"],
             },
@@ -86,7 +86,7 @@ def sample_products():
                      "target_chunk_rows": 500_000, "probe_skip": True},
                 ],
                 "params_template": {
-                    "cata": {"column": "product_code", "op": "eq", "value": "PRODB"},
+                    "product_code": {"op": "eq", "value": "PRODB"},
                 },
                 "custom_col": ["lot_id", "wafer_id", "time"],
                 "backfill_days_override": 5,

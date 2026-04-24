@@ -464,8 +464,7 @@ function renderHint(st) {
   return el('div', { class: 'source-hint', style: { borderColor: accent, background: accent + '14' } },
     '💡 ', ...renderInlineHintText(st.hint));
 }
-const PARAM_OPS = ['eq', 'ne', 'in', 'lt', 'le', 'gt', 'ge', 'like'];
-const PARAM_SLOTS = ['cata','catb','catc','catd','cate','catf','catg','cath','cati','catj'];
+const PARAM_OPS = ['eq', 'ne', 'in', 'lt', 'le', 'gt', 'ge', 'like', 'notLike'];
 const _columnCache = {};
 
 async function getSourceColumns(product, source) {
@@ -507,52 +506,114 @@ async function renderProducts() {
     const usedNames = new Set(draft.products.map(p => p.product));
     let letter = 'A';
     while (usedNames.has(`PROD${letter}`)) letter = String.fromCharCode(letter.charCodeAt(0) + 1);
+    const newName = `PROD${letter}`;
     draft.products.push({
-      product: `PROD${letter}`,
+      product: newName,
       enabled: true,
       priority: 50,
-      sources: [{ name: 'FAB', table: 'RAW_FAB_DATA', shard_hierarchy: [], target_chunk_rows: 500000, custom_col: ['lot_id','wafer_id','time','value'] }],
-      params_template: { cata: { column: 'product_code', op: 'eq', value: `PROD${letter}` } },
+      sources: [{ name: 'FAB', table: 'RAW_FAB_DATA', shard_hierarchy: [], target_chunk_rows: 500000 }],
+      params_template: { product_code: { op: 'eq', value: newName } },
+      custom_col: ['lot_id', 'wafer_id', 'time', 'value'],
     });
+    STATE.productsSelected = newName;
     rerender();
   };
 
-  main.append(
-    el('div', { class: 'row' },
-      el('div', {},
-        el('div', { class: 'section-title' }, '제품 관리'),
-        el('div', { class: 'section-desc' }, '제품 · 소스 · 뽑을 컬럼 · 필터 편집. 저장 시 products.yaml 에 반영.'),
-      ),
-      el('div', { class: 'spacer' }),
-      el('button', { class: 'btn ghost', onclick: resetAll }, '↺ 되돌리기'),
-      el('button', { class: 'btn', onclick: addProduct }, '+ 제품 추가'),
-      el('button', { class: 'btn primary', onclick: saveAll }, '💾 저장'),
+  // 선택 상태 초기화
+  const prodList = draft.products || [];
+  if (prodList.length && !STATE.productsSelected) STATE.productsSelected = prodList[0].product;
+  const selected = prodList.find(p => p.product === STATE.productsSelected) || prodList[0];
+  if (selected && !STATE.productsSourceSelected) {
+    STATE.productsSourceSelected = (selected.sources || [])[0]?.name || '';
+  }
+
+  const headerBar = el('div', { class: 'row' },
+    el('div', {},
+      el('div', { class: 'section-title' }, '제품 관리'),
+      el('div', { class: 'section-desc' }, '제품 카드 클릭으로 선택 · 소스 탭으로 상세 drilldown · 저장 시 products.yaml 에 반영.'),
     ),
-    ...((draft.products || []).map((p, pi) => productCard(p, pi, draft, rerender))),
-    (!draft.products || !draft.products.length)
-      ? el('div', { class: 'alert info' }, '등록된 제품 없음. 우측 상단 "+ 제품 추가" 버튼으로 시작.')
-      : null,
+    el('div', { class: 'spacer' }),
+    el('button', { class: 'btn ghost', onclick: resetAll }, '↺ 되돌리기'),
+    el('button', { class: 'btn', onclick: addProduct }, '+ 제품 추가'),
+    el('button', { class: 'btn primary', onclick: saveAll }, '💾 저장'),
+  );
+
+  main.append(headerBar);
+
+  if (!prodList.length) {
+    main.append(el('div', { class: 'alert info' }, '등록된 제품 없음. 우측 상단 "+ 제품 추가" 버튼으로 시작.'));
+    return;
+  }
+
+  // 좌측 제품 목록 + 우측 상세
+  const split = el('div', { class: 'products-split' },
+    el('div', { class: 'products-list' },
+      el('div', { class: 'list-title' }, `제품 (${prodList.length})`),
+      ...prodList.map(p => productListItem(p, selected, rerender)),
+    ),
+    el('div', { class: 'product-detail' },
+      selected ? productDetailView(selected, draft, rerender) : el('div', { class: 'empty' }, '제품 선택'),
+    ),
+  );
+  main.append(split);
+}
+
+function productListItem(p, selected, rerender) {
+  const active = selected && selected.product === p.product;
+  const srcCount = (p.sources || []).length;
+  const disabled = p.enabled === false;
+  return el('div', {
+    class: 'prod-item' + (active ? ' active' : '') + (disabled ? ' disabled' : ''),
+    onclick: () => {
+      STATE.productsSelected = p.product;
+      STATE.productsSourceSelected = (p.sources || [])[0]?.name || '';
+      rerender();
+    },
+  },
+    el('div', { class: 'prod-item-top' },
+      el('span', { class: 'prod-item-name' }, p.product),
+      disabled
+        ? el('span', { class: 'pill pending' }, 'off')
+        : el('span', { class: 'pill brand' }, 'on'),
+    ),
+    el('div', { class: 'prod-item-sub' },
+      `p${p.priority ?? 50} · 소스 ${srcCount}`,
+    ),
+    el('div', { class: 'prod-item-sources' },
+      (p.sources || []).map(s => el('span', { class: 'prod-item-srcchip' }, s.name)).slice(0, 6),
+    ),
   );
 }
 
-function productCard(p, pi, draft, rerender) {
+function productDetailView(p, draft, rerender) {
+  const globalBf = STATE.settings?.schedule?.backfill_days ?? 3;
   const deleteProduct = () => {
     if (!confirm(`${p.product} 제품 삭제?`)) return;
-    draft.products.splice(pi, 1);
+    const idx = draft.products.findIndex(x => x.product === p.product);
+    if (idx >= 0) draft.products.splice(idx, 1);
+    STATE.productsSelected = (draft.products[0] || {}).product;
     rerender();
   };
   const addSource = () => {
     p.sources = p.sources || [];
     const existing = new Set(p.sources.map(s => (s.name || '').toUpperCase()));
     const next = SOURCE_NAMES.find(n => !existing.has(n)) || 'NEW';
-    p.sources.push({ name: next, table: `RAW_${next}_DATA`, shard_hierarchy: [], target_chunk_rows: 500000, custom_col: [] });
+    p.sources.push({ name: next, table: `RAW_${next}_DATA`, shard_hierarchy: [], target_chunk_rows: 500000 });
+    STATE.productsSourceSelected = next;
     rerender();
   };
 
-  const globalBf = STATE.settings?.schedule?.backfill_days ?? 3;
-  return el('div', { class: 'card product-card' },
+  const sources = p.sources || [];
+  const selectedSrc = sources.find(s => s.name === STATE.productsSourceSelected) || sources[0];
+
+  return el('div', {},
+    // 헤더 행
     el('div', { class: 'product-head' },
-      el('input', { type: 'text', class: 'prod-name', value: p.product || '', onchange: e => { p.product = e.target.value; } }),
+      el('input', { type: 'text', class: 'prod-name', value: p.product || '',
+        onchange: e => {
+          const old = p.product; p.product = e.target.value;
+          if (STATE.productsSelected === old) STATE.productsSelected = p.product;
+        } }),
       el('label', { class: 'check' },
         el('input', { type: 'checkbox', ...(p.enabled !== false ? { checked: 'checked' } : {}),
           onchange: e => { p.enabled = e.target.checked; rerender(); } }),
@@ -565,7 +626,7 @@ function productCard(p, pi, draft, rerender) {
       el('input', { type: 'number', class: 'inline-input narrow', min: '0', max: '3650',
         value: p.backfill_days_override ?? '',
         placeholder: String(globalBf),
-        title: `비우면 전역(${globalBf}) 사용. 신규 세팅 시 300·600 등 길게 주고, 초기 시딩 끝나면 다시 비우기.`,
+        title: `비우면 전역(${globalBf}) 사용. 신규 세팅 시 300·600 등 길게.`,
         onchange: e => {
           const v = e.target.value.trim();
           if (v === '' || Number(v) === globalBf) delete p.backfill_days_override;
@@ -575,31 +636,39 @@ function productCard(p, pi, draft, rerender) {
       el('div', { class: 'spacer' }),
       el('button', {
         class: 'btn small seed-btn',
-        title: '이 제품만 backfill 기간 전체(기본 설정된 일수)로 일괄 추출. 신규 제품 초기 세팅 시 한 번 실행.',
+        title: '이 제품만 backfill 기간 전체 일괄 추출.',
         onclick: async () => {
           const days = p.backfill_days_override || globalBf;
-          if (!confirm(`${p.product} 의 ${days}일치를 ${(p.sources || []).length}개 소스로 지금 일괄 추출합니다.\n시간이 오래 걸릴 수 있습니다. 계속?`)) return;
+          if (!confirm(`${p.product} 의 ${days}일치를 ${sources.length}개 소스로 지금 일괄 추출합니다.\n계속?`)) return;
           try {
             const r = await api.post('/api/jobs/enqueue-product', { product: p.product });
-            alert(`초기 시딩 시작 — ${r.launched} 개 chunk plan 투입 (${r.backfill_days}일 × ${r.source_count} 소스).\n진행 상황은 모니터 탭에서 확인.`);
+            alert(`초기 시딩 시작 — ${r.launched} 개 chunk plan 투입 (${r.backfill_days}일 × ${r.source_count} 소스).`);
           } catch (e) { alert(`실패: ${e.message}`); }
         }
       }, '🚀 초기 시딩'),
       el('button', { class: 'btn ghost small', onclick: deleteProduct }, '🗑 제품 삭제'),
     ),
 
-    // ─── ⚙ 제품 공통 기본: process_id / line_id 1급 필드 + product_code + 추가 필터
+    // 제품 공통 기본 (process_id/line_id/product_code)
     productKeyFieldsEditor(p, rerender),
 
-    // ─── ▤ 소스 × 추출 설정 + 최종 쿼리 미리보기
+    // 소스 탭 + 선택된 소스만 상세 표시
     el('div', { class: 'subsection-title', style: { marginTop: '14px' } },
       '▤ 추출 소스',
-      el('span', { class: 'hint' }, `${(p.sources || []).length}/${SOURCE_NAMES.length} · 각 소스마다 최종 쿼리 미리보기 제공`),
+      el('span', { class: 'hint' }, `${sources.length}/${SOURCE_NAMES.length} · 탭 클릭으로 소스 전환`),
     ),
-    ...((p.sources || []).map((s, si) => sourceCard(p, s, si, rerender))),
-    el('button', { class: 'btn ghost small', onclick: addSource, style: { marginTop: '6px' } }, '+ 소스 추가'),
+    el('div', { class: 'source-tabs' },
+      ...sources.map(s => el('button', {
+        class: 'source-tab' + (s === selectedSrc ? ' active' : ''),
+        onclick: () => { STATE.productsSourceSelected = s.name; rerender(); },
+      }, s.name)),
+      el('button', { class: 'source-tab add', onclick: addSource, title: '소스 추가' }, '+'),
+    ),
+    selectedSrc
+      ? sourceCard(p, selectedSrc, sources.indexOf(selectedSrc), rerender)
+      : el('div', { class: 'empty' }, '소스 없음'),
 
-    // ─── 📋 공통 컬럼 (접기) — 부수적이라 접어둠
+    // 공통 뽑을 컬럼 (접기)
     el('details', { class: 'subsection-collapsible' },
       el('summary', {},
         el('span', { class: 'subsection-title-inline' }, '📋 공통 뽑을 컬럼 (선택)'),
@@ -610,55 +679,37 @@ function productCard(p, pi, draft, rerender) {
   );
 }
 
+// productCard 는 더 이상 사용하지 않음 (productDetailView 로 대체). 호환성 보관.
+
 // ─────────────────────────────────────────────────
-// process_id, line_id 를 1급 필드로 승격.
-// params_template 에서 column === 'process_id' / 'line_id' 슬롯을 찾아 직접 편집.
-// 나머지 (product_code 등) 은 "추가 필터" 로 따로.
+// 신 포맷: params_template[column_name] = {op, value}. column 을 키로 직접 사용.
+// process_id / line_id / product_code 는 1급 필드로 승격.
 // ─────────────────────────────────────────────────
 function productKeyFieldsEditor(p, rerender) {
   p.params_template = p.params_template || {};
 
-  const findByColumn = (colName) => {
-    for (const slot of Object.keys(p.params_template)) {
-      const entry = p.params_template[slot] || {};
-      if ((entry.column || '').toLowerCase() === colName.toLowerCase()) return slot;
-    }
-    return null;
-  };
-
-  const getValue = (colName) => {
-    const slot = findByColumn(colName);
-    if (!slot) return '';
-    const entry = p.params_template[slot];
+  const getValue = (col) => {
+    const entry = p.params_template[col];
+    if (!entry) return '';
     return Array.isArray(entry.value) ? entry.value.join(', ') : String(entry.value ?? '');
   };
 
-  const setValue = (colName, rawValue, op = 'eq') => {
+  const setValue = (col, rawValue, op = 'eq') => {
     const trimmed = (rawValue || '').trim();
-    let slot = findByColumn(colName);
     if (!trimmed) {
-      if (slot) delete p.params_template[slot];
+      delete p.params_template[col];
       return;
     }
     const value = trimmed.includes(',')
       ? trimmed.split(',').map(x => x.trim()).filter(Boolean)
       : trimmed;
     const usedOp = Array.isArray(value) ? 'in' : op;
-    if (!slot) {
-      const used = new Set(Object.keys(p.params_template));
-      slot = PARAM_SLOTS.find(s => !used.has(s)) || 'cata';
-    }
-    p.params_template[slot] = { column: colName, op: usedOp, value };
+    p.params_template[col] = { op: usedOp, value };
   };
 
-  const pidSlot = findByColumn('process_id');
-  const lidSlot = findByColumn('line_id');
-  const productCodeSlot = findByColumn('product_code');
-
-  // 1급 필드 외의 추가 필터
-  const extraSlots = Object.keys(p.params_template).filter(
-    s => s !== pidSlot && s !== lidSlot && s !== productCodeSlot,
-  );
+  // 1급 필드 외의 추가 필터 (컬럼명 기준)
+  const keyFieldCols = new Set(['process_id', 'line_id', 'product_code']);
+  const extraCols = Object.keys(p.params_template).filter(col => !keyFieldCols.has(col));
 
   return el('div', { class: 'product-keyfields' },
     el('div', { class: 'subsection-title' },
@@ -703,10 +754,10 @@ function productKeyFieldsEditor(p, rerender) {
     ),
 
     // 추가 필터
-    el('details', { class: 'subsection-collapsible extra-filters', ...(extraSlots.length ? { open: '' } : {}) },
+    el('details', { class: 'subsection-collapsible extra-filters', ...(extraCols.length ? { open: '' } : {}) },
       el('summary', {},
         el('span', { class: 'subsection-title-inline' }, '⧗ 추가 필터'),
-        el('span', { class: 'hint' }, `${extraSlots.length}건 · 다른 컬럼에 대한 WHERE 조건`),
+        el('span', { class: 'hint' }, `${extraCols.length}건 · 다른 컬럼에 대한 WHERE 조건`),
       ),
       paramsEditor(p, rerender, { skipColumns: ['process_id', 'line_id', 'product_code'] }),
     ),
@@ -761,44 +812,79 @@ function sourceCard(p, s, si, rerender) {
 }
 
 // ─────────────────────────────────────────────────
-// 소스별 최종 쿼리 미리보기 — 제품 공통 기본 + 소스별 override 가 어떻게 합쳐지는지 명시.
+// 소스별 최종 호출 미리보기 — 실제 사내 DataLake 함수 호출 형태 (Python).
+// 백엔드 executor._build_params 가 조립하는 dict 를 그대로 시각화.
 // ─────────────────────────────────────────────────
 function queryPreview(p, s) {
   const cols = Array.isArray(s.custom_col) ? s.custom_col
              : Array.isArray(p.custom_col) ? p.custom_col : [];
   const table = s.table || `RAW_${s.name}_DATA`;
-  const conds = [];
-  for (const e of Object.values(p.params_template || {})) {
-    if (!e || !e.column) continue;
-    const op = (e.op || 'eq').toLowerCase();
-    let right;
-    if (Array.isArray(e.value)) {
-      right = `(${e.value.map(v => `'${String(v).replace(/'/g, "''")}'`).join(', ')})`;
-    } else if (typeof e.value === 'number') {
-      right = String(e.value);
-    } else {
-      right = `'${String(e.value ?? '').replace(/'/g, "''")}'`;
-    }
-    const opSql = { eq: '=', ne: '<>', lt: '<', le: '<=', gt: '>', ge: '>=',
-                    like: 'LIKE', in: 'IN' }[op] || '=';
-    conds.push(`${e.column} ${opSql} ${right}`);
+
+  // params_template — key 가 컬럼명, value 가 {op, value}. 빈 값은 제외.
+  const paramEntries = [];
+  for (const [col, e] of Object.entries(p.params_template || {})) {
+    if (!e || typeof e !== 'object') continue;
+    const isEmpty = e.value === '' || e.value == null
+                 || (Array.isArray(e.value) && e.value.length === 0);
+    if (isEmpty) continue;
+    paramEntries.push([col, e]);
   }
-  conds.push(`time >= '{dateFrom}'`);
-  conds.push(`time < '{dateTo}'`);
-  const shardNote = (s.shard_hierarchy || []).length
-    ? `\n-- shard: ${(s.shard_hierarchy || []).join(' → ')} (planner 가 chunk 단위로 자동 주입)`
-    : '';
-  const whereBody = conds.map((c, i) => (i === 0 ? `  ${c}` : `  AND ${c}`)).join('\n');
-  const sql = [
-    `SELECT ${cols.length ? cols.join(', ') : '*'}`,
-    `FROM ${table}`,
-    `WHERE`,
-    whereBody,
-  ].join('\n') + shardNote;
+
+  const pyVal = (v) => {
+    if (Array.isArray(v)) return '[' + v.map(pyVal).join(', ') + ']';
+    if (typeof v === 'number') return String(v);
+    if (typeof v === 'boolean') return v ? 'True' : 'False';
+    return `"${String(v ?? '').replace(/"/g, '\\"')}"`;
+  };
+  const pyDict = (entry) => {
+    const parts = [];
+    parts.push(`"op": "${entry.op || 'eq'}"`);
+    parts.push(`"value": ${pyVal(entry.value)}`);
+    return `{${parts.join(', ')}}`;
+  };
+
+  const paramLines = [
+    `    "table": "${table}",`,
+    `    "dateFrom": "{dateFrom}",          # YYYY-MM-DDT00:00:00`,
+    `    "dateTo":   "{dateTo}",            # 다음 날 00:00:00`,
+  ];
+  for (const [col, e] of paramEntries) {
+    paramLines.push(`    "${col}": ${pyDict(e)},`);
+  }
+
+  const shardKeys = s.shard_hierarchy || [];
+  if (shardKeys.length) {
+    paramLines.push(
+      `    # planner 가 chunk 마다 shard 를 해당 컬럼명에 직접 주입:`,
+      `    # "${shardKeys[0]}": {"op": "in", "value": ["R001", "R002", ...]}`,
+    );
+  }
+
+  const colsPy = cols.length
+    ? '[' + cols.map(c => `"${c}"`).join(', ') + ']'
+    : '[]';
+
+  const apiKeyLine = STATE.settings?.lake_api?.api_key
+    ? `    api_key="{settings.lake_api.api_key}",  # **** (저장됨)`
+    : `    # api_key=...  # Settings › Lake API 에서 등록 가능`;
+
+  const snippet = [
+    '# Valve 는 다음 호출로 DataLake 에서 데이터를 가져와 staging parquet 으로 저장.',
+    '# (settings.lake_api.module 에서 로드한 query 함수; mock 모드면 내부 mock engine)',
+    '',
+    'df: pandas.DataFrame = query(',
+    '    params={',
+    ...paramLines,
+    '    },',
+    `    custom_col=${colsPy},`,
+    `    user="{settings.lake_api.user}",`,
+    apiKeyLine,
+    ')',
+  ].join('\n');
 
   return el('details', { class: 'query-preview', open: '' },
-    el('summary', {}, '🔎 이 소스의 최종 쿼리 미리보기'),
-    el('pre', { class: 'query-sql' }, sql),
+    el('summary', {}, '🔎 이 소스의 최종 호출 (Python)'),
+    el('pre', { class: 'query-sql' }, snippet),
   );
 }
 
@@ -912,13 +998,14 @@ function customColsEditor(p, s, rerender) {
 }
 
 function paramsEditor(p, rerender, opts = {}) {
-  // opts.skipColumns: 이 column 으로 표현된 슬롯은 제외 (process_id/line_id 는 1급 필드에서 편집).
+  // 신 포맷: params_template[column_name] = {op, value}. 키=컬럼명 (사내 API 규약).
+  // opts.skipColumns: 이 컬럼명은 제외 (1급 필드에서 편집).
   const skipCols = new Set((opts.skipColumns || []).map(c => c.toLowerCase()));
   p.params_template = p.params_template || {};
   const tbl = el('table', { class: 'tbl params-tbl' },
     el('thead', {}, el('tr', {},
-      el('th', { style: { width: '30%' } }, 'Column'),
-      el('th', { style: { width: '90px' } }, 'Op'),
+      el('th', { style: { width: '30%' } }, 'Column (key)'),
+      el('th', { style: { width: '100px' } }, 'Op'),
       el('th', {}, 'Value'),
       el('th', { style: { width: '40px' } }, ''),
     )),
@@ -934,39 +1021,45 @@ function paramsEditor(p, rerender, opts = {}) {
     }
     const colOptions = [...allCols];
 
-    const slots = Object.keys(p.params_template).filter(slot => {
-      const col = (p.params_template[slot]?.column || '').toLowerCase();
-      return !skipCols.has(col);
-    });
-    slots.forEach((slot) => {
-      const entry = p.params_template[slot] || {};
-      const hasCurrent = !entry.column || colOptions.includes(entry.column);
+    const cols = Object.keys(p.params_template).filter(c => !skipCols.has(c.toLowerCase()));
+    cols.forEach((col) => {
+      const entry = p.params_template[col] || {};
+      const hasCurrent = colOptions.includes(col);
+
+      // 컬럼명 변경: 기존 키 지우고 새 키로 이동
       const colSel = el('select', { class: 'inline-input', onchange: e => {
-        entry.column = e.target.value; p.params_template[slot] = entry;
+        const newCol = e.target.value;
+        if (!newCol || newCol === col) return;
+        p.params_template[newCol] = entry;
+        delete p.params_template[col];
+        rerender();
       }},
-        el('option', { value: '' }, '(컬럼 선택)'),
-        ...(!hasCurrent ? [el('option', { value: entry.column, selected: 'selected' }, `${entry.column} (미등록)`)] : []),
-        ...colOptions.map(c => el('option', { value: c, ...(c === entry.column ? { selected: 'selected' } : {}) }, c)),
+        el('option', { value: col }, col + (hasCurrent ? '' : ' (custom)')),
+        ...colOptions.filter(c => c !== col).map(c => el('option', { value: c }, c)),
       );
       const opSel = el('select', { class: 'inline-input', onchange: e => {
-        entry.op = e.target.value; p.params_template[slot] = entry;
+        entry.op = e.target.value;
+        // in/notLike 로 바뀌면 value 형태 자동 조정은 사용자가 값 재입력하게 둠
         rerender();
       }},
         ...PARAM_OPS.map(o => el('option', { value: o, ...(o === entry.op ? { selected: 'selected' } : {}) }, o)),
       );
       const valStr = Array.isArray(entry.value) ? entry.value.join(', ') : String(entry.value ?? '');
+      const placeholder = entry.op === 'in' ? '쉼표 구분 (예: L1, L2)'
+                       : (entry.op === 'like' || entry.op === 'notLike') ? "예: %AA% (SQL LIKE 패턴)"
+                       : '';
       const valInp = el('input', { type: 'text', class: 'inline-input', value: valStr,
-        placeholder: entry.op === 'in' ? '쉼표 구분 (예: L1, L2)' : '',
+        placeholder,
         onchange: e => {
           const raw = e.target.value;
           entry.value = entry.op === 'in'
             ? raw.split(',').map(x => x.trim()).filter(Boolean)
             : raw;
-          p.params_template[slot] = entry;
+          p.params_template[col] = entry;
         }});
       const delBtn = el('button', { class: 'btn ghost small', onclick: () => {
-        delete p.params_template[slot]; rerender();
-      }, title: `${slot} 제거` }, '🗑');
+        delete p.params_template[col]; rerender();
+      }, title: `${col} 제거` }, '🗑');
       tbody.append(el('tr', {},
         el('td', {}, colSel),
         el('td', {}, opSel),
@@ -974,17 +1067,18 @@ function paramsEditor(p, rerender, opts = {}) {
         el('td', {}, delBtn),
       ));
     });
-    if (!slots.length) {
+    if (!cols.length) {
       tbody.append(el('tr', {}, el('td', { colspan: '4', class: 'hint', style: { textAlign: 'center', padding: '12px' } },
         '필터 없음 — 아래 버튼으로 추가')));
     }
   })();
 
   const addRow = () => {
+    // 아직 사용하지 않은 컬럼 중 첫 번째, 없으면 'cata' 로 시작
     const used = new Set(Object.keys(p.params_template));
-    const slot = PARAM_SLOTS.find(s => !used.has(s));
-    if (!slot) { alert(`필터 최대 ${PARAM_SLOTS.length} 개 초과`); return; }
-    p.params_template[slot] = { column: '', op: 'eq', value: '' };
+    const candidates = ['cata', 'catb', 'catc', 'catd', 'new_col'];
+    const seed = candidates.find(c => !used.has(c)) || `col_${Object.keys(p.params_template).length}`;
+    p.params_template[seed] = { op: 'eq', value: '' };
     rerender();
   };
 
@@ -1181,7 +1275,8 @@ async function renderSettings() {
     { key: 'lake', label: '🔌 사내 Lake API', rows: [
       ['lake_api.mode',          'select', ['mock','real']],
       ['lake_api.module',        'text',   null,   'mycorp.datalake:query 형태 (real 모드에서만 의미)'],
-      ['lake_api.user',          'text'],
+      ['lake_api.user',          'text',   null,   '사내 query 함수 호출 시 user 파라미터로 전달'],
+      ['lake_api.api_key',       'password', null, '사내 API 인증 키 (있는 경우). 저장 후 ****, 빈 값은 보존'],
       ['lake_api.timeout_sec',   'number', null,   '5분(300) 이하 권장. 기본 290'],
       ['lake_api.min_interval_sec', 'number'],
       ['lake_api.max_concurrent','number', null,   '동시 chunk 실행 수. 기본 3'],

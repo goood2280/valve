@@ -117,6 +117,7 @@ class ChunkExecutor:
         return base
 
     def _build_params(self, chunk: Chunk, prod_cfg: dict, source_cfg: dict) -> dict:
+        """사내 API 포맷: {<column_name>: {"op": ..., "value": ...}, "table": ..., "dateFrom": ..., "dateTo": ...}."""
         t0 = datetime.fromisoformat(f"{chunk.date}T00:00:00")
         t1 = t0 + timedelta(days=1)
         params = dict(prod_cfg.get("params_template", {}))
@@ -124,17 +125,9 @@ class ChunkExecutor:
         params["dateFrom"] = t0.isoformat()
         params["dateTo"] = t1.isoformat()
 
-        # shard filter → cat 슬롯에 채우기
-        used_slots = {k for k in params if k.startswith("cat")}
-        slot_pool = [f"cat{l}" for l in "bcdefghij"]
-        free_slots = [s for s in slot_pool if s not in used_slots]
-
+        # shard filter → 해당 컬럼명을 키로 그대로 IN 필터 주입 (기존 값 override)
         for col, vals in (chunk.shard_filters or {}).items():
-            if not free_slots:
-                break
-            slot = free_slots.pop(0)
-            params[slot] = {"column": col, "op": "in", "value": list(vals)}
-
+            params[col] = {"op": "in", "value": list(vals)}
         return params
 
     # ─── staging ───
