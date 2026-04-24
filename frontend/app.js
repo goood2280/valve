@@ -658,11 +658,27 @@ function productDetailView(p, draft, rerender) {
       el('span', { class: 'hint' }, `${sources.length}/${SOURCE_NAMES.length} · 탭 클릭으로 소스 전환`),
     ),
     el('div', { class: 'source-tabs' },
-      ...sources.map(s => el('button', {
+      ...sources.map(s => el('span', {
         class: 'source-tab' + (s === selectedSrc ? ' active' : ''),
         onclick: () => { STATE.productsSourceSelected = s.name; rerender(); },
-      }, s.name)),
-      el('button', { class: 'source-tab add', onclick: addSource, title: '소스 추가' }, '+'),
+      },
+        s.name,
+        el('span', {
+          class: 'source-tab-x',
+          title: `${s.name} 소스 삭제`,
+          onclick: (e) => {
+            e.stopPropagation();
+            if (!confirm(`${s.name} 소스를 삭제하시겠습니까?`)) return;
+            const idx = sources.indexOf(s);
+            sources.splice(idx, 1);
+            if (STATE.productsSourceSelected === s.name) {
+              STATE.productsSourceSelected = sources[0]?.name || '';
+            }
+            rerender();
+          },
+        }, '✕'),
+      )),
+      el('button', { class: 'source-tab add', onclick: addSource, title: '새 소스 추가' }, '+'),
     ),
     selectedSrc
       ? sourceCard(p, selectedSrc, sources.indexOf(selectedSrc), rerender)

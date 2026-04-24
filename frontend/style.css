@@ -766,6 +766,30 @@ main {
   color: var(--brand-orange);
   padding: 5px 10px;
 }
+.source-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.source-tab-x {
+  display: inline-flex;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0.6;
+  transition: all 0.15s;
+}
+.source-tab:hover .source-tab-x { opacity: 1; }
+.source-tab-x:hover {
+  background: rgba(239,68,68,0.2);
+  color: #ef4444;
+  opacity: 1;
+}
 
 @media (max-width: 900px) {
   .products-split { grid-template-columns: 1fr; }
