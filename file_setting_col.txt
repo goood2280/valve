@@ -1,0 +1,6 @@
+vm_matching.csv = step_desc,item_id
+Vehicle_matching.csv = product,step_id,step_desc
+mask_info.csv = reticle_id,category
+ppid_knob.csv = feature_name,rule_order,step_desc,operator,value,category,use
+Inline_matching.csv = step_id,item_id,item_desc
+fab.csv = step_desc,feature_name,agg
