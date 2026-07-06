@@ -265,3 +265,91 @@ for date_folder in DATE_FOLDERS:
     event.write_parquet(
         save_dir / "part-000.parquet")
 
+
+# evnet Inline
+
+from pathlib import Path
+import pandas as pd
+import sys
+import yaml
+from datetime import datetime, timedelta
+import polars as pl
+
+def load_config(name: str, path="config.yaml"):
+    with open(path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+
+    if name not in cfg:
+        raise ValueError(f"{name} not found in config")
+
+    return cfg[name]
+
+vehicle_name = sys.argv[1]  
+config = load_config(vehicle_name, f"config.yaml")
+globals().update(config)
+
+RAW_DIR = Path(rf'D:\DB\1.RAWDATA_DB_INLINE\{vehicle}') #DB/1.RAWDATA_DB/{vehicle}
+EVENT_DIR = Path(rf'D:\DB\2.EVENT_DB_INLINE\{vehicle}') #DB/2.EVENT_DB/{vehicle}
+STEP_MAP_PATH = Path("INLINE/Inline_matching.csv")
+
+# step 매핑 테이블
+step_map = pl.read_csv(STEP_MAP_PATH)
+step_map = step_map.with_columns([
+    pl.col("step_id").cast(pl.Utf8),
+    pl.col("item_id").cast(pl.Utf8),
+    pl.col("item_desc").cast(pl.Utf8),
+])
+
+# EVENT에 남길 컬럼
+KEEP_COLS = [
+    "root_lot_id",
+    "wafer_id",
+    "item_desc",
+    "part_id",
+    "tkout_time",
+    "step_id",
+    "item_id",
+    "subitem_id",
+    "fab_value"
+]
+
+# 🔹 날짜 리스트
+today = datetime.today().date()
+DATE_FOLDERS = [(today - timedelta(days=i)).strftime("date=%Y-%m-%d")
+                for i in range(event_days_back)]
+
+# 🔹 처리 루프
+for date_folder in DATE_FOLDERS:
+
+    folder = RAW_DIR / date_folder
+    if not folder.exists():
+        continue
+
+    print(f"▶ Processing {folder}")
+
+    # 🔴 폴더 내 모든 parquet lazy 로딩
+    raw = pl.scan_parquet(str(folder / "*.parquet"))
+
+    # 타입 맞추기 (lazy 상태에서 해야 의미 있음)
+    raw = raw.with_columns([
+        pl.col("step_id").cast(pl.Utf8),
+        pl.col("item_id").cast(pl.Utf8),
+        pl.col("root_lot_id").cast(pl.Utf8),
+    ])
+
+    # 🔴 복합키 join (step_id + item_id)
+    event = (
+        raw
+        .join(step_map.lazy(), on=["step_id", "item_id"], how="inner")
+        .filter(pl.col("root_lot_id").str.starts_with(event_lot_startwith))
+        .select(KEEP_COLS)
+        .with_columns(pl.all().cast(pl.String))
+        .collect(streaming=True)   # ← 핵심 (메모리 절약)
+    )
+
+    # 저장
+    save_dir = EVENT_DIR / date_folder
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    event.write_parquet(save_dir / "part-000.parquet")
+
