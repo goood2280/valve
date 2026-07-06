@@ -865,3 +865,133 @@ build_fab_qtime_files_fast(
     exclude_ppid=EXCLUDE_PPID,
 )
 
+
+#mask feature
+import sys
+import yaml
+import polars as pl
+import pandas as pd
+from pathlib import Path
+from functools import lru_cache
+
+def load_config(name: str, path="config.yaml"):
+    with open(path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+
+    if name not in cfg:
+        raise ValueError(f"{name} not found in config")
+
+    return cfg[name]
+
+vehicle_name = sys.argv[1]  
+config = load_config(vehicle_name, f"config.yaml")
+globals().update(config)
+
+# ==============================================
+# 설정
+# ==============================================
+EVENT_ROOT = Path(rf'D:\DB\2.EVENT_DB\{vehicle}')
+KEY_COLS = ["root_lot_id", "wafer_id"]
+FEATURE_STORE = Path(rf'D:\DB\3.FEATURE_STORE\{vehicle}') 
+FEATURE_STORE.mkdir(parents=True, exist_ok=True)
+MASK_PATH = f"MASK/mask_info.csv"
+# ==============================================
+# 1️⃣ EVENT 데이터 로드 (Lazy로 전체 스캔)
+# ==============================================
+event_files = list(EVENT_ROOT.glob("**/*.parquet"))
+
+if not event_files:
+    raise ValueError("EVENT 파일이 없습니다.")
+
+print(f"{len(event_files)} event files found")
+
+event = pl.scan_parquet(event_files)
+
+# 필요한 컬럼만 선택 (메모리 절약)
+event = event.select([
+    "root_lot_id",
+    "wafer_id",
+    "step_desc",
+    "reticle_id",
+    "tkout_time"
+]).filter(
+    (pl.col("reticle_id").is_not_null()) &
+    (pl.col("reticle_id") != "")
+)
+
+# STEP별 마지막 PPID
+event_last = (
+    event
+    .sort("tkout_time")
+    .group_by(KEY_COLS + ["step_desc"])
+    .last()
+    .collect()
+)
+
+# step_desc 이름 자체를 컬럼 이름으로 사용
+wafer_matrix = event_last.pivot(
+    values="reticle_id",
+    index=KEY_COLS,
+    columns="step_desc"
+)
+
+# 컬럼 이름에 _PPID 붙이기
+rename_map = {
+    c: f"{c}" for c in wafer_matrix.columns if c not in KEY_COLS
+}
+wafer_matrix = wafer_matrix.rename(rename_map)
+
+wafer_matrix = wafer_matrix.with_columns(
+    pl.lit(vehicle_name).alias("PRODUCT")
+)
+
+out_csv = "wafer_reticleid_matrix.csv"
+# wafer_matrix 전체 저장
+wafer_matrix.head(50).write_csv(out_csv)
+
+wafer = wafer_matrix
+
+mask_info = pl.read_csv(MASK_PATH).select(["reticle_id", "category"])
+
+key_cols = ["root_lot_id", "wafer_id"]
+value_cols = [c for c in wafer.columns if c not in key_cols]
+
+# wide → long
+long_df = wafer.unpivot(
+    index=key_cols,
+    on=value_cols,
+    variable_name="step",
+    value_name="reticle_id"
+)
+
+# reticle → category 매칭
+long_df = (
+    long_df
+    .join(mask_info, on="reticle_id", how="left")
+    .drop_nulls("category")
+)
+
+# feature 이름 생성
+long_df = long_df.with_columns(
+    (pl.lit("MASK_") + pl.col("step")).alias("feature")
+)
+
+# out_dir = Path(f"DB/3.FEATURE_STORE/{vehicle_name}")
+# out_dir.mkdir(exist_ok=True)
+
+groups = long_df.partition_by("feature", as_dict=True)
+
+for feature, df in groups.items():
+
+    feature = feature[0] if isinstance(feature, tuple) else feature  # ⭐ 핵심 수정
+
+    out = (
+        df.select(key_cols + ["category"])
+        .rename({"category": feature})
+    )
+
+    if out.height == 0:
+        continue
+
+    out.write_parquet(FEATURE_STORE / f"{feature}.parquet")
+    # out.write_csv(out_dir / f"{feature}.csv")
