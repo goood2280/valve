@@ -332,3 +332,380 @@ for idx, r in enumerate(rules.iter_rows(named=True), start=1):
 
         if has_any_value:
             feat_df.write_parquet(FEATURE_STORE / file_name)
+
+#Feature VM
+import polars as pl
+from pathlib import Path
+import sys
+import yaml
+import re
+
+def safe_name(s: str) -> str:
+    if s is None:
+        return "UNKNOWN"
+
+    # 줄바꿈 제거
+    s = s.replace("\n", "").replace("\r", "")
+
+    # 공백 정리
+    s = s.strip()
+
+    # 파일시스템 위험 문자 치환
+    s = re.sub(r'[\\/:*?"<>|]', '_', s)
+
+    # 연속 _ 정리
+    s = re.sub(r'_+', '_', s)
+
+    return s
+    
+def load_config(name: str, path="config.yaml"):
+    with open(path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+
+    if name not in cfg:
+        raise ValueError(f"{name} not found in config")
+
+    return cfg[name]
+
+vehicle_name = sys.argv[1]  
+config = load_config(vehicle_name, f"config.yaml")
+globals().update(config)
+
+# ======================
+# 기본 설정
+# ======================
+
+EVENT_PATH = rf'D:\DB\2.EVENT_DB_VM\{vehicle}\**\*.parquet' #f"DB/2.EVENT_DB/{vehicle}/**/*.parquet"
+FEATURE_STORE = Path(rf'D:\DB\3.FEATURE_STORE\{vehicle}')
+
+# EVENT_PATH = f"DB/2.EVENT_DB_VM/{vehicle}/**/*.parquet"
+# FEATURE_STORE = Path(f"DB/3.FEATURE_STORE/{vehicle}")
+FEATURE_STORE.mkdir(exist_ok=True)
+VM_PATH = f"VM/vm_matching.csv"
+
+KEY_COLS = ["root_lot_id", "wafer_id"]
+
+# ======================
+# EVENT 로드 (Lazy 유지)
+# ======================
+
+event = (
+    pl.scan_parquet(EVENT_PATH)
+    .select([
+        "root_lot_id",
+        "wafer_id",
+        "step_desc",
+        "subitem_id",
+        "item_id",
+        "tkout_time",
+        "fab_value"
+    ])
+    .with_columns([
+        pl.col("step_desc").cast(pl.Utf8),
+        pl.col("item_id").cast(pl.Utf8),
+    ])
+)
+
+rules = (
+    pl.scan_csv(VM_PATH)
+    .select(["step_desc", "item_id"])
+    .with_columns([
+        pl.col("step_desc").cast(pl.Utf8),
+        pl.col("item_id").cast(pl.Utf8),
+    ])
+)
+
+# 매칭
+matched = event.join(
+    rules,
+    on=["step_desc", "item_id"],
+    how="inner"
+)
+
+# ★ 2️⃣ subitem_id 가 "VALUE" 인 행만 남기기  
+matched = matched.filter(pl.col("subitem_id") == "VALUE")
+
+last_value = (
+    matched
+    .group_by(["root_lot_id", "wafer_id", "step_desc", "item_id"])
+    .agg([
+        pl.col("fab_value")
+          .sort_by("tkout_time")
+          .last()
+          .alias("feature_value")
+    ])
+    .filter(pl.col("feature_value").cast(pl.Float64) != 0)
+    .with_columns(
+        pl.concat_str(
+            [
+                pl.lit("VM_"),
+                pl.col("step_desc"),
+                pl.lit("_"),
+                pl.col("item_id"),
+            ]
+        ).alias("feature")
+    )
+    .select([
+        "root_lot_id",
+        "wafer_id",
+        "feature",
+        "feature_value"
+    ])
+)
+
+# ======================
+# 2️⃣ Lazy → 한 번만 실행
+# ======================
+
+df = last_value.collect(streaming=True)
+
+# ======================
+# 3️⃣ 저장 옵션
+# ======================
+
+SAVE_PARQUET = True
+SAVE_CSV = False  
+
+feature_groups = df.partition_by("feature", as_dict=True)
+total = len(feature_groups)
+
+# 아웃라이어 nan화 함수
+def remove_outliers_mad_polars(df: pl.DataFrame, col: str, n: float = 100, min_mad: float = 1e-9):
+
+    med = df.select(pl.col(col).median()).item()
+    mad = df.select((pl.col(col) - med).abs().median()).item()
+
+    if mad is None or mad < min_mad:
+        return df
+
+    lower = med - n * mad
+    upper = med + n * mad
+
+    return df.with_columns(
+        pl.when((pl.col(col) < lower) | (pl.col(col) > upper))
+        .then(None)
+        .otherwise(pl.col(col))
+        .alias(col)
+    )
+
+for idx, (feature_key, subdf) in enumerate(feature_groups.items(), start=1):
+
+    # tuple → 실제 feature 값
+    feature = feature_key[0] if isinstance(feature_key, tuple) else feature_key
+
+    percent = (idx / total) * 100
+    print(f"[{idx}/{total}] ({percent:6.2f}%) Saving: {feature}")
+
+    output_df = (
+        subdf
+        .select([
+            "root_lot_id",
+            "wafer_id",
+            pl.col("feature_value")
+            .cast(pl.Float64) 
+            .alias(feature)   # 🔥 컬럼명 변경
+        ])
+    )
+
+    output_df = remove_outliers_mad_polars(
+        output_df,
+        col=feature,
+        n=100
+    )
+
+    base_path = f"{FEATURE_STORE}/{feature}"
+
+    if SAVE_PARQUET:
+        output_df.write_parquet(base_path + ".parquet")
+
+    if SAVE_CSV:
+        output_df.write_csv(base_path + ".csv")
+
+# feature Inline
+import polars as pl
+from pathlib import Path
+import sys
+import yaml
+import re
+
+def safe_name(s: str) -> str:
+    if s is None:
+        return "UNKNOWN"
+
+    # 줄바꿈 제거
+    s = s.replace("\n", "").replace("\r", "")
+
+    # 공백 정리
+    s = s.strip()
+
+    # 파일시스템 위험 문자 치환
+    s = re.sub(r'[\\/:*?"<>|]', '_', s)
+
+    # 연속 _ 정리
+    s = re.sub(r'_+', '_', s)
+
+    return s
+    
+def load_config(name: str, path="config.yaml"):
+    with open(path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+
+    if name not in cfg:
+        raise ValueError(f"{name} not found in config")
+
+    return cfg[name]
+
+vehicle_name = sys.argv[1]  
+config = load_config(vehicle_name, f"config.yaml")
+globals().update(config)
+
+# ======================
+# 기본 설정
+# ======================
+
+EVENT_PATH = rf'D:\DB\2.EVENT_DB_VM\{vehicle}\**\*.parquet' #f"DB/2.EVENT_DB/{vehicle}/**/*.parquet"
+FEATURE_STORE = Path(rf'D:\DB\3.FEATURE_STORE\{vehicle}')
+
+# EVENT_PATH = f"DB/2.EVENT_DB_VM/{vehicle}/**/*.parquet"
+# FEATURE_STORE = Path(f"DB/3.FEATURE_STORE/{vehicle}")
+FEATURE_STORE.mkdir(exist_ok=True)
+VM_PATH = f"VM/vm_matching.csv"
+
+KEY_COLS = ["root_lot_id", "wafer_id"]
+
+# ======================
+# EVENT 로드 (Lazy 유지)
+# ======================
+
+event = (
+    pl.scan_parquet(EVENT_PATH)
+    .select([
+        "root_lot_id",
+        "wafer_id",
+        "step_desc",
+        "subitem_id",
+        "item_id",
+        "tkout_time",
+        "fab_value"
+    ])
+    .with_columns([
+        pl.col("step_desc").cast(pl.Utf8),
+        pl.col("item_id").cast(pl.Utf8),
+    ])
+)
+
+rules = (
+    pl.scan_csv(VM_PATH)
+    .select(["step_desc", "item_id"])
+    .with_columns([
+        pl.col("step_desc").cast(pl.Utf8),
+        pl.col("item_id").cast(pl.Utf8),
+    ])
+)
+
+# 매칭
+matched = event.join(
+    rules,
+    on=["step_desc", "item_id"],
+    how="inner"
+)
+
+# ★ 2️⃣ subitem_id 가 "VALUE" 인 행만 남기기  
+matched = matched.filter(pl.col("subitem_id") == "VALUE")
+
+last_value = (
+    matched
+    .group_by(["root_lot_id", "wafer_id", "step_desc", "item_id"])
+    .agg([
+        pl.col("fab_value")
+          .sort_by("tkout_time")
+          .last()
+          .alias("feature_value")
+    ])
+    .filter(pl.col("feature_value").cast(pl.Float64) != 0)
+    .with_columns(
+        pl.concat_str(
+            [
+                pl.lit("VM_"),
+                pl.col("step_desc"),
+                pl.lit("_"),
+                pl.col("item_id"),
+            ]
+        ).alias("feature")
+    )
+    .select([
+        "root_lot_id",
+        "wafer_id",
+        "feature",
+        "feature_value"
+    ])
+)
+
+# ======================
+# 2️⃣ Lazy → 한 번만 실행
+# ======================
+
+df = last_value.collect(streaming=True)
+
+# ======================
+# 3️⃣ 저장 옵션
+# ======================
+
+SAVE_PARQUET = True
+SAVE_CSV = False  
+
+feature_groups = df.partition_by("feature", as_dict=True)
+total = len(feature_groups)
+
+# 아웃라이어 nan화 함수
+def remove_outliers_mad_polars(df: pl.DataFrame, col: str, n: float = 100, min_mad: float = 1e-9):
+
+    med = df.select(pl.col(col).median()).item()
+    mad = df.select((pl.col(col) - med).abs().median()).item()
+
+    if mad is None or mad < min_mad:
+        return df
+
+    lower = med - n * mad
+    upper = med + n * mad
+
+    return df.with_columns(
+        pl.when((pl.col(col) < lower) | (pl.col(col) > upper))
+        .then(None)
+        .otherwise(pl.col(col))
+        .alias(col)
+    )
+
+for idx, (feature_key, subdf) in enumerate(feature_groups.items(), start=1):
+
+    # tuple → 실제 feature 값
+    feature = feature_key[0] if isinstance(feature_key, tuple) else feature_key
+
+    percent = (idx / total) * 100
+    print(f"[{idx}/{total}] ({percent:6.2f}%) Saving: {feature}")
+
+    output_df = (
+        subdf
+        .select([
+            "root_lot_id",
+            "wafer_id",
+            pl.col("feature_value")
+            .cast(pl.Float64) 
+            .alias(feature)   # 🔥 컬럼명 변경
+        ])
+    )
+
+    output_df = remove_outliers_mad_polars(
+        output_df,
+        col=feature,
+        n=100
+    )
+
+    base_path = f"{FEATURE_STORE}/{feature}"
+
+    if SAVE_PARQUET:
+        output_df.write_parquet(base_path + ".parquet")
+
+    if SAVE_CSV:
+        output_df.write_csv(base_path + ".csv")
+
