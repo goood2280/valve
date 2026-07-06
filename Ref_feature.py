@@ -709,3 +709,159 @@ for idx, (feature_key, subdf) in enumerate(feature_groups.items(), start=1):
     if SAVE_CSV:
         output_df.write_csv(base_path + ".csv")
 
+#feature qtime
+import polars as pl
+from pathlib import Path
+import sys
+import yaml
+import re
+
+def load_config(name: str, path="config.yaml"):
+    with open(path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+
+    if name not in cfg:
+        raise ValueError(f"{name} not found in config")
+
+    return cfg[name]
+
+vehicle_name = sys.argv[1]  
+config = load_config(vehicle_name, f"config.yaml")
+globals().update(config)
+
+# ======================
+# 기본 설정
+# ======================
+
+EVENT_PATH = rf'D:\DB\2.EVENT_DB_QTIME\{vehicle}\**\*.parquet' #f"DB/2.EVENT_DB/{vehicle}/**/*.parquet"
+FEATURE_STORE = Path(rf'D:\DB\3.FEATURE_STORE\{vehicle}')
+
+# EVENT_PATH = f"DB/2.EVENT_DB_QTIME/{vehicle}/**/*.parquet"
+# FEATURE_STORE = Path(f"DB/3.FEATURE_STORE/{vehicle}")
+FEATURE_STORE.mkdir(exist_ok=True)
+
+KEY_COLS = ["root_lot_id", "wafer_id"]
+STEP_COL = "step_desc"
+PPID_COL = "ppid"
+A_TIME_COL = "chamber_end_time" # A_TIME - B_TIME = QTIME으로 산출됨
+B_TIME_COL = "wafer_end_time"
+C_TIME_COL = "tkin_time" #해당시간이 최신인 WF 만 살림
+
+SAVE_CSV = False
+
+#옵션 해당 Step_desc에서 ppid BBB인 WF는 제하고 tkin_time이 최신인 데이터중에 계산
+EXCLUDE_STEP_DESC = "AAA"
+EXCLUDE_PPID = "BBBB"
+
+# ======================
+# EVENT 로드
+# ======================
+def safe_name(x: str) -> str:
+    x = str(x).strip()
+    x = re.sub(r"[^\w\-.]+", "_", x)
+    x = re.sub(r"_+", "_", x)
+    return x.strip("_")
+
+
+def build_fab_qtime_files_fast(
+    event_path: str,
+    feature_store: Path,
+    key_cols: list[str],
+    step_col: str = "step_desc",
+    ppid_col: str = "ppid",
+    a_time_col: str = "A_TIME",
+    b_time_col: str = "B_TIME",
+    c_time_col: str = "C_TIME",
+    save_csv: bool = False,
+    exclude_step_desc: str = "AAA",
+    exclude_ppid: str = "BBBB",
+):
+    lf = pl.scan_parquet(event_path)
+
+    schema = lf.collect_schema()
+
+    casts = []
+    if schema[a_time_col] == pl.String:
+        casts.append(pl.col(a_time_col).str.strptime(pl.Datetime, strict=False).alias(a_time_col))
+    if schema[b_time_col] == pl.String:
+        casts.append(pl.col(b_time_col).str.strptime(pl.Datetime, strict=False).alias(b_time_col))
+    if schema[c_time_col] == pl.String:
+        casts.append(pl.col(c_time_col).str.strptime(pl.Datetime, strict=False).alias(c_time_col))
+
+    # 1) 필요한 컬럼만
+    # 2) 제외 조건 적용
+    # 3) C_TIME 최신 row 1개 선택
+    # 4) 초 단위 절대값 QTIME 계산
+    latest_df = (
+        lf
+        .select(key_cols + [step_col, ppid_col, a_time_col, b_time_col, c_time_col])
+        .with_columns(casts)
+        .filter(
+            pl.col(step_col).is_not_null() &
+            pl.col(a_time_col).is_not_null() &
+            pl.col(b_time_col).is_not_null() &
+            pl.col(c_time_col).is_not_null()
+        )
+        .filter(
+            ~(
+                (pl.col(step_col) == exclude_step_desc) &
+                (pl.col(ppid_col) == exclude_ppid)
+            )
+        )
+        .sort(by=key_cols + [step_col, c_time_col])
+        .group_by(key_cols + [step_col], maintain_order=True)
+        .agg(
+            pl.col(a_time_col).last().alias(a_time_col),
+            pl.col(b_time_col).last().alias(b_time_col),
+        )
+        .with_columns(
+            (
+                (pl.col(a_time_col) - pl.col(b_time_col))
+                .dt.total_seconds()
+                .abs()
+            ).alias("QTIME")
+        )
+        .select(key_cols + [step_col, "QTIME"])
+        .collect()
+    )
+
+    print(f"[INFO] rows after latest selection: {latest_df.height:,}")
+
+    # collect 한 번만 하고, 메모리에서 step별 분할
+    parts = latest_df.partition_by(step_col, as_dict=True)
+
+    print(f"[INFO] total step_desc count: {len(parts):,}")
+
+    for step_key, df_step in parts.items():
+        step_value = step_key[0] if isinstance(step_key, tuple) else step_key
+        step_safe = safe_name(step_value)
+        qtime_col = f"FAB_{step_safe}_QTIME"
+
+        out_df = df_step.select(key_cols + [pl.col("QTIME").alias(qtime_col)])
+
+        parquet_file = feature_store / f"FAB_{step_safe}_QTIME.parquet"
+        out_df.write_parquet(parquet_file, compression="lz4")
+
+        if save_csv:
+            csv_file = feature_store / f"FAB_{step_safe}_QTIME.csv"
+            out_df.write_csv(csv_file)
+
+        print(f"[SAVE] {parquet_file}")
+        if save_csv:
+            print(f"[SAVE] {csv_file}")
+
+
+build_fab_qtime_files_fast(
+    event_path=EVENT_PATH,
+    feature_store=FEATURE_STORE,
+    key_cols=KEY_COLS,
+    step_col=STEP_COL,
+    ppid_col=PPID_COL,
+    a_time_col=A_TIME_COL,
+    b_time_col=B_TIME_COL,
+    c_time_col=C_TIME_COL,
+    save_csv=SAVE_CSV,
+    exclude_step_desc=EXCLUDE_STEP_DESC,
+    exclude_ppid=EXCLUDE_PPID,
+)
+
