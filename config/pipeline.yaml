@@ -10,6 +10,21 @@
 # ────────────────────────────────────────────
 db_root: db
 
+# 파이프라인 실행 자원/스케줄 — pipeline_runner 가 사용.
+#   raw_days/split_days : 기본 5일치를 1일씩 쪼개 (source×day) 유닛으로 병렬 쿼리
+#   max_workers 등 auto : 호스트 코어/메모리(runtime_env)로 자동 산정 (16코어/120GB 활용)
+#   interval_hours + schedule_enabled : 주기 자동 실행 (전 vehicle raw→event→feature)
+runtime:
+  raw_days: 5
+  split_days: 1
+  max_workers: auto        # auto | 정수
+  vehicle_workers: auto    # 동시 처리 vehicle 수
+  feature_workers: auto
+  mem_per_worker_gb: 4
+  cpu_cores: auto          # auto | 정수 (컨테이너 제한 시 지정)
+  interval_hours: 0        # 0 = 자동 스케줄 끔
+  schedule_enabled: false
+
 # 추출 소스 — FAB · INLINE · VM 3종. 소스별 테이블명/추출 컬럼을 여기서 조절.
 # columns 에서 빼면 raw parquet 에서도 빠짐 (event/feature 는 있는 컬럼만 사용).
 sources:

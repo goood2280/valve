@@ -19,18 +19,23 @@ from fastapi import APIRouter, Body, HTTPException
 from backend.core.alert_store import AlertStore
 from backend.core.csv_sync import CsvSync
 from backend.core.feature_pipeline import DEFAULT_SOURCES, FeaturePipeline
+from backend.core.pipeline_runner import PipelineRunner
+from backend.core.runtime_env import plan_dict
 
 router = APIRouter()
 
 _pipe: FeaturePipeline | None = None
 _alerts: AlertStore | None = None
+runner: PipelineRunner | None = None  # 병렬 실행/스케줄러 (app.py startup 에서 loop 제어)
 csv_sync: CsvSync | None = None  # app.py 가 startup 에서 background loop 를 제어
 
 
 def deps(root, settings, s3_uploader):
-    global _pipe, _alerts, csv_sync
+    global _pipe, _alerts, runner, csv_sync
     _pipe = FeaturePipeline(root, settings)
     _alerts = AlertStore(_pipe, s3_uploader, settings, root)
+    runner = PipelineRunner(_pipe)
+    runner.on_vehicle_done = lambda v, _r: _alerts.publish(v)  # 실행 후 알람 S3 발행
     csv_sync = CsvSync(root, s3_uploader)
     csv_sync.on_updated = _refresh_after_sync
 
@@ -63,6 +68,33 @@ def status():
     return {v: _p().status(v) for v in _p().vehicles()}
 
 
+@router.get("/api/pipeline/runtime")
+def runtime():
+    """호스트 자원으로 산정한 워커 계획 + runtime 설정. UI 표시/조정용."""
+    cfg = _p().global_cfg().get("runtime") or {}
+    return {"plan": plan_dict(cfg), "config": cfg, "scheduler_running": runner.schedule_enabled()}
+
+
+@router.put("/api/pipeline/runtime")
+def put_runtime(body: dict = Body(...)):
+    """runtime 설정 저장 (raw_days/split_days/max_workers/interval_hours/schedule_enabled 등)."""
+    cfg = _p().global_cfg()
+    rt = cfg.get("runtime") or {}
+    for k in ("raw_days", "split_days", "max_workers", "vehicle_workers", "feature_workers",
+              "mem_per_worker_gb", "cpu_cores", "interval_hours", "schedule_enabled"):
+        if k in body:
+            rt[k] = body[k]
+    cfg["runtime"] = rt
+    _p().save_global_cfg(cfg)
+    return {"ok": True, "config": rt, "plan": plan_dict(rt)}
+
+
+@router.post("/api/pipeline/run-all")
+def run_all_parallel():
+    """전 vehicle 병렬 raw→event→feature 1회 실행 (스케줄러와 동일 동작, 수동 트리거)."""
+    return runner.run_all()
+
+
 @router.get("/api/pipeline/config")
 def get_config():
     return _p().global_cfg()
@@ -84,6 +116,10 @@ def put_sources(body: dict = Body(...)):
             raise HTTPException(400, f"{name}: columns 가 비어있음")
         out[name] = {"table": str(src.get("table") or DEFAULT_SOURCES[name]["table"]).strip(),
                      "columns": cols}
+    # 확장 소스(ET 등, pipeline.yaml 에서 추가)는 UI 저장 시에도 보존
+    for name, src in (_p().global_cfg().get("sources") or {}).items():
+        if name not in DEFAULT_SOURCES:
+            out[name] = src
     _p().save_sources_cfg(out)
     return {"ok": True, "sources": out}
 

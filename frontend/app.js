@@ -308,6 +308,9 @@ async function loadDbHeatmap() {
     const buckets = dbhmBuckets(DBHM_PERIOD);
     const fmtTs = (ts) => ts ? new Date(ts * 1000).toLocaleString('ko-KR', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '-';
 
+    const rt = await api.get('/api/pipeline/runtime').catch(() => null);
+    const runtimeBar = rt ? renderRuntimeBar(rt) : null;
+
     // 기간 선택 세그먼트
     const picker = el('div', { class: 'dbhm-period' },
       ...DBHM_PERIODS.map((p) => el('button', {
@@ -361,6 +364,7 @@ async function loadDbHeatmap() {
     });
     body.innerHTML = '';
     body.append(
+      runtimeBar,
       picker,
       el('div', { class: 'hm-scroll' }, el('table', { class: 'heatmap' }, el('thead', {}, thead), tbody)),
       el('div', { class: 'row', style: { marginTop: '12px', gap: '14px', fontSize: '11px', color: 'var(--text-muted)', flexWrap: 'wrap' } },
@@ -379,6 +383,51 @@ async function onRunVehicle(v) {
   if (!confirm(`${v} 파이프라인 재실행? (raw → event → feature)`)) return;
   try { await api.post(`/api/pipeline/run/${encodeURIComponent(v)}`, {}); await loadDbHeatmap(); }
   catch (e) { alert(e.message); }
+}
+
+// 워커 계획 + 전체 병렬 실행 + 주기 스케줄러 토글
+function renderRuntimeBar(rt) {
+  const p = rt.plan || {}, c = rt.config || {};
+  const mem = p.total_mem_gb ? `${p.total_mem_gb}GB` : 'mem?';
+  const info = el('span', { class: 'rt-info', title: `산정근거: ${p.reason || '-'} · ${p.sizing}` },
+    `🖥 ${p.cpu_cores}코어 · ${mem} → raw 워커 ${p.raw_workers} · vehicle ${p.vehicle_workers} · feature ${p.feature_workers}`,
+    el('span', { class: 'hint', style: { marginLeft: '8px' } }, `(${c.raw_days || 5}일 · ${c.split_days || 1}일 분할)`));
+
+  const runBtn = el('button', { class: 'btn primary small', onclick: onRunAll }, '▶ 전체 병렬 실행');
+
+  const enabled = !!c.schedule_enabled;
+  const schedule = el('label', { class: 'rt-sched', title: '전 vehicle raw→event→feature 를 주기 실행' },
+    el('input', {
+      type: 'checkbox', ...(enabled ? { checked: 'checked' } : {}),
+      onchange: async (e) => {
+        try { await api.put('/api/pipeline/runtime', { schedule_enabled: e.target.checked }); await loadDbHeatmap(); }
+        catch (err) { alert(err.message); }
+      },
+    }),
+    '⏱ 자동 ',
+    el('input', {
+      type: 'number', class: 'rt-hours', min: '0', step: '1', value: String(c.interval_hours ?? 0),
+      title: 'interval_hours (0=끔)',
+      onchange: async (e) => {
+        try { await api.put('/api/pipeline/runtime', { interval_hours: Number(e.target.value) }); await loadDbHeatmap(); }
+        catch (err) { alert(err.message); }
+      },
+    }),
+    'h');
+
+  return el('div', { class: 'rt-bar' }, info, el('span', { class: 'spacer' }), schedule, runBtn);
+}
+
+async function onRunAll() {
+  if (!confirm('전 vehicle 을 병렬로 raw→event→feature 실행할까요?')) return;
+  const body = $('#dbhmBody');
+  if (body) body.innerHTML = '<div class="loading">전체 병렬 실행 중…</div>';
+  try {
+    const r = await api.post('/api/pipeline/run-all', {});
+    await loadDbHeatmap();
+    const n = Object.keys(r.vehicles || {}).length;
+    console.log(`run-all: ${n} vehicle · ${r.elapsed_sec}s · workers`, r.plan);
+  } catch (e) { alert(e.message); await loadDbHeatmap(); }
 }
 
 function legendItem(cls, text) {
@@ -1652,13 +1701,26 @@ function renderSqlGuide() {
   );
 }
 
+// S3 연동 신호등 — 색점(state) + 화살표(dir: ↓다운로드/↑업로드)
+function syncBadge(sync) {
+  if (!sync) return null;
+  const arrow = sync.dir === 'down' ? '↓' : sync.dir === 'up' ? '↑' : '';
+  const dirTxt = sync.dir === 'down' ? 'S3 다운로드' : sync.dir === 'up' ? 'S3 업로드' : 'S3';
+  return el('span', { class: `s3sig s3-${sync.state}`, title: `${dirTxt} · ${sync.state}\n${sync.detail || ''}` },
+    el('span', { class: 'dot' }),
+    arrow ? el('span', { class: 'arw' }, arrow) : null,
+  );
+}
+
 async function loadBrowserRoots() {
   try {
     const { roots } = await api.get('/api/browser/roots');
     const tree = $('#brTree');
     tree.innerHTML = '';
     for (const r of roots) {
+      const sig = r.dir ? { dir: r.dir, state: r.dir === 'down' ? 'ok' : 'ok', detail: r.detail } : null;
       tree.append(el('div', { class: 'tree-item', style: { fontWeight: 800 }, onclick: () => loadBrowserDir(r.name, '') },
+        syncBadge(sig),
         el('span', { class: 'ic' }, '▸'),
         r.name,
         el('span', { class: 'sz' }, r.path),
@@ -1690,6 +1752,7 @@ async function loadBrowserDir(root, path) {
         : (['.yaml', '.yml', '.json'].includes(e.suffix) ? '⚙️' : '📄')));
       const cls = BR.selFile === fullPath ? 'tree-item sel' : 'tree-item';
       tree.append(el('div', { class: cls, onclick: () => e.is_dir ? loadBrowserDir(root, fullPath) : selectFile(root, fullPath) },
+        syncBadge(e.sync),
         el('span', { class: 'ic' }, icon),
         e.name,
         el('span', { class: 'sz' }, e.is_dir ? '' : fmtBytes(e.size)),

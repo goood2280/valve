@@ -192,14 +192,20 @@ class FeaturePipeline:
         return df.filter(pl.col("vehicle") == vehicle)
 
     def sources_cfg(self) -> dict:
-        """FAB/INLINE/VM 소스별 {table, columns} — pipeline.yaml sources 로 조절 가능."""
+        """소스별 {table, columns}. 기본 3종(FAB/INLINE/VM) + pipeline.yaml sources 에
+        추가한 신규 소스(ET·QTIME 등)도 포함 → 코드 수정 없이 소스 확장."""
         cfg = self.global_cfg().get("sources") or {}
         out = {}
-        for name, dflt in DEFAULT_SOURCES.items():
+        names = list(DEFAULT_SOURCES) + [n for n in cfg if n not in DEFAULT_SOURCES]
+        for name in names:
+            dflt = DEFAULT_SOURCES.get(name, {})
             user = cfg.get(name) or {}
+            cols = user.get("columns") or dflt.get("columns")
+            if not cols:
+                continue  # 컬럼 정의 없는 소스는 skip
             out[name] = {
-                "table": user.get("table") or dflt["table"],
-                "columns": [str(c) for c in (user.get("columns") or dflt["columns"])],
+                "table": user.get("table") or dflt.get("table") or f"RAW_{name}_DATA",
+                "columns": [str(c) for c in cols],
             }
         return out
 
@@ -229,11 +235,26 @@ class FeaturePipeline:
         return self.db_root() / "2.EVENT_DB" / vehicle / source
 
     # ── event 매칭 입력 (소스별) — FAB/VM 은 vehicle_matching, INLINE 은 inline matching ──
-    def matching_file(self, source: str) -> Path | None:
+    def source_match(self, source: str) -> dict:
+        """소스별 event 매칭 규칙. kind: step | item | none.
+        신규 소스(ET 등)는 pipeline.yaml 에서 확장 —
+          sources: { ET: { match: { kind: item, rules: et, id_col: test_item } } }
+        기본값: INLINE=item(inline/item_id), 그 외=step(vehicle_matching)."""
+        user = ((self.global_cfg().get("sources") or {}).get(source) or {}).get("match")
+        if isinstance(user, dict) and user.get("kind"):
+            return {"kind": user["kind"], "rules": user.get("rules"), "id_col": user.get("id_col")}
         if source == "INLINE":
-            rel = (self.global_cfg().get("feature_rules") or {}).get("inline")
+            return {"kind": "item", "rules": "inline", "id_col": "item_id"}
+        return {"kind": "step", "rules": None, "id_col": None}
+
+    def matching_file(self, source: str) -> Path | None:
+        m = self.source_match(source)
+        if m["kind"] == "item" and m["rules"]:
+            rel = (self.global_cfg().get("feature_rules") or {}).get(m["rules"])
             return (self.root / rel) if rel else None
-        return self.root / self.global_cfg()["step_matching"]
+        if m["kind"] == "step":
+            return self.root / self.global_cfg()["step_matching"]
+        return None  # none — 추가 매칭 파일 없음 (root_lot prefix 만)
 
     def matching_sha(self, source: str) -> str | None:
         fp = self.matching_file(source)
@@ -250,25 +271,54 @@ class FeaturePipeline:
     # ─────────────────────────────────────────
     # 1) RAW QUERY  (mock: 결정적 합성 데이터)
     # ─────────────────────────────────────────
-    def run_raw_query(self, vehicle: str) -> dict:
-        cfg = self.vehicle_cfg(vehicle)
-        ranges = get_split_date_ranges(int(cfg["QueryTimeSpan"]), int(cfg["SplitTimeSpan"]))
+    def _date_ranges(self, cfg: dict):
+        """raw 조회 날짜 범위. runtime.raw_days/split_days 가 있으면 그 값으로
+        (기본 5일치를 1일씩), 없으면 vehicle 의 QueryTimeSpan/SplitTimeSpan."""
+        rt = self.global_cfg().get("runtime") or {}
+        days = int(rt.get("raw_days") or cfg["QueryTimeSpan"])
+        split = int(rt.get("split_days") or cfg["SplitTimeSpan"])
+        return get_split_date_ranges(days, split)
+
+    def _raw_units(self, cfg: dict) -> list[tuple]:
+        """(source, start, end, split_label) 병렬 실행 단위 목록.
+        DB(source) × 날짜(1일) 로 쪼갠다 → 스케줄러가 워커에 분배."""
         sources = self.sources_cfg()
-        gens = {"FAB": self._mock_fab, "INLINE": self._mock_inline, "VM": self._mock_vm}
+        units = []
+        for start, end in self._date_ranges(cfg):
+            split = f"{start}~{end}"
+            for source in sources:
+                units.append((source, start, end, split))
+        return units
+
+    # 소스별 mock 생성기 — 없는 소스(ET 등)는 _mock_generic 로 컬럼 기반 합성.
+    def _mock_for(self, source: str):
+        return {"FAB": self._mock_fab, "INLINE": self._mock_inline, "VM": self._mock_vm}.get(source)
+
+    def _run_raw_unit(self, cfg: dict, source: str, start, end, split: str) -> int:
+        """한 (source, 날짜) 파티션을 생성·저장. 반환 rows. 스레드에서 병렬 호출됨
+        (서로 다른 파티션 파일만 씀 → race 없음)."""
+        sc = self.sources_cfg()[source]
+        gen = self._mock_for(source)
+        df = gen(cfg, start, end, split) if gen else self._mock_generic(cfg, start, end, split, source, sc["columns"])
+        keep = [c for c in sc["columns"] if c in df.columns] + ["split"]
+        df = df.select(keep)
+        out = self.raw_dir(cfg["product"], source) / f"date={start}"
+        out.mkdir(parents=True, exist_ok=True)
+        df.write_parquet(out / "part-000.parquet", compression="zstd", compression_level=3)
+        return df.height
+
+    def run_raw_query(self, vehicle: str) -> dict:
+        """전 (source, 날짜) 유닛을 순차 실행 (병렬은 pipeline_runner 가 담당)."""
+        cfg = self.vehicle_cfg(vehicle)
+        sources = self.sources_cfg()
         stats = {"splits": [], "rows": {name: 0 for name in sources},
                  "tables": {name: sc["table"] for name, sc in sources.items()}}
-        for start, end in ranges:
-            split_label = f"{start}~{end}"
-            for source, sc in sources.items():
-                df = gens[source](cfg, start, end, split_label)
-                # 설정된 컬럼만 추출 (+ split 파티션 메타) — 실 DB 에선 이 목록이 쿼리 컬럼이 됨
-                keep = [c for c in sc["columns"] if c in df.columns] + ["split"]
-                df = df.select(keep)
-                out = self.raw_dir(cfg["product"], source) / f"date={start}"
-                out.mkdir(parents=True, exist_ok=True)
-                df.write_parquet(out / "part-000.parquet", compression="zstd", compression_level=3)
-                stats["rows"][source] += df.height
-            stats["splits"].append(split_label)
+        seen = set()
+        for source, start, end, split in self._raw_units(cfg):
+            stats["rows"][source] += self._run_raw_unit(cfg, source, start, end, split)
+            if split not in seen:
+                seen.add(split)
+                stats["splits"].append(split)
         return stats
 
     # mock 생성기 — seed(vehicle+split) 고정 → 재실행해도 동일 데이터
@@ -383,6 +433,36 @@ class FeaturePipeline:
                     })
         return pl.DataFrame(rows)
 
+    def _mock_generic(self, cfg: dict, start: date, end: date, split: str,
+                      source: str, columns: list[str]) -> pl.DataFrame:
+        """설정된 columns 만으로 합성 raw 생성 — 새 소스(ET·QTIME 등)를 코드 수정 없이 mock.
+        step_id/item_id/value/time 등 흔한 컬럼은 의미있게, 나머지는 난수 문자열."""
+        rng = self._rng(cfg, split, source)
+        matched = self.step_map(cfg["vehicle"]).select("step_id").to_series().to_list()
+        prefix = str(cfg.get("event_lot_startwith") or "R")
+        rows = []
+        for _ in range(8):
+            lot = f"{prefix}{rng.randint(0, 199):03d}"
+            for w in range(1, 5):
+                row = {"root_lot_id": lot, "wafer_id": str(w), "split": split}
+                for c in columns:
+                    if c in row:
+                        continue
+                    if c == "step_id":
+                        row[c] = rng.choice(matched) if matched else "CC000000"
+                    elif c in ("item_id", "sensor_id", "test_item", "pattern_id"):
+                        row[c] = f"{source}_{rng.randint(1, 3):02d}"
+                    elif c in ("value", "predicted_value", "actual_value", "residual"):
+                        row[c] = round(rng.gauss(100, 10), 4)
+                    elif "time" in c:
+                        row[c] = f"{start} 0{rng.randint(0, 9)}:00:00"
+                    elif c in ("eqp_id", "chamber_id", "unit_id"):
+                        row[c] = f"{c[:3].upper()}_{rng.randint(1, 4):02d}"
+                    else:
+                        row[c] = f"{c}_{rng.randint(0, 9)}"
+                rows.append(row)
+        return pl.DataFrame(rows)
+
     # ─────────────────────────────────────────
     # 2) EVENT — 3소스 모두 매칭 필터.
     #    FAB/VM: vehicle_matching 의 step_id · INLINE: inline matching 의 item_id.
@@ -393,8 +473,6 @@ class FeaturePipeline:
         cfg = self.vehicle_cfg(vehicle)
         prefix = str(cfg.get("event_lot_startwith") or "")
         step_ids = set(self.step_map(vehicle)["step_id"].to_list())
-        inline_rules = self.rules_csv("inline")
-        inline_items = set(inline_rules["item_id"].to_list()) if inline_rules is not None else set()
 
         # 구 레이아웃(vehicle 바로 아래 date=*) 잔재 제거
         legacy_root = self.db_root() / "2.EVENT_DB" / vehicle
@@ -403,6 +481,12 @@ class FeaturePipeline:
 
         results = {}
         for source in self.sources_cfg():
+            match = self.source_match(source)
+            item_ids = set()
+            if match["kind"] == "item" and match["rules"]:
+                r = self.rules_csv(match["rules"])
+                if r is not None and match["id_col"] in r.columns:
+                    item_ids = set(r[match["id_col"]].to_list())
             edir = self.event_dir(vehicle, source)
             sha = self.matching_sha(source)
             meta_path = edir / "_meta.json"
@@ -426,11 +510,12 @@ class FeaturePipeline:
                 raw = pl.read_parquet(raw_path)
                 rows_in += raw.height
                 event = raw.filter(pl.col("root_lot_id").cast(pl.Utf8).str.starts_with(prefix))
-                if source == "INLINE":
-                    event = event.filter(pl.col("item_id").is_in(sorted(inline_items)))
-                else:  # FAB · VM — step 매칭
+                if match["kind"] == "item" and match["id_col"] in event.columns:
+                    event = event.filter(pl.col(match["id_col"]).is_in(sorted(item_ids)))
+                elif match["kind"] == "step" and "step_id" in event.columns:
                     event = event.with_columns(pl.col("step_id").cast(pl.Utf8)) \
                                  .filter(pl.col("step_id").is_in(sorted(step_ids)))
+                # kind == "none" → root_lot prefix 필터만 적용
                 if source == "FAB":
                     keep = [c for c in EVENT_KEEP_COLS if c in event.columns]
                     event = event.select(keep).select(pl.all().cast(pl.String))

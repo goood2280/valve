@@ -153,14 +153,21 @@ app.add_middleware(
 jobs_router.deps(state, executor, planner, PRODUCTS, SETTINGS, LOGS_DIR / "jobs.jsonl")
 settings_router.deps(ROOT, SETTINGS, api, s3)
 schedule_router.deps(PRODUCTS, SETTINGS, ROOT)
-# config: csv 설정파일(vehicle_matching·feature_rules 등) 열람, db: 파이프라인 산출물(raw/event/feature)
-browser_router.deps(STAGING_DIR, S3_LOCAL_DIR,
-                    extra_roots={"config": CONFIG_DIR, "db": ROOT / "db"})
 probe_preview_router.deps(planner, PRODUCTS)
 ops_router.deps(state, SETTINGS, s3)
 SETTINGS["_root"] = str(ROOT)  # agent 가 products.yaml 경로 역추적할 때 사용
 agent_router.deps(state, SETTINGS, PRODUCTS, planner, executor, LOGS_DIR / "agent_audit.jsonl")
 pipeline_router.deps(ROOT, SETTINGS, s3)
+
+# browser: csv/설정파일(config) · 파이프라인 산출물(db) 탐색 + S3 연동 신호등.
+# csv_sync(다운로드 상태) · s3(연동 여부) · s3_queue(업로드 대기) 를 근거로 판정.
+from backend.core import s3_link  # noqa: E402
+
+browser_router.deps(
+    STAGING_DIR, S3_LOCAL_DIR,
+    extra_roots={"config": CONFIG_DIR, "db": ROOT / "db"},
+    annotator=s3_link.build_annotator(pipeline_router.csv_sync, s3, _s3queue),
+)
 
 app.include_router(jobs_router.router)
 app.include_router(settings_router.router)
@@ -197,12 +204,16 @@ async def _on_startup():
     # csv 설정파일 S3 주기 다운로드 (flow → Valve)
     if pipeline_router.csv_sync.load_config().get("enabled"):
         pipeline_router.csv_sync.start_background()
+    # 파이프라인 주기 스케줄러 (전 vehicle raw→event→feature) — 항상 루프 기동,
+    # 내부에서 runtime.schedule_enabled/interval_hours 를 폴링해 실제 실행 여부 결정.
+    pipeline_router.runner.start_background()
 
 
 @app.on_event("shutdown")
 async def _on_shutdown():
     _s3queue.stop_background()
     pipeline_router.csv_sync.stop_background()
+    pipeline_router.runner.stop_background()
 
 
 @app.get("/api/health")

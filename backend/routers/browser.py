@@ -5,19 +5,25 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
 
+from backend.core import s3_link
+
 router = APIRouter(prefix="/api/browser", tags=["browser"])
 
 _roots: dict[str, Path] = {}
+_annotate = None  # s3 연동 신호등 어노테이터 (app.py 가 주입)
 
 
-def deps(staging_root: Path, s3_local_root: Path | None, extra_roots: dict[str, Path] | None = None):
-    """extra_roots — 항상 노출할 추가 루트 (config: csv 설정파일, db: 파이프라인 산출물)."""
-    global _roots
+def deps(staging_root: Path, s3_local_root: Path | None, extra_roots: dict[str, Path] | None = None,
+         annotator=None):
+    """extra_roots — 항상 노출할 추가 루트 (config: csv 설정파일, db: 파이프라인 산출물).
+    annotator — s3_link.build_annotator(...) 결과 (파일별 다운로드/업로드 신호등)."""
+    global _roots, _annotate
     _roots = {"staging": Path(staging_root)}
     if s3_local_root:
         _roots["s3_local"] = Path(s3_local_root)
     for name, p in (extra_roots or {}).items():
         _roots[name] = Path(p)
+    _annotate = annotator
 
 
 def resolve(root: str, rel: str) -> Path:
@@ -36,7 +42,8 @@ def resolve(root: str, rel: str) -> Path:
 
 @router.get("/roots")
 def list_roots():
-    return {"roots": [{"name": n, "path": str(p)} for n, p in _roots.items()
+    return {"roots": [{"name": n, "path": str(p), **s3_link.root_role(n)}
+                      for n, p in _roots.items()
                       if n in ("staging", "config") or p.exists()]}
 
 
@@ -61,13 +68,28 @@ def list_dir(root: str = Query(...), path: str = Query("")):
             continue
         try:
             stat = p.stat()
+            rel = f"{path}/{p.name}" if path else p.name
             entries.append({
                 "name": p.name,
                 "is_dir": p.is_dir(),
                 "size": stat.st_size if not p.is_dir() else 0,
                 "mtime": stat.st_mtime,
                 "suffix": p.suffix,
+                "_rel": rel,
+                "_abs": str(p),
             })
         except Exception:
             continue
+
+    # s3 연동 신호등 부착 (다운로드↓/업로드↑ · ok/pending/error/idle)
+    if _annotate is not None:
+        try:
+            sync = _annotate(root, [(e["_rel"], e["is_dir"], e["_abs"]) for e in entries])
+            for e in entries:
+                e["sync"] = sync.get(e["_rel"])
+        except Exception:
+            pass
+    for e in entries:
+        e.pop("_rel", None)
+        e.pop("_abs", None)
     return {"entries": entries, "path": path, "root": root}

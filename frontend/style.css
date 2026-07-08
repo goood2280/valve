@@ -840,6 +840,19 @@ main {
 .dot.pending { background: var(--text-muted); }
 
 /* ─── heatmap ─── */
+/* DB heatmap 런타임 바 — 워커 계획 + 전체 실행 + 스케줄러 */
+.rt-bar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-bottom: 12px; padding: 8px 12px;
+  background: var(--bg-hover); border: 1px solid var(--border); border-radius: 8px;
+  font-size: 12px;
+}
+.rt-info { font-family: 'JetBrains Mono',monospace; color: var(--text-secondary); }
+.rt-sched { display: inline-flex; align-items: center; gap: 5px; color: var(--text-secondary); font-size: 11px; }
+.rt-sched .rt-hours { width: 48px; padding: 2px 4px; border: 1px solid var(--border); border-radius: 4px;
+  background: var(--bg-secondary); color: var(--text-primary); font-family: 'JetBrains Mono',monospace; }
+.btn.small { padding: 4px 10px; font-size: 11px; }
+
 /* DB heatmap 기간 선택 세그먼트 + 가로 스크롤 래퍼 */
 .dbhm-period { display: flex; gap: 4px; margin-bottom: 12px; }
 .dbhm-period .seg {
@@ -1123,6 +1136,19 @@ textarea { resize: vertical; min-height: 60px; font-family: 'JetBrains Mono',mon
 }
 .tree-item:hover { background: var(--bg-hover); }
 .tree-item.sel { background: var(--accent-glow); color: var(--accent-dim); font-weight: 600; }
+
+/* S3 연동 신호등 — 색점 + 방향 화살표 (↓다운로드 / ↑업로드) */
+.s3sig { display: inline-flex; align-items: center; gap: 1px; margin-right: 4px; flex: 0 0 auto; }
+.s3sig .dot { width: 8px; height: 8px; border-radius: 50%; background: #a3a3a3; box-shadow: 0 0 0 1px rgba(0,0,0,0.08); }
+.s3sig .arw { font-size: 10px; font-weight: 700; line-height: 1; color: var(--text-muted); }
+.s3-ok .dot      { background: #22c55e; }
+.s3-pending .dot { background: #f59e0b; }
+.s3-error .dot   { background: #ef4444; }
+.s3-idle .dot    { background: #cbd5e1; }
+.s3-cloud .dot   { background: #3b82f6; }
+.s3-ok .arw      { color: #16a34a; }
+.s3-pending .arw { color: #d97706; }
+.s3-error .arw   { color: #dc2626; }
 .tree-item .ic { font-size: 11px; opacity: 0.6; }
 .tree-item .sz { margin-left: auto; font-family: 'JetBrains Mono',monospace; color: var(--text-muted); font-size: 11px; }
 

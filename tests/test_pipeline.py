@@ -8,6 +8,8 @@ import yaml
 from backend.core.alert_store import AlertStore
 from backend.core.csv_sync import CsvSync
 from backend.core.feature_pipeline import FeaturePipeline
+from backend.core.pipeline_runner import PipelineRunner
+from backend.core.runtime_env import plan_workers
 from backend.core.s3_up import S3Uploader
 
 REPO = Path(__file__).parent.parent
@@ -218,6 +220,71 @@ def test_alert_store_ack_suppresses_realert(pipe, fake_s3):
     # 다시 active 로 되돌리면 재노출
     store.set_ack(target["id"], "active")
     assert store.list_alerts()["suppressed"] == 0
+
+
+def test_worker_plan_from_env_and_override():
+    # auto — 코어 기반, 최소 1 이상
+    auto = plan_workers({})
+    assert auto.raw_workers >= 1 and auto.vehicle_workers >= 1
+    assert auto.cpu_cores >= 1 and auto.sizing == "auto"
+    # cpu_cores/mem override 로 산정 상한 확인 (16코어/120GB 모사)
+    big = plan_workers({"cpu_cores": 16, "mem_per_worker_gb": 4})
+    assert big.raw_workers <= 14   # cores-2 상한
+    # 수동 max_workers override
+    manual = plan_workers({"max_workers": 3})
+    assert manual.raw_workers == 3 and manual.sizing == "config"
+
+
+def test_runtime_days_override_controls_split(pipe):
+    # runtime.raw_days=5, split_days=1 → 5일 + 오늘 = 6 파티션(1일 단위)
+    cfg = pipe.global_cfg()
+    cfg["runtime"] = {"raw_days": 5, "split_days": 1}
+    pipe.save_global_cfg(cfg)
+    units = pipe._raw_units(pipe.vehicle_cfg("VH_PRODA"))
+    # 소스 3종 × 6일 = 18 유닛, 날짜 6종
+    dates = {u[1] for u in units}
+    assert len(dates) == 6
+    assert len(units) == 6 * len(pipe.sources_cfg())
+
+
+def test_runner_parallel_run_all_matches_sequential(pipe):
+    runner = PipelineRunner(pipe)
+    plan = plan_workers({"max_workers": 4, "vehicle_workers": 2})
+    summary = runner.run_all(plan)
+    assert summary["ok"]
+    assert set(summary["vehicles"]) == {"VH_PRODA", "VH_PRODB"}
+    for v, r in summary["vehicles"].items():
+        assert r["raw_rows"]["FAB"] > 0
+        assert all(er > 0 for er in r["event"].values())     # 3소스 event 산출
+        assert sum(r["feature"].values()) > 0                # feature 산출
+        assert not r["errors"]
+
+
+def test_new_source_extends_via_config(pipe):
+    """ET 같은 신규 소스를 pipeline.yaml 확장만으로 raw+event 처리 (코드 수정 없이)."""
+    import polars as pl
+    cfg = pipe.global_cfg()
+    cfg["sources"]["ET"] = {
+        "table": "RAW_ET_DATA",
+        "columns": ["root_lot_id", "wafer_id", "test_item", "value", "time"],
+        "match": {"kind": "item", "rules": "et", "id_col": "test_item"},
+    }
+    cfg["feature_rules"]["et"] = "config/feature_rules/et.csv"
+    pipe.save_global_cfg(cfg)
+    (pipe.root / "config/feature_rules/et.csv").write_text(
+        "test_item,agg\nET_01,mean\nET_02,mean\n", encoding="utf-8")
+
+    pipe.run_raw_query("VH_PRODA")
+    # 신규 소스가 raw 로 생성됨 (SOURCE/product/date 구조)
+    et_raw = list(pipe.raw_dir("PRODA", "ET").glob("date=*/part-000.parquet"))
+    assert et_raw
+    cols = pl.read_parquet(et_raw[0]).columns
+    assert "test_item" in cols
+
+    r = pipe.run_event("VH_PRODA")
+    assert "ET" in r
+    ev = pipe._load_event("VH_PRODA", "ET")
+    assert ev is not None and set(ev["test_item"].unique()) <= {"ET_01", "ET_02"}
 
 
 def test_knob_feature_keeps_raw_ppid_for_miss(pipe):
