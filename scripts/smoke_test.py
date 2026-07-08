@@ -112,13 +112,13 @@ def main():
     check("GET /api/schedule/source-types 200", st == 200 and isinstance(d, dict))
     stypes = d.get("source_types") if isinstance(d, dict) else []
     check("source_types list non-empty", isinstance(stypes, list) and len(stypes) > 0)
-    # 기본 6종 모두 존재
+    # 기본 3종 모두 존재
     names = {(s.get("name") or "").upper() for s in (stypes or [])}
-    for n in ("FAB", "INLINE", "ET"):
+    for n in ("FAB", "INLINE", "VM"):
         check(f"source_type '{n}' present", n in names)
 
     # columns pool per source
-    for src in ("FAB", "INLINE", "ET", "QTIME", "EDS", "VM"):
+    for src in ("FAB", "INLINE", "VM"):
         st, d = _req("GET", f"/api/schedule/columns?source={src}")
         ok = st == 200 and isinstance(d, dict) and isinstance(d.get("columns"), list) and len(d["columns"]) > 0
         check(f"/columns source={src} non-empty", ok, f"n={len(d.get('columns',[])) if isinstance(d, dict) else '-'}")

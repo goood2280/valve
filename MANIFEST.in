@@ -1,0 +1,6 @@
+include VERSION.json
+include requirements.txt
+include README.md
+recursive-include frontend *
+recursive-include config *.yaml *.yml *.json *.csv
+recursive-include docs *.md

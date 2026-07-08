@@ -1,6 +1,7 @@
 # Valve source types registry
 # ────────────────────────────────────────────
-# 소스(DB 종류) 별로 FE/BE 가 공유하는 메타. 신규 DB 추가 시 여기에 한 블록 붙이고 저장하면
+# 소스(DB 종류) 별로 FE/BE 가 공유하는 메타. 추출 대상은 FAB · INLINE · VM 3종.
+# 신규 DB 추가 시 여기에 한 블록 붙이고 저장하면
 #   · Products 편집기 소스 드롭다운에 노출
 #   · /api/schedule/columns 가 해당 소스의 컬럼 풀 반환
 #   · Monitor 히트맵 canonical 행에 포함
@@ -18,7 +19,7 @@
 source_types:
   - name: FAB
     table_template: "RAW_{name}_DATA"
-    columns: [lot_id, wafer_id, time, eqp_id, recipe_id, step_id, process_id, line_id, item_id, value, product_code]
+    columns: [lot_id, wafer_id, root_lot_id, time, eqp_id, eqp_model, recipe_id, ppid, step_id, step_desc, part_id, reticle_id, chamber_id, unit_id, sleuth_order, tkout_time, process_id, line_id, product_code]
     default_shard: []
     accent: "#64748b"
     hint: ""
@@ -28,27 +29,9 @@ source_types:
     default_shard: [root_lot_id]
     accent: "#10b981"
     hint: "INLINE 도 하루치가 크다 — `root_lot_id` probe 로 분포 스캔 후 shard 로 쪼개는 게 기본. 한 root 에 lot 이 많으면 `[root_lot_id, lot_id]` 2단 계층."
-  - name: ET
-    table_template: "RAW_{name}_DATA"
-    columns: [lot_id, wafer_id, root_lot_id, item_id, time, value, pattern_id, die_x, die_y, process_id, product_code]
-    default_shard: [root_lot_id, item_id]
-    accent: "#f59e0b"
-    hint: "ET 는 용량이 커서 보통 `item_id` 필터(reformatter raw item 목록)를 걸고, shard 는 `root_lot_id` 또는 `item_id` 로 쪼개 뽑음."
-  - name: QTIME
-    table_template: "RAW_{name}_DATA"
-    columns: [lot_id, wafer_id, step_id, from_step_id, to_step_id, queue_start_time, queue_end_time, q_time_sec, process_id, line_id, product_code]
-    default_shard: []
-    accent: "#06b6d4"
-    hint: "QTIME 은 step 간 대기시간 — `from_step_id`·`to_step_id` 쌍으로 필터링하거나 병목 step 만 선택."
-  - name: EDS
-    table_template: "RAW_{name}_DATA"
-    columns: [lot_id, wafer_id, die_x, die_y, pattern_id, test_item, value, bin_code, pass_fail, process_id, product_code]
-    default_shard: []
-    accent: "#8b5cf6"
-    hint: "EDS 는 die-level 전기특성 — wafer 당 수백 die × 수십 item 이라 `test_item` 필터 + `pattern_id` 기준 축소 권장."
   - name: VM
     table_template: "RAW_{name}_DATA"
-    columns: [lot_id, wafer_id, eqp_id, recipe_id, step_id, sensor_id, predicted_value, actual_value, residual, time, process_id, product_code]
+    columns: [lot_id, wafer_id, root_lot_id, eqp_id, recipe_id, step_id, sensor_id, predicted_value, actual_value, residual, time, process_id, product_code]
     default_shard: []
     accent: "#3b82f6"
     hint: "VM (virtual metrology) — `recipe_id`·`step_id` 로 필터, `residual`(pred-actual) 을 핵심 지표로."

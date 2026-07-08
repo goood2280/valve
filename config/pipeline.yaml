@@ -1,0 +1,42 @@
+# Valve feature pipeline — 전역 설정
+# ────────────────────────────────────────────
+# Ref_raw_query / Ref_event / Ref_feature 파이프라인의 전역 관리 지점.
+#   · db_root            파이프라인 DB 루트 (1.RAWDATA_DB / 2.EVENT_DB / 3.FEATURE_STORE)
+#   · step_matching      vehicle_matching CSV 경로 (vehicle,step_id,step_desc)
+#   · feature_rules      카테고리별 feature 규칙 CSV — 여기 등록된 카테고리만 feature 화됨
+#   · unmatched_scan     FAB raw 에서 vehicle_matching 에 없는 step_id 스캔 시 제외 규칙.
+#                        eqp_id / eqp_model 이 아래 패턴(fnmatch: * ? 지원)과 일치하면
+#                        미매칭 리포트에서 제외 (excluded 목록에 사유와 함께 표시).
+# ────────────────────────────────────────────
+db_root: db
+
+# 추출 소스 — FAB · INLINE · VM 3종. 소스별 테이블명/추출 컬럼을 여기서 조절.
+# columns 에서 빼면 raw parquet 에서도 빠짐 (event/feature 는 있는 컬럼만 사용).
+sources:
+  FAB:
+    table: RAW_FAB_DATA
+    columns: [root_lot_id, wafer_id, part_id, tkout_time, step_id, step_desc, ppid,
+              reticle_id, eqp_id, eqp_model, chamber_id, unit_id, sleuth_order]
+  INLINE:
+    table: RAW_INLINE_DATA
+    columns: [root_lot_id, wafer_id, item_id, value, measure_pos, time]
+  VM:
+    table: RAW_VM_DATA
+    columns: [root_lot_id, wafer_id, sensor_id, eqp_id, step_id,
+              predicted_value, actual_value, residual, time]
+
+step_matching: config/step_matching/vehicle_matching.csv
+
+feature_rules:
+  fab: config/feature_rules/fab.csv
+  knob: config/feature_rules/knob_ppid.csv
+  mask: config/feature_rules/mask.csv
+  inline: config/feature_rules/inline.csv
+  vm: config/feature_rules/vm.csv
+
+unmatched_scan:
+  exclude:
+    eqp_id:
+      - "AUX_*"        # 보조설비 — 매칭 대상 아님
+    eqp_model:
+      - "MEA-*"        # 계측 장비 (metrology) — step 매칭 불필요

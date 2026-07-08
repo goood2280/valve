@@ -12,11 +12,9 @@ products:
     shard_hierarchy:
     - root_lot_id
     target_chunk_rows: 200000
-  - name: ET
-    table: RAW_ET_DATA
-    shard_hierarchy:
-    - root_lot_id
-    - item_id
+  - name: VM
+    table: RAW_VM_DATA
+    shard_hierarchy: []
     target_chunk_rows: 300000
   params_template:
     product_code:

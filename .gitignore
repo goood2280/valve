@@ -6,9 +6,10 @@ __pycache__/
 
 # runtime data
 /staging/
-/logs/*.jsonl
+/logs/
 /s3_local/
 /data/
+/db/
 
 # probe/state caches
 /config/probe_cache.json

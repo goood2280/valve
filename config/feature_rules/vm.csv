@@ -1,0 +1,3 @@
+sensor_id,agg
+SNS_TEMP_01,mean
+SNS_PRES_02,max

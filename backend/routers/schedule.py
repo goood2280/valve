@@ -81,22 +81,13 @@ def save_products(req: dict):
 
 
 # source types 동적 레지스트리 — config/source_types.yaml. 신규 DB 추가도 웹/YAML 양쪽으로.
-# 파일 없으면 built-in 6종 사용(아래 _BUILTIN_SOURCE_TYPES).
+# 파일 없으면 built-in 3종(FAB·INLINE·VM) 사용(아래 _BUILTIN_SOURCE_TYPES).
 _BUILTIN_SOURCE_TYPES = [
     {"name": "FAB", "table_template": "RAW_{name}_DATA", "default_shard": [], "accent": "#64748b", "hint": "",
      "columns": ["lot_id", "wafer_id", "time", "eqp_id", "recipe_id", "step_id", "process_id", "line_id", "item_id", "value", "product_code"]},
     {"name": "INLINE", "table_template": "RAW_{name}_DATA", "default_shard": ["root_lot_id"], "accent": "#10b981",
      "hint": "INLINE 도 하루치가 크다 — `root_lot_id` probe 로 분포 스캔 후 shard 로 쪼개는 게 기본.",
      "columns": ["lot_id", "wafer_id", "root_lot_id", "time", "item_id", "value", "process_id", "line_id", "measure_pos", "product_code"]},
-    {"name": "ET", "table_template": "RAW_{name}_DATA", "default_shard": ["root_lot_id", "item_id"], "accent": "#f59e0b",
-     "hint": "ET 는 용량이 커서 보통 `item_id` 필터를 걸고, shard 는 `root_lot_id` 또는 `item_id` 로.",
-     "columns": ["lot_id", "wafer_id", "root_lot_id", "item_id", "time", "value", "pattern_id", "die_x", "die_y", "process_id", "product_code"]},
-    {"name": "QTIME", "table_template": "RAW_{name}_DATA", "default_shard": [], "accent": "#06b6d4",
-     "hint": "QTIME 은 step 간 대기시간 — `from_step_id`·`to_step_id` 쌍으로 필터.",
-     "columns": ["lot_id", "wafer_id", "step_id", "from_step_id", "to_step_id", "queue_start_time", "queue_end_time", "q_time_sec", "process_id", "line_id", "product_code"]},
-    {"name": "EDS", "table_template": "RAW_{name}_DATA", "default_shard": [], "accent": "#8b5cf6",
-     "hint": "EDS 는 die-level 전기특성 — `test_item` 필터 + `pattern_id` 기준 축소.",
-     "columns": ["lot_id", "wafer_id", "die_x", "die_y", "pattern_id", "test_item", "value", "bin_code", "pass_fail", "process_id", "product_code"]},
     {"name": "VM", "table_template": "RAW_{name}_DATA", "default_shard": [], "accent": "#3b82f6",
      "hint": "VM — `recipe_id`·`step_id` 필터, `residual` 핵심 지표.",
      "columns": ["lot_id", "wafer_id", "eqp_id", "recipe_id", "step_id", "sensor_id", "predicted_value", "actual_value", "residual", "time", "process_id", "product_code"]},

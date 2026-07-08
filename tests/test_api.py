@@ -62,8 +62,11 @@ def test_source_types_list_includes_all_canonical(app_client):
     r = app_client.get("/api/schedule/source-types")
     assert r.status_code == 200
     names = {(s["name"] or "").upper() for s in r.json()["source_types"]}
-    for canon in ("FAB", "INLINE", "ET", "QTIME", "EDS", "VM"):
+    for canon in ("FAB", "INLINE", "VM"):
         assert canon in names, f"missing canonical source {canon}"
+    # 추출 대상은 3종만 — 구 소스는 registry 에서 제거됨
+    for legacy in ("ET", "QTIME", "EDS"):
+        assert legacy not in names, f"legacy source {legacy} should be removed"
 
 
 def test_source_types_add_and_remove(app_client):

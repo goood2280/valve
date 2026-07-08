@@ -35,6 +35,7 @@ from backend.routers import query as query_router
 from backend.routers import probe_preview as probe_preview_router
 from backend.routers import ops as ops_router
 from backend.routers import agent as agent_router
+from backend.routers import pipeline as pipeline_router
 
 
 # 테스트/임베디드 실행을 위해 VALVE_ROOT 환경변수로 ROOT 재지정 가능.
@@ -152,12 +153,14 @@ app.add_middleware(
 jobs_router.deps(state, executor, planner, PRODUCTS, SETTINGS, LOGS_DIR / "jobs.jsonl")
 settings_router.deps(ROOT, SETTINGS, api, s3)
 schedule_router.deps(PRODUCTS, SETTINGS, ROOT)
-browser_router.deps(STAGING_DIR, S3_LOCAL_DIR)
-query_router.deps(STAGING_DIR, S3_LOCAL_DIR)
+# config: csv 설정파일(vehicle_matching·feature_rules 등) 열람, db: 파이프라인 산출물(raw/event/feature)
+browser_router.deps(STAGING_DIR, S3_LOCAL_DIR,
+                    extra_roots={"config": CONFIG_DIR, "db": ROOT / "db"})
 probe_preview_router.deps(planner, PRODUCTS)
 ops_router.deps(state, SETTINGS, s3)
 SETTINGS["_root"] = str(ROOT)  # agent 가 products.yaml 경로 역추적할 때 사용
 agent_router.deps(state, SETTINGS, PRODUCTS, planner, executor, LOGS_DIR / "agent_audit.jsonl")
+pipeline_router.deps(ROOT, SETTINGS, s3)
 
 app.include_router(jobs_router.router)
 app.include_router(settings_router.router)
@@ -167,6 +170,15 @@ app.include_router(query_router.router)
 app.include_router(probe_preview_router.router)
 app.include_router(ops_router.router)
 app.include_router(agent_router.router)
+app.include_router(pipeline_router.router)
+
+# aipd 브리지 (선택) — aipd 패키지가 함께 배포된 경우 순환 데모/검토큐 연동 활성화
+try:
+    from backend.routers import aipd_bridge as _aipd_bridge
+
+    app.include_router(_aipd_bridge.router)
+except Exception as _e:  # aipd 미설치 등 — Valve 본체는 정상 동작
+    print(f"[valve] aipd bridge disabled: {_e}")
 
 
 @app.on_event("startup")
@@ -182,11 +194,15 @@ async def _on_startup():
     await ops_router.flush_pending_alerts()
     if (SETTINGS.get("s3") or {}).get("upload_mode") == "interval":
         _s3queue.start_background()
+    # csv 설정파일 S3 주기 다운로드 (flow → Valve)
+    if pipeline_router.csv_sync.load_config().get("enabled"):
+        pipeline_router.csv_sync.start_background()
 
 
 @app.on_event("shutdown")
 async def _on_shutdown():
     _s3queue.stop_background()
+    pipeline_router.csv_sync.stop_background()
 
 
 @app.get("/api/health")
@@ -225,3 +241,19 @@ else:
             "health": "/api/health",
             "api_docs": "/docs",
         }
+
+
+def main():
+    """`valve` 콘솔 스크립트 — uvicorn 으로 앱 기동.
+    VALVE_HOST/VALVE_PORT 로 조절 (기본 127.0.0.1:8090)."""
+    import uvicorn
+
+    uvicorn.run(
+        app,
+        host=os.environ.get("VALVE_HOST", "127.0.0.1"),
+        port=int(os.environ.get("VALVE_PORT", "8090")),
+    )
+
+
+if __name__ == "__main__":
+    main()

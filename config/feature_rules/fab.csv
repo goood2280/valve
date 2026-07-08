@@ -1,0 +1,6 @@
+step_desc,feature_name,agg
+GATE_ETCH,eqp_id,last_valid
+GATE_ETCH,ecuall,first
+SPACER_CVD,eqp_id,first
+CONTACT_ETCH,tkout_status,last
+METAL_ETCH,eqp_id,first

@@ -23,6 +23,18 @@ const api = {
     }
     return r.json();
   },
+  async put(path, body = {}) {
+    const r = await fetch(path, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      const t = await r.text();
+      throw new Error(`${path} ${r.status}: ${t}`);
+    }
+    return r.json();
+  },
 };
 
 // ─────────────────────────────────────
@@ -88,16 +100,6 @@ const fmt = {
   date(iso) { return iso ? iso.slice(5) : '-'; },  // MM-DD
   isoToday() { return new Date().toISOString().slice(0, 10); },
 };
-
-function recentDates(n) {
-  const out = [];
-  const base = new Date();
-  for (let i = 0; i < n; i++) {
-    const d = new Date(base); d.setDate(base.getDate() - i);
-    out.push(d.toISOString().slice(0, 10));
-  }
-  return out;
-}
 
 // ─────────────────────────────────────
 // SSE
@@ -171,7 +173,7 @@ function applyEvent(evt) {
 // ─────────────────────────────────────
 function route(tab) {
   STATE.currentTab = tab;
-  $$('.tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
+  $$('.tab[data-tab]').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
   renderCurrentTab();
 }
 
@@ -182,6 +184,7 @@ function renderCurrentTab() {
     logs: renderLogs,
     settings: renderSettings,
     browser: renderBrowser,
+    alerts: renderAlerts,
   };
   (map[STATE.currentTab] || renderMonitor)();
 }
@@ -204,7 +207,7 @@ function renderMonitor() {
       el('button', { class: 'btn', onclick: onProbeInvalidateAll }, '↻ Probe 캐시 전체 무효화'),
     ),
     renderInProgressCard(),
-    renderHeatmapCard(),
+    renderDbHeatmapCard(),
     renderFailuresCard(),
   );
 }
@@ -243,98 +246,139 @@ function chunkRow(c, tone) {
   );
 }
 
-function renderHeatmapCard() {
-  const dates = recentDates(14).reverse();   // old → new
-  const today = fmt.isoToday();
-  const products = (STATE.products?.products || []);
-
-  const thead = el('tr', {},
-    el('th', { class: 'row-h' }, 'Product / Source'),
-    ...dates.map((d) => el('th', { title: d }, fmt.date(d))),
+// DB heatmap — db/ 단일 처리 현황. 셀 하나가 raw→event 단계 색으로:
+//   남색 = raw query 만 완료(event 대기) · 초록 = event 완료 ·
+//   노랑 = event 재처리 필요(matching 변경) · 빗금 = raw 없음.
+// feature(db/3.FEATURE_STORE)는 소스·vehicle 단위 산출물 → 소스 행 배지로 표기.
+function renderDbHeatmapCard() {
+  const card = el('div', { class: 'card' },
+    el('div', { class: 'card-title' }, '🗂 DB heatmap',
+      el('span', { class: 'count' }, 'raw → event → feature · db/ 처리 현황')),
+    el('div', { id: 'dbhmBody' }, el('div', { class: 'loading' }, 'Loading…')),
   );
+  queueMicrotask(loadDbHeatmap);   // 카드가 DOM 에 붙은 뒤 로드 (최초 렌더 누락 방지)
+  return card;
+}
 
-  const tbody = el('tbody', {});
-  let totalConfigured = 0;
+// 소스 → feature 카테고리 (FAB 는 fab/knob/mask 로 파생, INLINE·VM 은 동명 카테고리)
+const FEATURE_CATS = { FAB: ['fab', 'knob', 'mask'], INLINE: ['inline'], VM: ['vm'] };
 
-  products.forEach((p, pi) => {
-    const configured = new Map(
-      (p.sources || []).map((s) => [(s.name || '').toUpperCase(), s]),
-    );
-    totalConfigured += configured.size;
+// DB heatmap 조회 기간 — 일 단위 vs 주/월 버킷. 재렌더에도 유지되도록 모듈 상태.
+const DBHM_PERIODS = ['1주', '1달', '6개월', '2년'];
+let DBHM_PERIOD = '1달';
 
-    // 제품 헤더 행 — 제품명 + 상태 배지 + backfill + configured/total 카운트
-    const headMeta = [];
-    if (p.enabled === false) headMeta.push(el('span', { class: 'pill pending' }, 'disabled'));
-    if (p.priority != null) headMeta.push(el('span', { class: 'hint' }, `p${p.priority}`));
-    if (p.backfill_days_override) headMeta.push(el('span', { class: 'hint backfill-pill' }, `backfill ${p.backfill_days_override}d`));
+// 선택 기간 → 컬럼 버킷 목록. 각 버킷은 [start, end] iso 범위 (일 단위면 start==end).
+function dbhmBuckets(period) {
+  const iso = (d) => d.toISOString().slice(0, 10);
+  const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+  const today = new Date();
+  const out = [];
+  if (period === '1주' || period === '1달') {
+    const days = period === '1주' ? 7 : 31;
+    for (let i = days - 1; i >= 0; i--) { const d = iso(addDays(today, -i)); out.push({ label: d.slice(5), title: d, start: d, end: d }); }
+  } else if (period === '6개월') {
+    for (let i = 25; i >= 0; i--) {   // 26 주
+      const e = addDays(today, -i * 7), s = addDays(e, -6);
+      out.push({ label: iso(s).slice(5), title: `주간 ${iso(s)} ~ ${iso(e)}`, start: iso(s), end: iso(e) });
+    }
+  } else {   // 2년 — 24 개월
+    const base = new Date(today.getFullYear(), today.getMonth(), 1);
+    for (let i = 23; i >= 0; i--) {
+      const s = new Date(base.getFullYear(), base.getMonth() - i, 1);
+      const e = new Date(s.getFullYear(), s.getMonth() + 1, 0);
+      out.push({ label: `${s.getFullYear()}-${String(s.getMonth() + 1).padStart(2, '0')}`,
+                 title: `월간 ${iso(s)} ~ ${iso(e)}`, start: iso(s), end: iso(e) });
+    }
+  }
+  return out;
+}
 
-    tbody.append(el('tr', { class: 'prod-head-row' + (pi > 0 ? ' divider' : '') },
-      el('td', { class: 'prod-head-cell', colspan: String(dates.length + 1) },
-        el('div', { class: 'prod-head-inner' },
-          el('span', { class: 'prod-head-name' }, p.product),
-          ...headMeta,
-          el('span', { class: 'spacer' }),
-          el('span', { class: 'prod-head-count' },
-            `${configured.size}/${CANONICAL_SOURCES.length} 소스 추출 중`),
-        ),
-      ),
-    ));
+async function loadDbHeatmap() {
+  if (!$('#dbhmBody')) return;
+  try {
+    const status = await api.get('/api/pipeline/status');
+    const body = $('#dbhmBody');   // fetch 중 재렌더로 노드 교체 가능 — 다시 조회
+    if (!body) return;
+    const vehicles = Object.keys(status);
+    const anyRaw = vehicles.some((v) => Object.values(status[v].raw).some((a) => a.length));
+    if (!anyRaw) {
+      body.innerHTML = '<div class="empty">db raw 없음 — 알람 탭에서 파이프라인 실행</div>';
+      return;
+    }
+    const buckets = dbhmBuckets(DBHM_PERIOD);
+    const fmtTs = (ts) => ts ? new Date(ts * 1000).toLocaleString('ko-KR', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '-';
 
-    // 각 canonical 소스에 대해 고정 행
-    CANONICAL_SOURCES.forEach((src) => {
-      const cfg = configured.get(src);
-      const on = !!cfg;
-      const tr = el('tr', { class: 'src-row' + (on ? '' : ' src-off') },
-        el('td', { class: 'row-label src-label' },
-          el('span', { class: 'src-bullet' }, on ? '●' : '○'),
-          src,
-          on ? null : el('span', { class: 'hint', style: { marginLeft: '6px' } }, '(미추출)'),
-        ),
-      );
-      dates.forEach((d) => {
-        if (!on) {
-          tr.append(el('td', { class: 'hm-cell s-off', title: `${p.product} · ${src} · ${d}\n(이 제품은 ${src} 를 뽑지 않음)` }));
-          return;
-        }
-        const pkey = `${p.product}/${src}/${d}`;
-        const part = STATE.partitions[pkey];
-        const st = part?.status || 'idle';
-        const cls = ({
-          success: 's-success', running: 's-running', partial_failed: 's-partial',
-          completeness_failed: 's-partial', upload_failed: 's-failed',
-          failed: 's-failed', planned: 's-planned',
-        })[st] || 's-idle';
-        tr.append(el('td', {
-          class: `hm-cell ${cls}`,
-          title: `${p.product} · ${src} · ${d}\n${part ? JSON.stringify(part, null, 2) : '(미실행)'}`,
-          onclick: () => onCellClick(p.product, src, d, part),
-        }, d === today ? '●' : (st === 'idle' ? '' : '·')));
+    // 기간 선택 세그먼트
+    const picker = el('div', { class: 'dbhm-period' },
+      ...DBHM_PERIODS.map((p) => el('button', {
+        class: 'seg' + (p === DBHM_PERIOD ? ' on' : ''),
+        onclick: () => { DBHM_PERIOD = p; loadDbHeatmap(); },
+      }, p)));
+
+    const thead = el('tr', {},
+      el('th', { class: 'row-h' }, 'Vehicle / Source'),
+      ...buckets.map((b) => el('th', { title: b.title }, b.label)));
+    const tbody = el('tbody', {});
+    vehicles.forEach((v, vi) => {
+      const st = status[v];
+      const featTotal = Object.values(st.features || {}).reduce((a, n) => a + n, 0);
+      tbody.append(el('tr', { class: 'prod-head-row' + (vi > 0 ? ' divider' : '') },
+        el('td', { class: 'prod-head-cell', colspan: String(buckets.length + 1) },
+          el('div', { class: 'prod-head-inner clickable', title: `클릭 → ${v} 파이프라인 재실행 (raw→event→feature)`,
+            onclick: () => onRunVehicle(v) },
+            el('span', { class: 'prod-head-name' }, v),
+            el('span', { class: 'hint' }, st.product),
+            el('span', { class: 'spacer' }),
+            el('span', { class: 'prod-head-count' },
+              `matching ${fmtTs(st.event.FAB?.applied_ts)} · ${st.matching.steps} step · feature ${featTotal}`)))));
+      Object.keys(st.raw).forEach((src) => {
+        const ev = st.event[src] || {};
+        const evDates = new Set(ev.dates || []);
+        const featN = (FEATURE_CATS[src] || []).reduce((a, c) => a + (st.features?.[c] || 0), 0);
+        const tr = el('tr', { class: 'src-row' },
+          el('td', { class: 'row-label src-label',
+            title: `매칭 파일: ${ev.matching_file || '-'}\n적용: ${fmtTs(ev.applied_ts)} · sha ${ev.matching_sha || '-'}` },
+            el('span', { class: 'src-bullet' }, '●'), src,
+            featN ? el('span', { class: 'feat-badge', title: 'feature store 산출물 수' }, `feat ${featN}`) : null,
+            ev.stale ? el('span', { class: 'hint stale-tag' }, '재처리 필요') : null));
+        buckets.forEach((b) => {
+          // 이 버킷 [start,end] 안에 든 raw 날짜들의 단계 집계 (긴급도: 재처리>대기>완료)
+          const inBucket = (st.raw[src] || []).filter((d) => d >= b.start && d <= b.end);
+          let cls = 's-off', label = 'raw 없음';
+          if (inBucket.length) {
+            let nRaw = 0, nStale = 0, nDone = 0;
+            inBucket.forEach((d) => { if (!evDates.has(d)) nRaw++; else if (ev.stale) nStale++; else nDone++; });
+            if (nStale) { cls = 's-partial'; label = `event 재처리 필요 ${nStale}일`; }
+            else if (nRaw) { cls = 's-raw'; label = `raw query 완료 · event 대기 ${nRaw}일`; }
+            else { cls = 's-success'; label = `event 완료 ${nDone}일`; }
+            label += ` · raw ${inBucket.length}일`;
+          }
+          tr.append(el('td', { class: `hm-cell ${cls}`, title: `${v} · ${src} · ${b.title}\n${label}` },
+            cls === 's-off' ? '' : '·'));
+        });
+        tbody.append(tr);
       });
-      tbody.append(tr);
     });
-  });
+    body.innerHTML = '';
+    body.append(
+      picker,
+      el('div', { class: 'hm-scroll' }, el('table', { class: 'heatmap' }, el('thead', {}, thead), tbody)),
+      el('div', { class: 'row', style: { marginTop: '12px', gap: '14px', fontSize: '11px', color: 'var(--text-muted)', flexWrap: 'wrap' } },
+        legendItem('s-raw', 'raw query 만 (event 대기)'),
+        legendItem('s-success', 'event 완료'),
+        legendItem('s-partial', 'event 재처리 필요 (matching 변경)'),
+        legendItem('s-off', 'raw 없음'),
+        el('span', { class: 'hint' }, '주/월 버킷은 가장 긴급한 단계 색 · feat N = 소스별 feature 수 · vehicle 헤더 클릭 = 재실행')));
+  } catch (e) {
+    const body = $('#dbhmBody');
+    if (body) { body.innerHTML = ''; body.append(el('div', { class: 'empty' }, String(e.message || e))); }
+  }
+}
 
-  const legend = el('div', { class: 'row', style: { marginTop: '12px', gap: '14px', fontSize: '11px', color: 'var(--text-muted)', flexWrap: 'wrap' } },
-    legendItem('s-success', 'Success'),
-    legendItem('s-running', 'Running'),
-    legendItem('s-partial', 'Partial / Tolerance'),
-    legendItem('s-failed',  'Failed / Upload err'),
-    legendItem('s-planned', 'Planned'),
-    legendItem('s-idle',    'Idle'),
-    legendItem('s-off',     '미추출(해당 제품 설정 안됨)'),
-  );
-
-  return el('div', { class: 'card' },
-    el('div', { class: 'card-title' },
-      '📊 Partition heatmap',
-      el('span', { class: 'count' },
-        `${products.length} 제품 × ${CANONICAL_SOURCES.length} 소스 = ${totalConfigured} 추출 중 · ${dates.length}일`),
-    ),
-    products.length
-      ? el('table', { class: 'heatmap' }, el('thead', {}, thead), tbody)
-      : el('div', { class: 'empty' }, 'products.yaml 에 제품 없음'),
-    legend,
-  );
+async function onRunVehicle(v) {
+  if (!confirm(`${v} 파이프라인 재실행? (raw → event → feature)`)) return;
+  try { await api.post(`/api/pipeline/run/${encodeURIComponent(v)}`, {}); await loadDbHeatmap(); }
+  catch (e) { alert(e.message); }
 }
 
 function legendItem(cls, text) {
@@ -371,16 +415,6 @@ function renderFailuresCard() {
     ),
     body,
   );
-}
-
-async function onCellClick(product, source, date, existing) {
-  const confirmMsg = existing
-    ? `${product} · ${source} · ${date}\n재실행할까요? (현 파티션 overwrite)`
-    : `${product} · ${source} · ${date}\n실행할까요?`;
-  if (!confirm(confirmMsg)) return;
-  try {
-    await api.post('/api/jobs/enqueue', { product, source, date });
-  } catch (e) { alert(`enqueue 실패: ${e.message}`); }
 }
 
 async function onRetry(c) {
@@ -1317,13 +1351,6 @@ async function renderSettings() {
       ['schedule.force_overwrite', 'bool'],
       ['schedule.tolerance_pct', 'number', null, 'completeness 허용 %. 0.5 = 0.5%'],
     ]},
-    { key: 'probe', label: '🔍 프로브', rows: [
-      ['probe.strategy', 'select', ['sample_window','projection','none']],
-      ['probe.window_hours', 'number'],
-      ['probe.cache_days', 'number', null, 'probe 결과 N일 재사용. 기본 7'],
-      ['probe.adaptive_correction', 'bool'],
-      ['probe.fallback_on_timeout', 'bool'],
-    ]},
     { key: 'alerts', label: '🔔 알림', rows: [
       ['alerts.enabled', 'bool', null, '전체 알람 마스터 스위치 (끄면 모든 채널 무시)'],
       ['alerts.min_severity', 'select', ['info','warn','error','critical'], '이 레벨 미만은 조용히 drop'],
@@ -1555,7 +1582,7 @@ async function renderBrowser() {
   main.append(
     el('div', {},
       el('div', { class: 'section-title' }, '파일 탐색기'),
-      el('div', { class: 'section-desc' }, 'staging · s3_local (fake S3) 탐색. parquet 선택 후 SQL 필터 가능.'),
+      el('div', { class: 'section-desc' }, 'staging · s3_local · config(설정파일 csv/yaml/json) · db(파이프라인 산출물) 탐색. parquet/csv 는 SQL 필터, yaml/json 은 텍스트로 열람.'),
     ),
     renderSqlGuide(),
     el('div', { class: 'split' },
@@ -1572,7 +1599,7 @@ async function renderBrowser() {
           el('button', { class: 'btn', onclick: () => { BR.sql = ''; reloadView(); } }, 'Clear'),
         ),
         el('div', { id: 'brView', style: { flex: 1, overflow: 'auto' } },
-          el('div', { class: 'empty' }, '좌측에서 parquet 파일 선택'),
+          el('div', { class: 'empty' }, '좌측에서 파일 선택 (parquet/csv · yaml/json/txt)'),
         ),
       ),
     ),
@@ -1659,7 +1686,8 @@ async function loadBrowserDir(root, path) {
     if (!r.entries.length) tree.append(el('div', { class: 'empty' }, '비어있음'));
     r.entries.forEach((e) => {
       const fullPath = path ? `${path}/${e.name}` : e.name;
-      const icon = e.is_dir ? '📁' : (e.suffix === '.parquet' ? '📊' : '📄');
+      const icon = e.is_dir ? '📁' : (e.suffix === '.parquet' ? '📊' : (e.suffix === '.csv' ? '🧾'
+        : (['.yaml', '.yml', '.json'].includes(e.suffix) ? '⚙️' : '📄')));
       const cls = BR.selFile === fullPath ? 'tree-item sel' : 'tree-item';
       tree.append(el('div', { class: cls, onclick: () => e.is_dir ? loadBrowserDir(root, fullPath) : selectFile(root, fullPath) },
         el('span', { class: 'ic' }, icon),
@@ -1684,6 +1712,17 @@ async function reloadView() {
     const url = `/api/query/view?root=${encodeURIComponent(BR.root)}&file=${encodeURIComponent(BR.selFile)}&sql=${encodeURIComponent(BR.sql)}&rows=200`;
     const r = await api.get(url);
     view.innerHTML = '';
+    // yaml/json/txt/md 등 설정파일은 텍스트로 표시
+    if (r.kind === 'text') {
+      view.append(
+        el('div', { style: { padding: '10px 14px', fontSize: '12px', color: 'var(--text-secondary)', borderBottom: '1px solid var(--border)' } },
+          el('span', { class: 'mono' }, BR.selFile),
+          r.truncated ? el('span', { style: { color: 'var(--text-muted)', marginLeft: '8px' } }, '· 일부만 표시') : null,
+        ),
+        el('pre', { class: 'text-view' }, r.text),
+      );
+      return;
+    }
     view.append(
       el('div', { style: { padding: '10px 14px', fontSize: '12px', color: 'var(--text-secondary)', borderBottom: '1px solid var(--border)' } },
         el('span', { class: 'mono' }, BR.selFile), '  ·  ',
@@ -1710,6 +1749,226 @@ function fmtBytes(b) {
   if (b < 1024) return `${b} B`;
   if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
   return `${(b / 1024 / 1024).toFixed(2)} MB`;
+}
+
+// ─────────────────────────────────────
+// alerts tab — 파이프라인 리포트 (미매칭 step · KNOB RO · event 처리 현황)
+// ─────────────────────────────────────
+const AL_HAIR = '1px solid var(--border)';
+
+const alSub = (t, d) => el('div', { style: { margin: '12px 0 4px' } },
+  el('span', { style: { fontWeight: 700, fontSize: '12px' } }, t),
+  d ? el('span', { style: { color: 'var(--text-muted)', fontSize: '11px', marginLeft: '8px' } }, d) : null);
+
+function alTable(headers, rows) {
+  return el('table', { class: 'tbl' },
+    el('thead', {}, el('tr', {}, ...headers.map((h) => el('th', {}, h)))),
+    el('tbody', {}, rows.length ? rows
+      : el('tr', {}, el('td', { colspan: String(headers.length), style: { color: 'var(--text-muted)' } }, '없음'))),
+  );
+}
+
+async function renderAlerts() {
+  const main = $('#main');
+  main.innerHTML = '';
+  main.append(
+    el('div', {},
+      el('div', { class: 'section-title' }, '알람'),
+      el('div', { class: 'section-desc' },
+        'FAB 미매칭 step · KNOB 미변환(RO raw ppid) · event 처리 현황. '
+        + '설정파일(config/step_matching · feature_rules · pipeline.yaml)은 탐색기 config 루트에서 열람 가능.'),
+    ),
+    el('div', { id: 'alWrap' }, el('div', { class: 'loading' }, 'Loading…')),
+  );
+  await loadAlerts();
+}
+
+async function loadAlerts() {
+  const wrap = $('#alWrap');
+  if (!wrap) return;
+  try {
+    const [status, alerts, cfg, csvInfo] = await Promise.all([
+      api.get('/api/pipeline/status'),
+      api.get('/api/pipeline/alerts'),
+      api.get('/api/pipeline/config'),
+      api.get('/api/pipeline/csv-sync'),
+    ]);
+    wrap.innerHTML = '';
+
+    // ── 처리 현황 (vehicle 별 한 줄)
+    wrap.append(alSub('파이프라인 처리 현황', 'raw → event → feature · vehicle_matching 변경 시 재처리 필요 표시'));
+    Object.keys(status).forEach((v) => wrap.append(alStatusLine(v, status[v])));
+
+    // ── 통합 알람 리스트
+    const toggle = el('label', { style: { fontSize: '12px', color: 'var(--text-muted)', display: 'flex', gap: '5px', alignItems: 'center', marginLeft: 'auto' } },
+      el('input', Object.assign({ type: 'checkbox', onchange: (e) => { AL_SHOW_SUPPRESSED = e.target.checked; loadAlerts(); } },
+        AL_SHOW_SUPPRESSED ? { checked: '' } : {})),
+      '억제된 알람 포함');
+    wrap.append(el('div', { style: { display: 'flex', alignItems: 'baseline', gap: '10px', borderTop: AL_HAIR, marginTop: '20px', paddingTop: '12px' } },
+      el('span', { style: { fontWeight: 700, fontSize: '12px' } }, '알람'),
+      el('span', { style: { fontSize: '12px', color: 'var(--text-muted)' } },
+        `활성 ${alerts.active} · 억제 ${alerts.suppressed} — 상태 변경은 S3 ack.json 으로 flow 와 공유`),
+      toggle,
+    ));
+    wrap.append(alAlertTable(alerts));
+
+    wrap.append(alExcludeEditor(cfg));
+    wrap.append(alCsvSync(csvInfo));
+  } catch (e) {
+    wrap.innerHTML = '';
+    wrap.append(el('div', { class: 'alert err' }, String(e.message || e)));
+  }
+}
+
+// vehicle 처리 현황 한 줄 (raw → event → feature · stale 감지 · 실행 버튼)
+function alStatusLine(v, st) {
+  const line = el('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', padding: '5px 0', borderBottom: '1px solid var(--border-weak, rgba(128,128,128,.15))', fontSize: '12px' } });
+  line.append(
+    el('span', { style: { fontWeight: 800, minWidth: '90px' } }, v),
+    el('span', { class: 'mono', style: { color: 'var(--text-muted)', minWidth: '54px' } }, st?.product || ''),
+  );
+  if (st) {
+    const ev = st.event;
+    const srcs = Object.keys(st.raw);
+    const evTxt = srcs.map((s) => `${s} ${(ev[s]?.dates || []).length}/${(st.raw[s] || []).length}`).join(' · ');
+    const staleSrcs = srcs.filter((s) => ev[s]?.stale);
+    const pendingSrcs = srcs.filter((s) => (ev[s]?.pending || []).length);
+    line.append(el('span', {}, `event ${evTxt}`));
+    if (pendingSrcs.length) line.append(el('span', { style: { color: '#e5484d' } }, `미처리 ${pendingSrcs.join(', ')}`));
+    if (staleSrcs.length) line.append(el('span', { style: { color: '#e5484d' } }, `매칭 변경 — 재처리 필요 (${staleSrcs.join(', ')})`));
+    if (!pendingSrcs.length && !staleSrcs.length && srcs.some((s) => (ev[s]?.dates || []).length)) {
+      line.append(el('span', { style: { color: '#30a46c' } }, '최신'));
+    }
+    line.append(el('span', { style: { color: 'var(--text-muted)' } }, '|'));
+    line.append(el('span', { style: { color: 'var(--text-secondary)' } },
+      `feature ${Object.entries(st.features).map(([k, n]) => `${k} ${n}`).join(' · ')}`));
+  }
+  line.append(el('button', { class: 'btn', style: { marginLeft: 'auto' }, onclick: async (ev) => {
+    const b = ev.target; b.disabled = true; b.textContent = '실행 중…';
+    try { await api.post(`/api/pipeline/run/${encodeURIComponent(v)}`); }
+    catch (e) { alert(e.message); }
+    loadAlerts();
+  } }, '▶ 실행'));
+  return line;
+}
+
+// 통합 알람 테이블 — 한 행 = 한 알람. 유형은 색으로 구분 (미매칭 step 빨강 · RO ppid 주황)
+const AL_TYPE = {
+  unmatched_step: { label: '미매칭 step', color: '#e5484d' },
+  ro_ppid: { label: 'RO ppid', color: '#f5a524' },
+};
+let AL_SHOW_SUPPRESSED = false;
+
+function alAlertTable(data) {
+  const rows = data.alerts
+    .filter((a) => AL_SHOW_SUPPRESSED || a.status === 'active')
+    .map((a) => {
+      const t = AL_TYPE[a.type] || { label: a.type, color: 'inherit' };
+      const sel = el('select', { style: { fontSize: '11px' }, onchange: async (ev) => {
+        await api.put('/api/pipeline/alerts/ack', { id: a.id, status: ev.target.value });
+        loadAlerts();
+      } }, ...['active', '미확인예정', '반영불필요'].map((s) =>
+        el('option', s === a.status ? { value: s, selected: '' } : { value: s }, s)));
+      return el('tr', { style: a.status === 'active' ? {} : { opacity: 0.45 } },
+        el('td', { style: { color: t.color, fontWeight: 700, whiteSpace: 'nowrap' } }, t.label),
+        el('td', { class: 'mono' }, a.vehicle),
+        el('td', { class: 'mono' }, a.product),
+        el('td', { class: 'mono', style: { color: t.color } }, a.step_id),
+        el('td', {}, a.step_desc || ''),
+        el('td', { class: 'mono', style: a.ppid ? { color: t.color, fontWeight: 700 } : {} }, a.ppid || '-'),
+        el('td', { class: 'mono', style: { fontSize: '11px', color: 'var(--text-muted)' } }, a.split || '-'),
+        el('td', { class: 'mono' }, a.eqp_id || '-'),
+        el('td', { class: 'mono' }, a.eqp_model || '-'),
+        el('td', { class: 'mono' }, String(a.n_lots || '')),
+        el('td', { class: 'mono' }, String(a.rows || '')),
+        el('td', {}, sel),
+      );
+    });
+  return alTable(
+    ['유형', 'vehicle', 'product', 'step_id', 'step_desc', 'ppid', 'split', 'eqp_id', 'eqp_model', 'lots', 'rows', '상태'],
+    rows,
+  );
+}
+
+// csv 설정파일 S3 동기화 관리 (flow → Valve)
+function alCsvSync(info) {
+  const cfg = info.config;
+  const status = info.status || {};
+  const enabled = el('input', Object.assign({ type: 'checkbox' }, cfg.enabled ? { checked: '' } : {}));
+  const interval = el('input', { type: 'number', value: String(cfg.interval_min), style: { width: '54px' } });
+  const prefix = el('input', { type: 'text', value: cfg.s3_prefix || '', style: { width: '180px' } });
+  const fileRows = [];
+
+  const mkRow = (f) => {
+    const key = el('input', { type: 'text', value: f.key || '', style: { width: '240px' } });
+    const dest = el('input', { type: 'text', value: f.dest || '', style: { width: '300px' } });
+    const st = status[f.key] || {};
+    const stTxt = st.status
+      ? `${st.status}${st.ts ? ' · ' + new Date(st.ts * 1000).toLocaleString() : ''}`
+      : '-';
+    const row = el('tr', {},
+      el('td', {}, key),
+      el('td', {}, dest),
+      el('td', { class: 'mono', style: { fontSize: '11px', color: st.status === 'error' || st.status === 'missing' ? '#e5484d' : 'var(--text-muted)' } }, stTxt),
+      el('td', {}, el('button', { class: 'btn', onclick: () => { row.remove(); fileRows.splice(fileRows.indexOf(entry), 1); } }, '✕')),
+    );
+    const entry = { key, dest, row };
+    fileRows.push(entry);
+    return row;
+  };
+
+  const tbl = el('table', { class: 'tbl' },
+    el('thead', {}, el('tr', {}, ...['S3 key (prefix 이하)', '로컬 경로 (dest)', '마지막 동기화', ''].map((h) => el('th', {}, h)))),
+    el('tbody', {}, (cfg.files || []).map(mkRow)),
+  );
+
+  const save = async () => {
+    await api.put('/api/pipeline/csv-sync/config', {
+      enabled: enabled.checked,
+      interval_min: Number(interval.value) || 30,
+      s3_prefix: prefix.value,
+      files: fileRows.map((r) => ({ key: r.key.value, dest: r.dest.value })),
+    });
+    loadAlerts();
+  };
+
+  return el('div', { style: { borderTop: AL_HAIR, marginTop: '20px', paddingTop: '12px' } },
+    alSub('CSV 설정파일 S3 동기화', 'flow 가 S3 에 올린 matching csv 를 주기적으로 다운로드 — config/csv_sync.yaml'),
+    el('div', { style: { fontSize: '12px', display: 'flex', gap: '14px', alignItems: 'center', flexWrap: 'wrap', margin: '6px 0' } },
+      el('label', { style: { display: 'flex', gap: '5px', alignItems: 'center' } }, enabled, '주기 동기화'),
+      el('span', {}, '주기(분)'), interval,
+      el('span', {}, 'S3 prefix'), prefix,
+      el('button', { class: 'btn', onclick: save }, '저장'),
+      el('button', { class: 'btn primary', onclick: async (ev) => {
+        ev.target.disabled = true; ev.target.textContent = '동기화 중…';
+        try { await api.post('/api/pipeline/csv-sync/run'); } catch (e) { alert(e.message); }
+        loadAlerts();
+      } }, '↓ 지금 동기화'),
+    ),
+    tbl,
+    el('button', { class: 'btn', style: { marginTop: '6px' }, onclick: () => {
+      tbl.querySelector('tbody').append(mkRow({ key: '', dest: '' }));
+    } }, '+ 파일 추가'),
+  );
+}
+
+function alExcludeEditor(cfg) {
+  const ex = (cfg.unmatched_scan || {}).exclude || {};
+  const eqp = el('input', { type: 'text', value: (ex.eqp_id || []).join(', '), style: { width: '300px' } });
+  const model = el('input', { type: 'text', value: (ex.eqp_model || []).join(', '), style: { width: '300px' } });
+  return el('div', { style: { borderTop: AL_HAIR, marginTop: '20px', paddingTop: '12px' } },
+    alSub('미매칭 제외 규칙 (전역)', 'fnmatch 패턴 · 쉼표 구분 — config/pipeline.yaml · unmatched_scan.exclude'),
+    el('div', { style: { fontSize: '12px', display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' } },
+      'eqp_id', eqp, 'eqp_model', model,
+      el('button', { class: 'btn', onclick: async () => {
+        await api.put('/api/pipeline/config/exclude', {
+          eqp_id: eqp.value.split(',').map((s) => s.trim()).filter(Boolean),
+          eqp_model: model.value.split(',').map((s) => s.trim()).filter(Boolean),
+        });
+        loadAlerts();
+      } }, '저장 + 재스캔'),
+    ),
+  );
 }
 
 // ─────────────────────────────────────
@@ -1743,7 +2002,7 @@ function applyTheme(mode) {
   });
 
   // nav tab clicks
-  $$('.tab').forEach((b) => b.addEventListener('click', () => route(b.dataset.tab)));
+  $$('.tab[data-tab]').forEach((b) => b.addEventListener('click', () => route(b.dataset.tab)));
 
   try {
     STATE.health = await api.get('/api/health');

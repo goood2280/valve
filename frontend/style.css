@@ -840,6 +840,28 @@ main {
 .dot.pending { background: var(--text-muted); }
 
 /* ─── heatmap ─── */
+/* DB heatmap 기간 선택 세그먼트 + 가로 스크롤 래퍼 */
+.dbhm-period { display: flex; gap: 4px; margin-bottom: 12px; }
+.dbhm-period .seg {
+  font-family: 'JetBrains Mono',monospace;
+  font-size: 11px;
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+.dbhm-period .seg:hover { background: var(--bg-hover); }
+.dbhm-period .seg.on {
+  background: var(--accent-glow);
+  color: var(--accent-dim);
+  border-color: var(--accent-dim);
+  font-weight: 700;
+}
+.hm-scroll { overflow-x: auto; }
+
 .heatmap {
   width: 100%;
   border-collapse: separate;
@@ -873,12 +895,15 @@ main {
   z-index: 1;
   position: relative;
 }
-.hm-cell.s-success    { background: #bbf7d0; color: #166534; border-color: #86efac; }
-.hm-cell.s-running    { background: #bfdbfe; color: #1e40af; border-color: #93c5fd; animation: pulse 1.5s infinite; }
-.hm-cell.s-partial    { background: #fde68a; color: #92400e; border-color: #fcd34d; }
-.hm-cell.s-failed     { background: #fecaca; color: #991b1b; border-color: #fca5a5; }
-.hm-cell.s-planned    { background: #e5e5e5; color: #525252; }
-.hm-cell.s-idle       { background: transparent; color: var(--text-muted); }
+/* 상태 색 — `.heatmap td.hm-cell` 기본 배경보다 우선하도록 td 셀렉터 병기 */
+.heatmap td.hm-cell.s-raw, .hm-cell.s-raw            { background: #c7d2fe; color: #3730a3; border-color: #a5b4fc; }
+.heatmap td.hm-cell.s-success, .hm-cell.s-success    { background: #bbf7d0; color: #166534; border-color: #86efac; }
+.heatmap td.hm-cell.s-running, .hm-cell.s-running    { background: #bfdbfe; color: #1e40af; border-color: #93c5fd; animation: pulse 1.5s infinite; }
+.heatmap td.hm-cell.s-partial, .hm-cell.s-partial    { background: #fde68a; color: #92400e; border-color: #fcd34d; }
+.heatmap td.hm-cell.s-failed, .hm-cell.s-failed      { background: #fecaca; color: #991b1b; border-color: #fca5a5; }
+.heatmap td.hm-cell.s-planned, .hm-cell.s-planned    { background: #e5e5e5; color: #525252; }
+.heatmap td.hm-cell.s-idle, .hm-cell.s-idle          { background: transparent; color: var(--text-muted); }
+.heatmap td.hm-cell.s-off,
 .hm-cell.s-off {
   background: repeating-linear-gradient(45deg, #f5f5f5, #f5f5f5 3px, #ffffff 3px, #ffffff 6px);
   border-color: #ebebeb;
@@ -886,6 +911,21 @@ main {
   opacity: 0.55;
 }
 .hm-cell.s-off:hover { transform: none; box-shadow: none; }
+
+/* feature store 산출물 수 배지 · matching stale 태그 (DB heatmap 소스 행) */
+.feat-badge {
+  margin-left: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #0e7490;
+  background: rgba(6,182,212,0.12);
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid rgba(6,182,212,0.25);
+}
+.stale-tag { margin-left: 6px; color: #e5484d !important; font-weight: 600; }
+.prod-head-inner.clickable { cursor: pointer; }
+.prod-head-inner.clickable:hover .prod-head-name { text-decoration: underline; }
 
 /* ── heatmap: product 그룹 헤더 ── */
 .heatmap tr.prod-head-row td.prod-head-cell {
@@ -1035,6 +1075,19 @@ textarea { resize: vertical; min-height: 60px; font-family: 'JetBrains Mono',mon
 }
 .tbl tr:hover td { background: var(--bg-hover); }
 .tbl .mono { color: var(--text-secondary); font-size: 11px; }
+
+/* 설정파일(yaml/json/txt) 텍스트 미리보기 */
+.text-view {
+  margin: 0;
+  padding: 12px 14px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-primary);
+  white-space: pre;
+  overflow: auto;
+  tab-size: 2;
+}
 
 /* ─── browser split ─── */
 .split {

@@ -1,0 +1,24 @@
+# flow → S3 → Valve csv 설정파일 동기화
+# ────────────────────────────────────────────
+# flow 가 s3_sync (flow/backend/core/s3_sync.py) 로 올리는 matching csv 들을
+# 주기적으로 내려받아 로컬 config 에 반영한다.
+#   s3_prefix  flow 업로드 prefix (flow s3_sync.json 의 prefix 와 맞출 것)
+#   key        {s3_prefix}/ 이하 S3 key
+#   dest       Valve 로컬 저장 경로 (ROOT 기준 상대)
+# 알람 탭 › CSV 동기화 섹션에서도 웹으로 관리 가능.
+enabled: true
+interval_min: 30
+s3_prefix: flow/artifacts
+files:
+  - key: matching/step_matching.csv
+    dest: config/step_matching/vehicle_matching.csv
+  - key: matching/fab.csv
+    dest: config/feature_rules/fab.csv
+  - key: matching/knob_ppid.csv
+    dest: config/feature_rules/knob_ppid.csv
+  - key: matching/mask.csv
+    dest: config/feature_rules/mask.csv
+  - key: matching/inline_matching.csv
+    dest: config/feature_rules/inline.csv
+  - key: matching/vm_matching.csv
+    dest: config/feature_rules/vm.csv

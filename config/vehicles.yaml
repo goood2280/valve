@@ -1,0 +1,23 @@
+# Vehicle 정의 — Ref config.yaml 과 동일한 키 체계
+# QueryTimeSpan(일)  전체 조회 기간 / SplitTimeSpan(일)  분할(split) 단위
+# event_days_back    event 재처리 대상 일수
+# event_lot_startwith  root_lot_id prefix 1차 필터
+VH_PRODA:
+  vehicle: VH_PRODA
+  product: PRODA
+  process_id: P100
+  line_id: [L1]
+  QueryTimeSpan: 6
+  SplitTimeSpan: 3
+  event_days_back: 7
+  event_lot_startwith: "R"
+
+VH_PRODB:
+  vehicle: VH_PRODB
+  product: PRODB
+  process_id: P200
+  line_id: [L2]
+  QueryTimeSpan: 6
+  SplitTimeSpan: 3
+  event_days_back: 7
+  event_lot_startwith: "R"
