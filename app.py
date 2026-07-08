@@ -167,6 +167,8 @@ browser_router.deps(
     STAGING_DIR, S3_LOCAL_DIR,
     extra_roots={"config": CONFIG_DIR, "db": ROOT / "db"},
     annotator=s3_link.build_annotator(pipeline_router.csv_sync, s3, _s3queue),
+    s3=s3, csv_sync=pipeline_router.csv_sync,
+    config_prefix=(SETTINGS.get("alerts", {}).get("config_prefix") or "valve-config"),
 )
 
 app.include_router(jobs_router.router)

@@ -72,16 +72,19 @@ def status():
 def runtime():
     """호스트 자원으로 산정한 워커 계획 + runtime 설정. UI 표시/조정용."""
     cfg = _p().global_cfg().get("runtime") or {}
-    return {"plan": plan_dict(cfg), "config": cfg, "scheduler_running": runner.schedule_enabled()}
+    return {"plan": plan_dict(cfg), "config": cfg,
+            "scheduler_running": runner.schedule_enabled(), "loop_running": runner.loop_enabled()}
 
 
 @router.put("/api/pipeline/runtime")
 def put_runtime(body: dict = Body(...)):
-    """runtime 설정 저장 (raw_days/split_days/max_workers/interval_hours/schedule_enabled 등)."""
+    """runtime 설정 저장 (raw_days/split_days/max_workers/interval_hours/
+    schedule_enabled/loop_enabled/loop_gap_sec 등)."""
     cfg = _p().global_cfg()
     rt = cfg.get("runtime") or {}
-    for k in ("raw_days", "split_days", "max_workers", "vehicle_workers", "feature_workers",
-              "mem_per_worker_gb", "cpu_cores", "interval_hours", "schedule_enabled"):
+    for k in ("raw_days", "split_days", "raw_api_max", "max_workers", "vehicle_workers",
+              "feature_workers", "mem_per_worker_gb", "cpu_cores", "interval_hours",
+              "schedule_enabled", "loop_enabled", "loop_gap_sec"):
         if k in body:
             rt[k] = body[k]
     cfg["runtime"] = rt
@@ -89,10 +92,17 @@ def put_runtime(body: dict = Body(...)):
     return {"ok": True, "config": rt, "plan": plan_dict(rt)}
 
 
+@router.get("/api/pipeline/progress")
+def progress():
+    """실행 중 진행상황 — vehicle 별 현재 단계(raw/event/feature)·유닛 진척.
+    백필이 지금 어느 DB 단계를 처리 중인지 실시간 표시용."""
+    return runner.snapshot()
+
+
 @router.post("/api/pipeline/run-all")
 def run_all_parallel():
-    """전 vehicle 병렬 raw→event→feature 1회 실행 (스케줄러와 동일 동작, 수동 트리거)."""
-    return runner.run_all()
+    """전 vehicle 병렬 raw→event→feature 1회 실행 (수동 트리거). 실행 중이면 skip."""
+    return runner.run_all(mode="manual")
 
 
 @router.get("/api/pipeline/config")

@@ -1,57 +1,64 @@
-# Valve feature pipeline — 전역 설정
-# ────────────────────────────────────────────
-# Ref_raw_query / Ref_event / Ref_feature 파이프라인의 전역 관리 지점.
-#   · db_root            파이프라인 DB 루트 (1.RAWDATA_DB / 2.EVENT_DB / 3.FEATURE_STORE)
-#   · step_matching      vehicle_matching CSV 경로 (vehicle,step_id,step_desc)
-#   · feature_rules      카테고리별 feature 규칙 CSV — 여기 등록된 카테고리만 feature 화됨
-#   · unmatched_scan     FAB raw 에서 vehicle_matching 에 없는 step_id 스캔 시 제외 규칙.
-#                        eqp_id / eqp_model 이 아래 패턴(fnmatch: * ? 지원)과 일치하면
-#                        미매칭 리포트에서 제외 (excluded 목록에 사유와 함께 표시).
-# ────────────────────────────────────────────
 db_root: db
-
-# 파이프라인 실행 자원/스케줄 — pipeline_runner 가 사용.
-#   raw_days/split_days : 기본 5일치를 1일씩 쪼개 (source×day) 유닛으로 병렬 쿼리
-#   max_workers 등 auto : 호스트 코어/메모리(runtime_env)로 자동 산정 (16코어/120GB 활용)
-#   interval_hours + schedule_enabled : 주기 자동 실행 (전 vehicle raw→event→feature)
 runtime:
   raw_days: 5
   split_days: 1
-  max_workers: auto        # auto | 정수
-  vehicle_workers: auto    # 동시 처리 vehicle 수
+  raw_api_max: 3
+  max_workers: auto
+  vehicle_workers: auto
   feature_workers: auto
   mem_per_worker_gb: 4
-  cpu_cores: auto          # auto | 정수 (컨테이너 제한 시 지정)
-  interval_hours: 0        # 0 = 자동 스케줄 끔
+  cpu_cores: auto
+  interval_hours: 0
   schedule_enabled: false
-
-# 추출 소스 — FAB · INLINE · VM 3종. 소스별 테이블명/추출 컬럼을 여기서 조절.
-# columns 에서 빼면 raw parquet 에서도 빠짐 (event/feature 는 있는 컬럼만 사용).
+  loop_enabled: false
 sources:
   FAB:
     table: RAW_FAB_DATA
-    columns: [root_lot_id, wafer_id, part_id, tkout_time, step_id, step_desc, ppid,
-              reticle_id, eqp_id, eqp_model, chamber_id, unit_id, sleuth_order]
+    columns:
+    - root_lot_id
+    - wafer_id
+    - part_id
+    - tkout_time
+    - step_id
+    - step_desc
+    - ppid
+    - reticle_id
+    - eqp_id
+    - eqp_model
+    - chamber_id
+    - unit_id
+    - sleuth_order
   INLINE:
     table: RAW_INLINE_DATA
-    columns: [root_lot_id, wafer_id, item_id, value, measure_pos, time]
+    columns:
+    - root_lot_id
+    - wafer_id
+    - item_id
+    - value
+    - measure_pos
+    - time
   VM:
     table: RAW_VM_DATA
-    columns: [root_lot_id, wafer_id, sensor_id, eqp_id, step_id,
-              predicted_value, actual_value, residual, time]
-
+    columns:
+    - root_lot_id
+    - wafer_id
+    - sensor_id
+    - eqp_id
+    - step_id
+    - predicted_value
+    - actual_value
+    - residual
+    - time
 step_matching: config/step_matching/vehicle_matching.csv
-
 feature_rules:
   fab: config/feature_rules/fab.csv
   knob: config/feature_rules/knob_ppid.csv
   mask: config/feature_rules/mask.csv
   inline: config/feature_rules/inline.csv
   vm: config/feature_rules/vm.csv
-
 unmatched_scan:
   exclude:
     eqp_id:
-      - "AUX_*"        # 보조설비 — 매칭 대상 아님
+    - AUX_*
     eqp_model:
-      - "MEA-*"        # 계측 장비 (metrology) — step 매칭 불필요
+    - MEA-*

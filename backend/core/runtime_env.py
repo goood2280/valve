@@ -56,8 +56,9 @@ class WorkerPlan:
     total_mem_gb: float | None
     avail_mem_gb: float | None
     mem_per_worker_gb: float
-    raw_workers: int         # (source × day) 동시 raw 쿼리 수
-    vehicle_workers: int     # 동시 처리 vehicle 수
+    raw_workers: int         # 전역 동시 raw 쿼리 수 (사내 API 풀 상한에 종속)
+    raw_api_max: int         # raw 동시 상한 (기본 3) — API 풀 막힘 방지
+    vehicle_workers: int     # 동시 처리 vehicle 수 (event/feature 병렬)
     feature_workers: int     # feature 병렬 산출 수
     sizing: str              # "auto" | "config"
     reason: str              # 산정 근거 (UI/로그 표시용)
@@ -75,28 +76,34 @@ def plan_workers(cfg: dict | None = None) -> WorkerPlan:
     avail = avail_mem_gb()
     mem_per = float(cfg.get("mem_per_worker_gb") or 4)
 
+    # compute_w = 코어/메모리 기반 일반 워커 (event/feature 병렬에 사용)
     if not _auto(cfg.get("max_workers")):
-        raw_w = max(1, int(cfg["max_workers"]))
+        compute_w = max(1, int(cfg["max_workers"]))
         sizing = "config"
-        reason = f"max_workers={raw_w} (수동)"
+        reason = f"max_workers={compute_w} (수동)"
     else:
         sizing = "auto"
         cpu_cap = max(1, cores - 2)          # 2 코어는 event loop/OS 여유
-        raw_w = cpu_cap
+        compute_w = cpu_cap
         reason = f"cores {cores}-2={cpu_cap}"
         # 전용 파이프라인 호스트 가정 → 머신 총메모리 기준(available 이 아닌 total)으로
         # 상한 산정. total 이 없으면 available fallback.
         budget = total or avail
         if budget:
             mem_cap = max(1, int((budget * 0.8) // mem_per))
-            if mem_cap < raw_w:
-                raw_w = mem_cap
+            if mem_cap < compute_w:
+                compute_w = mem_cap
                 reason = f"mem {budget:.0f}GB*0.8/{mem_per:.0f}={mem_cap}"
 
+    # raw 는 사내 API 풀에 종속 → 전역 동시 상한(raw_api_max, 기본 3) 으로 별도 제한.
+    # event/feature 는 compute 그대로 써도 됨 (API 안 씀).
+    raw_api_max = max(1, int(cfg.get("raw_api_max") or 3))
+    raw_w = min(compute_w, raw_api_max)
+
     vehicle_w = (max(1, int(cfg["vehicle_workers"])) if not _auto(cfg.get("vehicle_workers"))
-                 else max(1, min(raw_w, 4)))
+                 else max(1, min(compute_w, 4)))
     feature_w = (max(1, int(cfg["feature_workers"])) if not _auto(cfg.get("feature_workers"))
-                 else max(1, min(raw_w, max(2, cores // 4))))
+                 else max(1, min(compute_w, max(2, cores // 4))))
 
     return WorkerPlan(
         cpu_cores=cores,
@@ -104,6 +111,7 @@ def plan_workers(cfg: dict | None = None) -> WorkerPlan:
         avail_mem_gb=round(avail, 1) if avail else None,
         mem_per_worker_gb=mem_per,
         raw_workers=raw_w,
+        raw_api_max=raw_api_max,
         vehicle_workers=vehicle_w,
         feature_workers=feature_w,
         sizing=sizing,

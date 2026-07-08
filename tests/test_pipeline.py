@@ -29,11 +29,11 @@ def fake_s3(tmp_path):
 
 def test_raw_query_extracts_only_three_sources(pipe):
     pipe.run_raw_query("VH_PRODA")
-    # raw 는 소스 > 제품 > date=hive 구조
+    # raw 는 소스 > vehicle > date=hive 구조 (FAB/VH_PRODA/date=…)
     raw_root = pipe.db_root() / "1.RAWDATA_DB"
     assert {d.name for d in raw_root.iterdir()} == {"FAB", "INLINE", "VM"}
     for src in ("FAB", "INLINE", "VM"):
-        assert {d.name for d in (raw_root / src).iterdir()} == {"PRODA"}
+        assert {d.name for d in (raw_root / src).iterdir()} == {"VH_PRODA"}
 
 
 def test_source_columns_config_is_applied(pipe):
@@ -47,7 +47,7 @@ def test_source_columns_config_is_applied(pipe):
 
     stats = pipe.run_raw_query("VH_PRODA")
     assert stats["tables"]["FAB"] == "MY_FAB_TABLE"
-    raw = pl.read_parquet(next(pipe.raw_dir("PRODA", "FAB").glob("date=*/part-000.parquet")))
+    raw = pl.read_parquet(next(pipe.raw_dir("VH_PRODA", "FAB").glob("date=*/part-000.parquet")))
     assert "ppid" not in raw.columns
     assert set(fab_cols) <= set(raw.columns)
 
@@ -223,15 +223,21 @@ def test_alert_store_ack_suppresses_realert(pipe, fake_s3):
 
 
 def test_worker_plan_from_env_and_override():
-    # auto — 코어 기반, 최소 1 이상
+    # auto — 코어 기반, 최소 1 이상. raw 는 API 상한(기본 3) 에 종속
     auto = plan_workers({})
     assert auto.raw_workers >= 1 and auto.vehicle_workers >= 1
     assert auto.cpu_cores >= 1 and auto.sizing == "auto"
-    # cpu_cores/mem override 로 산정 상한 확인 (16코어/120GB 모사)
-    big = plan_workers({"cpu_cores": 16, "mem_per_worker_gb": 4})
-    assert big.raw_workers <= 14   # cores-2 상한
-    # 수동 max_workers override
-    manual = plan_workers({"max_workers": 3})
+    assert auto.raw_workers <= 3          # 기본 raw_api_max
+    # 16코어 여유메모리 모사(mem_per 작게) → raw 는 3 으로 묶이고 event/feature 는 더 씀
+    big = plan_workers({"cpu_cores": 16, "mem_per_worker_gb": 1})
+    assert big.raw_workers == 3 and big.raw_api_max == 3
+    assert big.vehicle_workers > big.raw_workers      # compute 기반, raw 상한과 분리
+    assert big.feature_workers > big.raw_workers
+    # raw_api_max 조정 시 raw 동시 상한만 바뀜
+    loose = plan_workers({"cpu_cores": 16, "raw_api_max": 6, "mem_per_worker_gb": 1})
+    assert loose.raw_workers == 6
+    # 수동 max_workers override 도 raw 상한 적용
+    manual = plan_workers({"max_workers": 8})
     assert manual.raw_workers == 3 and manual.sizing == "config"
 
 
@@ -275,8 +281,8 @@ def test_new_source_extends_via_config(pipe):
         "test_item,agg\nET_01,mean\nET_02,mean\n", encoding="utf-8")
 
     pipe.run_raw_query("VH_PRODA")
-    # 신규 소스가 raw 로 생성됨 (SOURCE/product/date 구조)
-    et_raw = list(pipe.raw_dir("PRODA", "ET").glob("date=*/part-000.parquet"))
+    # 신규 소스가 raw 로 생성됨 (SOURCE/vehicle/date 구조)
+    et_raw = list(pipe.raw_dir("VH_PRODA", "ET").glob("date=*/part-000.parquet"))
     assert et_raw
     cols = pl.read_parquet(et_raw[0]).columns
     assert "test_item" in cols
@@ -285,6 +291,32 @@ def test_new_source_extends_via_config(pipe):
     assert "ET" in r
     ev = pipe._load_event("VH_PRODA", "ET")
     assert ev is not None and set(ev["test_item"].unique()) <= {"ET_01", "ET_02"}
+
+
+def test_publish_saves_snapshot_meta_with_delta(pipe, fake_s3):
+    pipe.run_all("VH_PRODA")
+    store = AlertStore(pipe, fake_s3, {"alerts": {"s3_prefix": "valve-alerts"}}, pipe.root)
+
+    # 최초 발행 → 전부 new, first_seen 기록, 메타 파일 저장
+    p1 = store.publish("VH_PRODA")
+    assert p1 and p1["count"] > 0
+    assert set(p1["delta"]["new"]) == {a["id"] for a in p1["alerts"]}
+    assert p1["delta"]["resolved"] == []
+    assert all(a["first_seen_ts"] for a in p1["alerts"])
+    assert store.load_pub_meta("VH_PRODA")["count"] == p1["count"]
+
+    # 재발행(변화 없음) → new/resolved 없음, first_seen 계승
+    p2 = store.publish("VH_PRODA")
+    assert p2["delta"]["new"] == [] and p2["delta"]["resolved"] == []
+    fs1 = {a["id"]: a["first_seen_ts"] for a in p1["alerts"]}
+    assert all(a["first_seen_ts"] == fs1[a["id"]] for a in p2["alerts"])
+
+    # 한 건 ack 억제 → resolved 로 잡히고 발행에서 빠짐
+    tgt = p2["alerts"][0]["id"]
+    store.set_ack(tgt, "반영불필요")
+    p3 = store.publish("VH_PRODA")
+    assert tgt in p3["delta"]["resolved"]
+    assert all(a["id"] != tgt for a in p3["alerts"])
 
 
 def test_knob_feature_keeps_raw_ppid_for_miss(pipe):

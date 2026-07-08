@@ -4,8 +4,10 @@ Valve · alert_store
 파이프라인 알람(미매칭 step · KNOB RO ppid)의 통합 리스트 + flow 와의 S3 순환.
 
 순환 구조:
-  1. Valve 파이프라인 실행 → 알람 생성 → S3 `{alerts_prefix}/pipeline/{vehicle}.json` 발행
-  2. flow 가 S3 에서 읽어 조치:
+  1. Valve 파이프라인 실행 → 알람 생성(전체 스캔) → S3 `{alerts_prefix}/pipeline/{vehicle}.json` 발행
+     + 발행 스냅샷을 로컬 메타(db/REPORTS/{vehicle}/alerts_published.json)로 저장
+       (first_seen 계승 + delta new/resolved — event DB 갱신/재알람 판단 근거)
+  2. flow 가 S3 에서 읽어 룰북/매칭테이블(버전관리)에 반영·조치:
      a) 매칭 csv 수정 → S3 업로드 → Valve csv_sync 가 내려받음 → 재실행 시 알람 자연 소멸
      b) 반영 불필요/보류 건 → `{alerts_prefix}/pipeline/ack.json` 에 상태 기록
   3. Valve 는 ack.json 을 읽어 해당 알람을 억제(suppressed) — 다시 알람하지 않음
@@ -130,14 +132,54 @@ class AlertStore:
         return {"alerts": alerts, "active": active,
                 "suppressed": len(alerts) - active, "ack_key": self._ack_key()}
 
-    def publish(self, vehicle: str) -> bool:
-        """활성 알람을 S3 로 발행 — flow 가 읽어가는 지점."""
+    # ── 발행 스냅샷 메타 (직전 발행 = 상태. event DB 갱신/재알람 판단 근거) ──
+    def _pub_meta_path(self, vehicle: str) -> Path:
+        return self.pipe.report_dir(vehicle) / "alerts_published.json"
+
+    def load_pub_meta(self, vehicle: str) -> dict:
+        p = self._pub_meta_path(vehicle)
+        if p.exists():
+            try:
+                return json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        return {}
+
+    def publish(self, vehicle: str):
+        """활성 알람을 S3 로 발행 + 발행 스냅샷을 메타로 저장.
+        직전 스냅샷과 비교해 first_seen 계승 + delta(new/resolved) 계산 —
+        룰북/매칭테이블은 flow 가 버전관리하고, Valve 는 이 메타로
+        'event DB 갱신 시 무엇이 새로/해소됐는지'를 참고한다."""
         ack = self.load_ack()
-        alerts = [a for a in self.build(vehicle)
-                  if (ack.get(a["id"]) or {}).get("status") not in SUPPRESS_STATUSES]
-        payload = {"vehicle": vehicle, "ts": time.time(), "alerts": alerts}
+        cur = [a for a in self.build(vehicle)
+               if (ack.get(a["id"]) or {}).get("status") not in SUPPRESS_STATUSES]
+
+        prev = self.load_pub_meta(vehicle)
+        prev_by_id = {a["id"]: a for a in prev.get("alerts", [])}
+        now = time.time()
+        for a in cur:
+            a["first_seen_ts"] = (prev_by_id.get(a["id"]) or {}).get("first_seen_ts", now)
+            a["last_seen_ts"] = now
+        cur_ids = {a["id"] for a in cur}
+        prev_ids = set(prev_by_id)
+        payload = {
+            "vehicle": vehicle, "ts": now, "count": len(cur),
+            "delta": {"new": sorted(cur_ids - prev_ids), "resolved": sorted(prev_ids - cur_ids)},
+            "alerts": cur,
+        }
+        text = json.dumps(payload, ensure_ascii=False, indent=2)
+
+        # 로컬 메타 저장 (다음 발행의 기준 + event DB 갱신 참고). db/REPORTS/{vehicle}/
         try:
-            return self.s3.put_text(f"{self.prefix}/pipeline/{vehicle}.json",
-                                    json.dumps(payload, ensure_ascii=False, indent=2))
+            mp = self._pub_meta_path(vehicle)
+            mp.parent.mkdir(parents=True, exist_ok=True)
+            mp.write_text(text, encoding="utf-8")
         except Exception:
-            return False
+            pass
+
+        # S3 발행 — flow 가 읽어가는 지점
+        try:
+            ok = self.s3.put_text(f"{self.prefix}/pipeline/{vehicle}.json", text)
+        except Exception:
+            ok = False
+        return payload if ok else False

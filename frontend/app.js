@@ -264,7 +264,7 @@ function renderDbHeatmapCard() {
 const FEATURE_CATS = { FAB: ['fab', 'knob', 'mask'], INLINE: ['inline'], VM: ['vm'] };
 
 // DB heatmap 조회 기간 — 일 단위 vs 주/월 버킷. 재렌더에도 유지되도록 모듈 상태.
-const DBHM_PERIODS = ['1주', '1달', '6개월', '2년'];
+const DBHM_PERIODS = ['2주', '1달', '6개월', '2년'];
 let DBHM_PERIOD = '1달';
 
 // 선택 기간 → 컬럼 버킷 목록. 각 버킷은 [start, end] iso 범위 (일 단위면 start==end).
@@ -273,8 +273,8 @@ function dbhmBuckets(period) {
   const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
   const today = new Date();
   const out = [];
-  if (period === '1주' || period === '1달') {
-    const days = period === '1주' ? 7 : 31;
+  if (period === '2주' || period === '1달') {
+    const days = period === '2주' ? 14 : 31;
     for (let i = days - 1; i >= 0; i--) { const d = iso(addDays(today, -i)); out.push({ label: d.slice(5), title: d, start: d, end: d }); }
   } else if (period === '6개월') {
     for (let i = 25; i >= 0; i--) {   // 26 주
@@ -365,6 +365,7 @@ async function loadDbHeatmap() {
     body.innerHTML = '';
     body.append(
       runtimeBar,
+      el('div', { id: 'dbhmProg', class: 'dbhm-prog' }),
       picker,
       el('div', { class: 'hm-scroll' }, el('table', { class: 'heatmap' }, el('thead', {}, thead), tbody)),
       el('div', { class: 'row', style: { marginTop: '12px', gap: '14px', fontSize: '11px', color: 'var(--text-muted)', flexWrap: 'wrap' } },
@@ -373,6 +374,9 @@ async function loadDbHeatmap() {
         legendItem('s-partial', 'event 재처리 필요 (matching 변경)'),
         legendItem('s-off', 'raw 없음'),
         el('span', { class: 'hint' }, '주/월 버킷은 가장 긴급한 단계 색 · feat N = 소스별 feature 수 · vehicle 헤더 클릭 = 재실행')));
+    // 루프/스케줄 실행 중이거나 진행 중이면 진행상황 폴링 시작
+    if (rt && (rt.loop_running || rt.scheduler_running)) { DBHM_LAST_RUNNING = true; startProgPoll(); }
+    else if (!DBHM_PROG_TIMER) { const pr = await api.get('/api/pipeline/progress').catch(() => null); if (pr && pr.running) { DBHM_LAST_RUNNING = true; startProgPoll(); } }
   } catch (e) {
     const body = $('#dbhmBody');
     if (body) { body.innerHTML = ''; body.append(el('div', { class: 'empty' }, String(e.message || e))); }
@@ -385,49 +389,100 @@ async function onRunVehicle(v) {
   catch (e) { alert(e.message); }
 }
 
-// 워커 계획 + 전체 병렬 실행 + 주기 스케줄러 토글
+// 워커 계획 + 전체 병렬 실행 + 스케줄/루프 토글 + 실시간 진행상황
 function renderRuntimeBar(rt) {
   const p = rt.plan || {}, c = rt.config || {};
   const mem = p.total_mem_gb ? `${p.total_mem_gb}GB` : 'mem?';
   const info = el('span', { class: 'rt-info', title: `산정근거: ${p.reason || '-'} · ${p.sizing}` },
-    `🖥 ${p.cpu_cores}코어 · ${mem} → raw 워커 ${p.raw_workers} · vehicle ${p.vehicle_workers} · feature ${p.feature_workers}`,
-    el('span', { class: 'hint', style: { marginLeft: '8px' } }, `(${c.raw_days || 5}일 · ${c.split_days || 1}일 분할)`));
+    `🖥 ${p.cpu_cores}코어 · ${mem} → `,
+    el('span', { title: '전 vehicle 합친 동시 raw 쿼리 상한 (사내 API 풀 보호)' }, 'raw 동시 '),
+    el('input', {
+      type: 'number', class: 'rt-hours', min: '1', step: '1', value: String(p.raw_api_max ?? 3),
+      title: 'raw_api_max — raw 쿼리 전역 동시 상한 (기본 3)',
+      onchange: (e) => putRuntime({ raw_api_max: Math.max(1, Number(e.target.value)) }),
+    }),
+    ' · ',
+    el('span', { title: '동시에 처리할 vehicle 수. 각 vehicle 내부는 raw→event→feature 순차 보장.' }, 'vehicle 병렬 '),
+    el('input', {
+      type: 'number', class: 'rt-hours', min: '1', step: '1', value: String(p.vehicle_workers ?? 1),
+      title: 'vehicle_workers — 동시 처리 vehicle 수',
+      onchange: (e) => putRuntime({ vehicle_workers: Math.max(1, Number(e.target.value)) }),
+    }),
+    ` · feature ${p.feature_workers}`,
+    el('span', { class: 'hint', style: { marginLeft: '8px' } }, `(${c.raw_days || 5}일 · ${c.split_days || 1}일 분할 · vehicle별 raw→event→feature 순차 · feature=전체 event)`));
 
   const runBtn = el('button', { class: 'btn primary small', onclick: onRunAll }, '▶ 전체 병렬 실행');
 
-  const enabled = !!c.schedule_enabled;
+  // 주기 스케줄 (interval_hours)
   const schedule = el('label', { class: 'rt-sched', title: '전 vehicle raw→event→feature 를 주기 실행' },
     el('input', {
-      type: 'checkbox', ...(enabled ? { checked: 'checked' } : {}),
-      onchange: async (e) => {
-        try { await api.put('/api/pipeline/runtime', { schedule_enabled: e.target.checked }); await loadDbHeatmap(); }
-        catch (err) { alert(err.message); }
-      },
+      type: 'checkbox', ...(c.schedule_enabled ? { checked: 'checked' } : {}),
+      onchange: (e) => putRuntime({ schedule_enabled: e.target.checked }),
     }),
     '⏱ 자동 ',
     el('input', {
       type: 'number', class: 'rt-hours', min: '0', step: '1', value: String(c.interval_hours ?? 0),
       title: 'interval_hours (0=끔)',
-      onchange: async (e) => {
-        try { await api.put('/api/pipeline/runtime', { interval_hours: Number(e.target.value) }); await loadDbHeatmap(); }
-        catch (err) { alert(err.message); }
-      },
+      onchange: (e) => putRuntime({ interval_hours: Number(e.target.value) }),
     }),
     'h');
 
-  return el('div', { class: 'rt-bar' }, info, el('span', { class: 'spacer' }), schedule, runBtn);
+  // 루프 실행 — 켜면 쉬지 않고 계속 반복 실행
+  const loopBtn = el('button', {
+    class: 'btn small rt-loop' + (c.loop_enabled ? ' on' : ''),
+    title: '켜면 전 vehicle 파이프라인을 계속 반복 실행 (다시 누르면 정지)',
+    onclick: () => putRuntime({ loop_enabled: !c.loop_enabled }),
+  }, c.loop_enabled ? '🔁 루프 실행 중 (정지)' : '🔁 루프 실행');
+
+  return el('div', { class: 'rt-bar' },
+    info, el('span', { class: 'spacer' }), schedule, loopBtn, runBtn);
+}
+
+async function putRuntime(patch) {
+  try { await api.put('/api/pipeline/runtime', patch); await loadDbHeatmap(); }
+  catch (e) { alert(e.message); }
 }
 
 async function onRunAll() {
   if (!confirm('전 vehicle 을 병렬로 raw→event→feature 실행할까요?')) return;
-  const body = $('#dbhmBody');
-  if (body) body.innerHTML = '<div class="loading">전체 병렬 실행 중…</div>';
-  try {
-    const r = await api.post('/api/pipeline/run-all', {});
-    await loadDbHeatmap();
-    const n = Object.keys(r.vehicles || {}).length;
-    console.log(`run-all: ${n} vehicle · ${r.elapsed_sec}s · workers`, r.plan);
-  } catch (e) { alert(e.message); await loadDbHeatmap(); }
+  DBHM_LAST_RUNNING = true;
+  startProgPoll();                         // 실행 중 단계 표시 → 완료 시 폴러가 heatmap 갱신
+  try { await api.post('/api/pipeline/run-all', {}); }
+  catch (e) { alert(e.message); }
+}
+
+// ── 실시간 진행상황 폴링 (raw/event/feature 단계 표시) ──
+let DBHM_PROG_TIMER = null;
+let DBHM_LAST_RUNNING = false;
+const PROG_STAGE = { queued: '대기', raw: 'raw 쿼리', event: 'event DB화', feature: 'feature(전체 event)', done: '완료', error: '오류' };
+
+function stopProgPoll() { if (DBHM_PROG_TIMER) { clearInterval(DBHM_PROG_TIMER); DBHM_PROG_TIMER = null; } }
+
+function startProgPoll() {
+  stopProgPoll();
+  DBHM_PROG_TIMER = setInterval(async () => {
+    const box = $('#dbhmProg');
+    if (!box) return stopProgPoll();
+    let pr; try { pr = await api.get('/api/pipeline/progress'); } catch { return; }
+    renderProg(box, pr);
+    if (DBHM_LAST_RUNNING && !pr.running) { DBHM_LAST_RUNNING = false; loadDbHeatmap(); return; }
+    if (pr.running) DBHM_LAST_RUNNING = true;
+  }, 1200);
+}
+
+function renderProg(box, pr) {
+  box.innerHTML = '';
+  if (!pr || (!pr.running && !pr.mode)) return;
+  const head = pr.running
+    ? (pr.mode === 'loop' ? `🔁 루프 #${pr.loop_iter} 실행 중` : (pr.mode === 'schedule' ? '⏱ 자동 실행 중' : '⏳ 실행 중'))
+    : '· 대기';
+  const items = Object.entries(pr.vehicles || {}).map(([v, s]) => {
+    let d = PROG_STAGE[s.stage] || s.stage || '-';
+    if (s.stage === 'raw' && s.raw_total) d += ` ${s.raw_done || 0}/${s.raw_total}`;
+    if (s.stage === 'feature' && s.event_dates) d += ` ${s.event_dates}일`;
+    return el('span', { class: `prog-veh stage-${s.stage || ''}` }, `${v} · ${d}`);
+  });
+  box.append(el('span', { class: 'prog-head' }, head), ...items);
 }
 
 function legendItem(cls, text) {
@@ -893,15 +948,6 @@ function sourceCard(p, s, si, rerender) {
       el('input', { type: 'text', class: 'inline-input', style: { width: '180px' },
         value: (s.shard_hierarchy || []).join(', '), placeholder: 'root_lot_id, item_id',
         onchange: e => { s.shard_hierarchy = e.target.value.split(',').map(x => x.trim()).filter(Boolean); } }),
-      el('label', { class: 'check', title: 'probe (사전 분포 스캔) 가 자꾸 실패·timeout 나는 소스는 probe 를 끄고 단일 chunk 로 바로 실행' },
-        el('input', { type: 'checkbox', ...(s.probe_skip ? { checked: 'checked' } : {}),
-          onchange: e => {
-            if (e.target.checked) s.probe_skip = true;
-            else delete s.probe_skip;
-            rerender();
-          }}),
-        'probe skip',
-      ),
       el('div', { class: 'spacer' }),
       el('button', { class: 'btn ghost small', onclick: deleteSource }, '🗑'),
     ),
@@ -1623,7 +1669,7 @@ async function onSaveSettings(draft) {
 // ─────────────────────────────────────
 // Browser tab
 // ─────────────────────────────────────
-let BR = { root: 'staging', path: '', selFile: '', sql: '' };
+let BR = { root: 'staging', path: '', selFile: '', sql: '', s3mode: 'sync' };
 
 async function renderBrowser() {
   const main = $('#main');
@@ -1637,6 +1683,7 @@ async function renderBrowser() {
     el('div', { class: 'split' },
       el('div', { class: 'pane' },
         el('div', { class: 'hdr' }, '📁 Roots'),
+        el('div', { id: 'brConfigFiles' }),
         el('div', { id: 'brTree' }, 'loading...'),
       ),
       el('div', { class: 'pane', style: { display: 'flex', flexDirection: 'column' } },
@@ -1728,6 +1775,45 @@ async function loadBrowserRoots() {
     }
     loadBrowserDir(BR.root, BR.path);
   } catch (e) { $('#brTree').textContent = String(e); }
+  loadConfigFilesSection();
+}
+
+// 최상위 "설정파일 → S3" 빠른 목록 — 각 파일 개별 전송 (sync/cp 선택)
+async function loadConfigFilesSection() {
+  const box = $('#brConfigFiles');
+  if (!box) return;
+  let files = [];
+  try { files = (await api.get('/api/browser/config-files')).files || []; } catch { }
+  box.innerHTML = '';
+  if (!files.length) return;
+  const modeBtn = (m) => el('button', {
+    class: 'seg' + (BR.s3mode === m ? ' on' : ''),
+    title: m === 'sync' ? '내용 다를 때만 업로드' : '항상 덮어쓰기 업로드',
+    onclick: () => { BR.s3mode = m; loadConfigFilesSection(); },
+  }, m);
+  const list = el('div', { class: 'cfg-list' },
+    ...files.map((f) => el('div', { class: 'cfg-row' },
+      syncBadge(f.sync),
+      el('span', { class: 'cfg-name', title: `→ s3://${f.s3_key}`,
+        onclick: () => { BR.root = 'config'; selectFile('config', f.rel); } }, f.rel),
+      el('button', { class: 'btn ghost xsmall', title: `S3 전송 (${BR.s3mode}) → ${f.s3_key}`,
+        onclick: () => onS3Transfer('config', f.rel) }, '⇧ S3'),
+    )));
+  box.append(el('details', { class: 'cfg-sec', open: 'open' },
+    el('summary', {},
+      el('span', {}, '⚙ 설정파일 → S3'),
+      el('span', { class: 'spacer' }),
+      el('span', { class: 'cfg-mode', onclick: (e) => e.stopPropagation() }, modeBtn('sync'), modeBtn('cp'))),
+    list));
+}
+
+async function onS3Transfer(root, path) {
+  try {
+    const r = await api.post('/api/browser/s3-transfer', { root, path, mode: BR.s3mode });
+    await loadConfigFilesSection();  // 신호등 갱신
+    console.log(`s3-transfer ${path} [${r.mode}] → ${r.status} (${r.s3_key})`);
+    if (r.status === 'error') alert(`전송 실패: ${path}`);
+  } catch (e) { alert(e.message); }
 }
 
 async function loadBrowserDir(root, path) {

@@ -4,7 +4,7 @@ Valve · feature_pipeline
 Ref_raw_query / Ref_event / Ref_feature 3단계 파이프라인의 Valve 통합판.
 
   1) raw   : vehicle 설정(QueryTimeSpan/SplitTimeSpan)대로 split 을 나눠
-             FAB · INLINE · VM 을 쿼리 → db/1.RAWDATA_DB/{SOURCE}/{product}/date=… (flow canonical)
+             FAB · INLINE · VM 을 쿼리 → db/1.RAWDATA_DB/{SOURCE}/{vehicle}/date=…
   2) event : FAB raw 를 vehicle_matching(step_id↔step_desc) inner join +
              root_lot prefix 필터 → db/2.EVENT_DB/{vehicle}/date=…
   3) feature: 카테고리별 규칙 CSV (fab / knob_ppid / mask / inline / vm) 에 따라
@@ -227,9 +227,10 @@ class FeaturePipeline:
     def db_root(self) -> Path:
         return self.root / self.global_cfg().get("db_root", "db")
 
-    def raw_dir(self, product: str, source: str) -> Path:
-        # raw 는 소스 > 제품 > date=hive 파티션. (event/feature 는 vehicle 기준)
-        return self.db_root() / "1.RAWDATA_DB" / source / product
+    def raw_dir(self, vehicle: str, source: str) -> Path:
+        # raw 는 소스 > vehicle > date=hive 파티션 (FAB/{vehicle}/date=…).
+        # event/feature 와 동일하게 vehicle 기준으로 통일.
+        return self.db_root() / "1.RAWDATA_DB" / source / vehicle
 
     def event_dir(self, vehicle: str, source: str = "FAB") -> Path:
         return self.db_root() / "2.EVENT_DB" / vehicle / source
@@ -302,7 +303,7 @@ class FeaturePipeline:
         df = gen(cfg, start, end, split) if gen else self._mock_generic(cfg, start, end, split, source, sc["columns"])
         keep = [c for c in sc["columns"] if c in df.columns] + ["split"]
         df = df.select(keep)
-        out = self.raw_dir(cfg["product"], source) / f"date={start}"
+        out = self.raw_dir(cfg["vehicle"], source) / f"date={start}"
         out.mkdir(parents=True, exist_ok=True)
         df.write_parquet(out / "part-000.parquet", compression="zstd", compression_level=3)
         return df.height
@@ -502,7 +503,7 @@ class FeaturePipeline:
                     shutil.rmtree(d, ignore_errors=True)
 
             rows_in = rows_out = parts = 0
-            for date_dir in sorted(self.raw_dir(cfg["product"], source).glob("date=*")):
+            for date_dir in sorted(self.raw_dir(vehicle, source).glob("date=*")):
                 raw_path = date_dir / "part-000.parquet"
                 out_path = edir / date_dir.name / "part-000.parquet"
                 if not raw_path.exists() or (out_path.exists() and not rebuild):
@@ -540,14 +541,24 @@ class FeaturePipeline:
             return None
         return pl.concat([pl.read_parquet(f) for f in files])
 
-    def _load_raw(self, product: str, source: str) -> pl.DataFrame | None:
-        files = sorted(self.raw_dir(product, source).glob("date=*/part-000.parquet"))
+    def _load_raw(self, vehicle: str, source: str) -> pl.DataFrame | None:
+        files = sorted(self.raw_dir(vehicle, source).glob("date=*/part-000.parquet"))
         if not files:
             return None
         return pl.concat([pl.read_parquet(f) for f in files])
 
+    def event_date_count(self, vehicle: str) -> int:
+        """event DB 에 쌓인 전체 날짜 파티션 수 (소스 통합). feature 는 이 전체를 대상으로 산출."""
+        dates = set()
+        for source in self.sources_cfg():
+            for p in self.event_dir(vehicle, source).glob("date=*"):
+                dates.add(p.name[5:])
+        return len(dates)
+
     # ─────────────────────────────────────────
     # 3) FEATURE  (fab / knob / mask / inline / vm)
+    #    ※ 특정 기간이 아니라 event DB 에 쌓인 "전체" 를 대상으로 산출한다
+    #      (_load_event 가 date=* 파티션 전부 로드).
     # ─────────────────────────────────────────
     def run_feature(self, vehicle: str) -> dict:
         event = self._load_event(vehicle, "FAB")
@@ -677,6 +688,7 @@ class FeaturePipeline:
             "files": features,
             "knob_miss": knob_miss_rows,
             "skipped": skipped,
+            "event_dates": self.event_date_count(vehicle),  # feature 가 커버한 전체 event 날짜 수
         }
 
     @staticmethod
@@ -699,7 +711,7 @@ class FeaturePipeline:
     # ─────────────────────────────────────────
     def scan_unmatched(self, vehicle: str) -> dict:
         cfg = self.vehicle_cfg(vehicle)
-        raw = self._load_raw(cfg["product"], "FAB")
+        raw = self._load_raw(vehicle, "FAB")
         if raw is None:
             raise RuntimeError("FAB raw 없음 — raw 단계를 먼저 실행하세요")
         matched = set(self.step_map(vehicle)["step_id"].to_list())
@@ -769,7 +781,7 @@ class FeaturePipeline:
         raw, event = {}, {}
         for source in self.sources_cfg():
             raw[source] = [p.parent.name[5:] for p in
-                           sorted(self.raw_dir(cfg["product"], source).glob("date=*/part-000.parquet"))]
+                           sorted(self.raw_dir(vehicle, source).glob("date=*/part-000.parquet"))]
             edir = self.event_dir(vehicle, source)
             dates = [p.parent.name[5:] for p in sorted(edir.glob("date=*/part-000.parquet"))]
             meta = {}
