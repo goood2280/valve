@@ -1,0 +1,7 @@
+# FAB DB 스캔 설정 — VH_PRODB
+vehicle: VH_PRODB
+eqp_filter: []
+eqp_filter_mode: eqp_id
+extra_columns: [eqp_id, recipe_id]
+max_hits: 10
+main_step_only: true

@@ -36,6 +36,7 @@ from backend.routers import probe_preview as probe_preview_router
 from backend.routers import ops as ops_router
 from backend.routers import agent as agent_router
 from backend.routers import pipeline as pipeline_router
+from backend.routers import scanner as scanner_router
 
 
 # 테스트/임베디드 실행을 위해 VALVE_ROOT 환경변수로 ROOT 재지정 가능.
@@ -158,6 +159,7 @@ ops_router.deps(state, SETTINGS, s3)
 SETTINGS["_root"] = str(ROOT)  # agent 가 products.yaml 경로 역추적할 때 사용
 agent_router.deps(state, SETTINGS, PRODUCTS, planner, executor, LOGS_DIR / "agent_audit.jsonl")
 pipeline_router.deps(ROOT, SETTINGS, s3)
+scanner_router.deps(ROOT, SETTINGS, s3, pipeline_router._pipe, api)
 
 # browser: csv/설정파일(config) · 파이프라인 산출물(db) 탐색 + S3 연동 신호등.
 # csv_sync(다운로드 상태) · s3(연동 여부) · s3_queue(업로드 대기) 를 근거로 판정.
@@ -180,6 +182,7 @@ app.include_router(probe_preview_router.router)
 app.include_router(ops_router.router)
 app.include_router(agent_router.router)
 app.include_router(pipeline_router.router)
+app.include_router(scanner_router.router)
 
 # aipd 브리지 (선택) — aipd 패키지가 함께 배포된 경우 순환 데모/검토큐 연동 활성화
 try:
@@ -206,6 +209,9 @@ async def _on_startup():
     # csv 설정파일 S3 주기 다운로드 (flow → Valve)
     if pipeline_router.csv_sync.load_config().get("enabled"):
         pipeline_router.csv_sync.start_background()
+    # 알람 S3 주기 발행 (Valve → flow) — 항상 루프 기동, 내부에서
+    # alerts.s3_interval_min / s3_enabled 를 폴링해 실제 발행 여부 결정.
+    pipeline_router.alerts.start_background()
     # 파이프라인 주기 스케줄러 (전 vehicle raw→event→feature) — 항상 루프 기동,
     # 내부에서 runtime.schedule_enabled/interval_hours 를 폴링해 실제 실행 여부 결정.
     pipeline_router.runner.start_background()
@@ -215,6 +221,7 @@ async def _on_startup():
 async def _on_shutdown():
     _s3queue.stop_background()
     pipeline_router.csv_sync.stop_background()
+    pipeline_router.alerts.stop_background()
     pipeline_router.runner.stop_background()
 
 

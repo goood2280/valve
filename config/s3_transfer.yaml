@@ -1,0 +1,17 @@
+destinations: {}
+rules:
+  config:
+    mode: cp
+    targets:
+    - dest: default
+      prefix: valve-config
+  db:
+    mode: sync
+    targets:
+    - dest: default
+      prefix: valve-export/db
+  staging:
+    mode: sync
+    targets:
+    - dest: default
+      prefix: valve-export/staging

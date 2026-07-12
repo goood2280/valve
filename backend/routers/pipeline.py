@@ -2,7 +2,9 @@
 """feature pipeline 라우터 — Ref 3단계(raw→event→feature) 실행/리포트 API.
 프론트 '알람' 탭이 소비한다.
 
-  POST /api/pipeline/run/{vehicle}       raw → event → feature → unmatched 스캔 전체 실행
+  POST /api/pipeline/run/{vehicle}       raw → event → feature → wide → unmatched 스캔 전체 실행
+  POST /api/pipeline/wide/{vehicle}      feature 병합 wide form(ML_TABLE) 생성
+  POST /api/pipeline/send-form           전 vehicle ML_TABLE 병합 → KNOB/FAB(+MASK)/VM/INLINE 분리
   GET  /api/pipeline/vehicles            vehicle 설정 목록
   GET  /api/pipeline/status              vehicle 별 처리 현황 (raw/event/feature · pending · stale)
   GET  /api/pipeline/features/{vehicle}  카테고리별(fab/knob/mask/inline/vm) feature 산출물
@@ -26,14 +28,16 @@ router = APIRouter()
 
 _pipe: FeaturePipeline | None = None
 _alerts: AlertStore | None = None
+alerts: AlertStore | None = None  # app.py 가 startup 에서 주기 발행 loop 를 제어
 runner: PipelineRunner | None = None  # 병렬 실행/스케줄러 (app.py startup 에서 loop 제어)
 csv_sync: CsvSync | None = None  # app.py 가 startup 에서 background loop 를 제어
 
 
 def deps(root, settings, s3_uploader):
-    global _pipe, _alerts, runner, csv_sync
+    global _pipe, _alerts, alerts, runner, csv_sync
     _pipe = FeaturePipeline(root, settings)
     _alerts = AlertStore(_pipe, s3_uploader, settings, root)
+    alerts = _alerts
     runner = PipelineRunner(_pipe)
     runner.on_vehicle_done = lambda v, _r: _alerts.publish(v)  # 실행 후 알람 S3 발행
     csv_sync = CsvSync(root, s3_uploader)
@@ -41,15 +45,20 @@ def deps(root, settings, s3_uploader):
 
 
 def _refresh_after_sync(_dests: list):
-    """csv 동기화로 매칭 파일이 갱신되면 전 vehicle event/feature 재생성.
-    (run_event 가 sha 비교로 필요한 소스만 전체 rebuild) + 알람 재발행."""
+    """csv 동기화로 매칭 파일이 갱신되면 전 vehicle event/feature/wide 재생성.
+    (run_event 가 설정 버전(event_version) 비교로 필요한 소스만 전체 rebuild) + 알람 재발행."""
     for v in _pipe.vehicles():
         try:
             _pipe.run_event(v)
             _pipe.run_feature(v)
+            _pipe.run_wide(v)
             _alerts.publish(v)
         except Exception:
             continue  # raw 미실행 vehicle 등은 skip
+    try:
+        _pipe.run_send_form()
+    except Exception:
+        pass  # wide 산출물 없으면 skip
 
 
 def _p() -> FeaturePipeline:
@@ -144,6 +153,26 @@ def put_exclude(body: dict = Body(...)):
     }
     _p().save_global_cfg(cfg)
     return {"ok": True, "exclude": cfg["unmatched_scan"]["exclude"]}
+
+
+@router.post("/api/pipeline/wide/{vehicle}")
+def wide(vehicle: str):
+    """vehicle 의 feature 전부를 ML_TABLE 로 병합 → 4.WIDE_FORM."""
+    try:
+        return _p().run_wide(vehicle)
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+
+
+@router.post("/api/pipeline/send-form")
+def send_form():
+    """전 vehicle ML_TABLE 병합 → prefix 그룹(0.KNOB/1.FAB(+MASK)/2.VM/3.INLINE) 분리 저장."""
+    try:
+        return _p().run_send_form()
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
 
 
 @router.post("/api/pipeline/run/{vehicle}")

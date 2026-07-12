@@ -1,0 +1,12 @@
+[
+  {
+    "type": "step",
+    "key": "AX550000",
+    "reason": "AUX_CLEAN — 보조 세정 step, 매칭 불필요"
+  },
+  {
+    "type": "ppid",
+    "key": "CC942300:PP_X9_2300",
+    "reason": "GATE_ETCH 테스트 PPID — EOL 예정"
+  }
+]

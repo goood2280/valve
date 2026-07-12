@@ -1453,6 +1453,7 @@ async function renderSettings() {
       ['alerts.dedupe_window_sec', 'number', null, '같은 (kind + chunk_id) 에 대해 이 시간 내 중복 억제. 0 이면 없음'],
       ['alerts.s3_enabled', 'bool', null, 'S3 에 알람 JSON 업로드 사용 여부'],
       ['alerts.s3_prefix', 'text', null, '알람 JSON 을 S3 에 누적할 prefix. 기본 valve-alerts'],
+      ['alerts.s3_interval_min', 'number', null, '알람 S3 주기 발행 간격(분). 변경 있을 때만 업로드. 0 이면 파이프라인 실행 시에만 발행'],
       ['alerts.flow_enabled', 'bool', null, 'flow 앱에 알림 푸시 사용 여부'],
       ['alerts.flow_notify_url', 'text', null, 'flow 알림 엔드포인트 (예: http://flow/api/valve/alert)'],
       ['alerts.webhook_enabled', 'bool', null, '일반 webhook POST 사용 여부'],
@@ -1669,10 +1670,11 @@ async function onSaveSettings(draft) {
 // ─────────────────────────────────────
 // Browser tab
 // ─────────────────────────────────────
-let BR = { root: 'staging', path: '', selFile: '', sql: '', s3mode: 'sync' };
+let BR = { root: 'staging', path: '', selFile: '', sql: '', s3mode: 'sync', s3rules: null };
 
 async function renderBrowser() {
   const main = $('#main');
+  BR.s3rules = null;  // 탭 진입 시 전송 규칙 재조회 (편집 중에만 메모리 유지)
   main.innerHTML = '';
   main.append(
     el('div', {},
@@ -1683,6 +1685,7 @@ async function renderBrowser() {
     el('div', { class: 'split' },
       el('div', { class: 'pane' },
         el('div', { class: 'hdr' }, '📁 Roots'),
+        el('div', { id: 'brS3Rules' }),
         el('div', { id: 'brConfigFiles' }),
         el('div', { id: 'brTree' }, 'loading...'),
       ),
@@ -1775,7 +1778,114 @@ async function loadBrowserRoots() {
     }
     loadBrowserDir(BR.root, BR.path);
   } catch (e) { $('#brTree').textContent = String(e); }
+  loadS3RulesSection();
   loadConfigFilesSection();
+}
+
+// S3 전송 규칙 — root 별 mode(cp/sync) + 타겟(S3 연결 × prefix 이름, 2개 이상 가능) 편집.
+// 설정파일은 보통 cp(항상 덮어쓰기), DB 산출물은 sync(변경분만).
+async function loadS3RulesSection() {
+  const box = $('#brS3Rules');
+  if (!box) return;
+  if (!BR.s3rules) {
+    try { BR.s3rules = await api.get('/api/browser/s3-transfer/config'); } catch { return; }
+    if (BR.s3rules.rules?.config) BR.s3mode = BR.s3rules.rules.config.mode;  // 설정파일 빠른 목록 기본 모드
+  }
+  box.innerHTML = '';
+  const { rules, destinations } = BR.s3rules;
+  const destNames = () => Object.keys(destinations);
+  const inp = (val, ph, on, grow) => el('input', { type: 'text', class: 'mono', value: val ?? '',
+    placeholder: ph, style: { flex: grow ? 1 : '0 0 90px', minWidth: 0, fontSize: '11px' },
+    oninput: (e) => on(e.target.value) });
+
+  // ── S3 연결 (destinations) — default 는 settings.json 고정, 나머지는 key 별 추가/삭제 ──
+  const destRow = (name) => {
+    const d = destinations[name];
+    if (d.builtin) return el('div', { class: 'cfg-row' },
+      el('span', { class: 'cfg-name', style: { flex: '0 0 90px', fontWeight: 700 } }, name),
+      el('span', { style: { fontSize: '11px', color: 'var(--text-muted)' } }, 'settings.json 의 S3 (기본 연결)'));
+    return el('div', { class: 'cfg-row', style: { flexWrap: 'wrap' } },
+      inp(name, '이름', (v) => { if (v && v !== name) { destinations[v] = d; delete destinations[name]; loadS3RulesSection(); } }),
+      inp(d.bucket, 'bucket', (v) => { d.bucket = v; }),
+      inp(d.endpoint_url, 'endpoint_url', (v) => { d.endpoint_url = v; }, true),
+      inp(d.access_key, 'access key', (v) => { d.access_key = v; }),
+      inp(d.secret_key, 'secret key', (v) => { d.secret_key = v; }),
+      el('button', { class: 'btn ghost xsmall', title: '연결 삭제', onclick: () => {
+        delete destinations[name];
+        Object.values(rules).forEach((r) => { r.targets = r.targets.filter((t) => t.dest !== name); });
+        loadS3RulesSection();
+      } }, '✕'));
+  };
+
+  // ── 규칙 — root 별 mode + 타겟 목록 (연결 선택 × prefix 이름) ──
+  const modeSeg = (rule, m) => el('button', {
+    class: 'seg' + (rule.mode === m ? ' on' : ''),
+    title: m === 'sync' ? '변경분만 업로드 (텍스트=내용·바이너리=크기 비교)' : '항상 덮어쓰기 업로드',
+    onclick: () => { rule.mode = m; loadS3RulesSection(); },
+  }, m);
+  const targetRow = (rule, t, i) => el('div', { class: 'cfg-row', style: { paddingLeft: '58px' } },
+    el('select', { class: 'mono', style: { flex: '0 0 90px', fontSize: '11px' },
+      onchange: (e) => { t.dest = e.target.value; } },
+      ...destNames().map((n) => el('option', { value: n, selected: t.dest === n ? 'selected' : undefined }, n))),
+    inp(t.prefix, 'S3 prefix (이름)', (v) => { t.prefix = v; }, true),
+    rule.targets.length > 1 ? el('button', { class: 'btn ghost xsmall', title: '타겟 삭제',
+      onclick: () => { rule.targets.splice(i, 1); loadS3RulesSection(); } }, '✕') : null);
+  const ruleRows = (root) => {
+    const rule = rules[root];
+    return [
+      el('div', { class: 'cfg-row' },
+        el('span', { class: 'cfg-name', style: { flex: '0 0 52px', fontWeight: 700 } }, root),
+        el('span', { class: 'cfg-mode' }, modeSeg(rule, 'cp'), modeSeg(rule, 'sync')),
+        el('span', { class: 'spacer' }),
+        el('button', { class: 'btn ghost xsmall', title: '전송 대상(S3 연결×이름) 추가',
+          onclick: () => { rule.targets.push({ dest: 'default', prefix: '' }); loadS3RulesSection(); } }, '＋ 대상'),
+        el('button', { class: 'btn ghost xsmall', title: `${root} 전체를 ${rule.mode} 로 전 타겟에 전송`,
+          onclick: async (e) => {
+            const btn = e.target;
+            btn.disabled = true; btn.textContent = '전송 중…';
+            try {
+              const r = await api.post('/api/browser/s3-transfer', { root, path: '', mode: rule.mode });
+              btn.textContent = `↑${r.uploaded} =${r.unchanged}${r.errors ? ` ✗${r.errors}` : ''}`;
+              if (r.errors) alert(`${root}: ${r.errors}건 전송 실패`);
+            } catch (err) {
+              btn.textContent = '⇧ 전송'; alert(err.message);
+            } finally {
+              btn.disabled = false;
+              setTimeout(() => { btn.textContent = '⇧ 전송'; }, 4000);
+            }
+          } }, '⇧ 전송')),
+      ...rule.targets.map((t, i) => targetRow(rule, t, i)),
+    ];
+  };
+
+  box.append(el('details', { class: 'cfg-sec' },
+    el('summary', {},
+      el('span', {}, '☁ S3 전송 규칙'),
+      el('span', { class: 'spacer' }),
+      el('button', { class: 'btn ghost xsmall', onclick: async (e) => {
+        e.stopPropagation(); e.preventDefault();
+        const btn = e.target;
+        try {
+          const r = await api.put('/api/browser/s3-transfer/config', { rules, destinations });
+          BR.s3rules = { rules: r.rules, destinations: r.destinations };
+          btn.textContent = '✓ 저장됨';
+          setTimeout(() => { btn.textContent = '💾 저장'; loadS3RulesSection(); }, 1200);
+        } catch (err) { alert(err.message); }
+      } }, '💾 저장')),
+    el('div', { class: 'cfg-list' },
+      el('div', { style: { fontSize: '11px', color: 'var(--text-muted)', padding: '2px 0' } },
+        'S3 연결 (key 여러 개 등록 가능)'),
+      ...destNames().map(destRow),
+      el('div', { class: 'cfg-row' },
+        el('button', { class: 'btn ghost xsmall', onclick: () => {
+          let n = 2; while (destinations[`s3_${n}`]) n++;
+          destinations[`s3_${n}`] = { bucket: '', endpoint_url: '', access_key: '', secret_key: '' };
+          loadS3RulesSection();
+        } }, '＋ S3 연결 추가')),
+      el('div', { style: { fontSize: '11px', color: 'var(--text-muted)', padding: '6px 0 2px' } },
+        '전송 규칙 (root 별 — 타겟 여러 개면 전부 전송)'),
+      ...Object.keys(rules).flatMap(ruleRows)),
+  ));
 }
 
 // 최상위 "설정파일 → S3" 빠른 목록 — 각 파일 개별 전송 (sync/cp 선택)
@@ -1837,11 +1947,25 @@ async function loadBrowserDir(root, path) {
       const icon = e.is_dir ? '📁' : (e.suffix === '.parquet' ? '📊' : (e.suffix === '.csv' ? '🧾'
         : (['.yaml', '.yml', '.json'].includes(e.suffix) ? '⚙️' : '📄')));
       const cls = BR.selFile === fullPath ? 'tree-item sel' : 'tree-item';
+      // db/staging 은 파일·폴더 단위 S3 전송 지원 (폴더=재귀, 모드는 전송 규칙 기본)
+      const canSend = (root === 'db' || root === 'staging');
       tree.append(el('div', { class: cls, onclick: () => e.is_dir ? loadBrowserDir(root, fullPath) : selectFile(root, fullPath) },
         syncBadge(e.sync),
         el('span', { class: 'ic' }, icon),
         e.name,
         el('span', { class: 'sz' }, e.is_dir ? '' : fmtBytes(e.size)),
+        canSend ? el('button', { class: 'btn ghost xsmall', title: `S3 전송 (규칙 기본 모드)`,
+          onclick: async (ev) => {
+            ev.stopPropagation();
+            const btn = ev.target;
+            btn.disabled = true; btn.textContent = '…';
+            try {
+              const r = await api.post('/api/browser/s3-transfer', { root, path: fullPath });
+              btn.textContent = r.files ? `↑${r.uploaded} =${r.unchanged}` : '✓';
+              if (r.errors) alert(`${fullPath}: ${r.errors}건 전송 실패`);
+            } catch (err) { btn.textContent = '✗'; alert(err.message); }
+            finally { btn.disabled = false; setTimeout(() => { btn.textContent = '⇧ S3'; }, 4000); }
+          } }, '⇧ S3') : null,
       ));
     });
   } catch (e) { $('#brTree').textContent = String(e); }

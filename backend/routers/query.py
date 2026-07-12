@@ -10,7 +10,7 @@ router = APIRouter(prefix="/api/query", tags=["query"])
 
 MAX_ROWS = 2000
 # 표(parquet/csv)가 아닌 설정파일은 텍스트로 미리보기
-TEXT_SUFFIXES = {".yaml", ".yml", ".json", ".txt", ".md"}
+TEXT_SUFFIXES = {".yaml", ".yml", ".json", ".txt", ".md", ".py"}
 MAX_TEXT_BYTES = 256 * 1024
 
 

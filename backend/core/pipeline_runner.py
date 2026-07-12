@@ -8,6 +8,9 @@ Valve · pipeline_runner
     1) raw     : (source × 1일) 유닛을 raw_workers 스레드풀로 병렬 쿼리
     2) event   : 5일치를 event DB 화 (소스별 매칭 필터)
     3) feature : event DB "전체" 를 대상으로 feature 산출 (특정 기간 아님)
+    4) wide    : vehicle 의 feature 를 ML_TABLE 로 병합 (4.WIDE_FORM)
+  전 vehicle 완료 후:
+    5) send    : ML_TABLE 전체 병합 → KNOB/FAB(+MASK)/VM/INLINE 분리 (5.SEND_FORM)
   진행 중에는 self.progress 가 vehicle 별 현재 단계(raw/event/feature)를 담아
   /api/pipeline/progress 로 노출 → 백필이 지금 어느 DB 단계인지 실시간 확인.
 
@@ -104,12 +107,17 @@ class PipelineRunner:
         self._prog(vehicle, stage="feature", event_dates=ev_dates)
         feature = self.pipe.run_feature(vehicle)
 
+        # 4) WIDE — feature 전부를 ML_TABLE 로 병합
+        self._prog(vehicle, stage="wide")
+        wide = self.pipe.run_wide(vehicle)
+
         self._prog(vehicle, stage="done", elapsed=round(time.time() - t0, 2))
         result = {
             "vehicle": vehicle, "product": cfg["product"],
             "raw_rows": rows, "raw_units": len(units), "errors": errors,
             "event": {s: e["event_rows"] for s, e in event.items()},
             "feature": feature["features"], "event_dates": ev_dates,
+            "wide": wide,
             "elapsed_sec": round(time.time() - t0, 2),
         }
         if self.on_vehicle_done:
@@ -148,9 +156,21 @@ class PipelineRunner:
                         results[v] = {"vehicle": v, "error": str(e)[:300]}
                         self._prog(v, stage="error", error=str(e)[:200])
 
+            # 5) SEND FORM — 전 vehicle ML_TABLE 병합 → prefix 그룹 분리 (KNOB/FAB+MASK/VM/INLINE)
+            with self._lock:
+                self.progress["send_form"] = "running"
+                self.progress["ts"] = time.time()
+            try:
+                send_form = self.pipe.run_send_form()
+            except Exception as e:
+                send_form = {"error": str(e)[:300]}
+            with self._lock:
+                self.progress["send_form"] = "error" if "error" in send_form else "done"
+
             summary = {
                 "ok": all("error" not in r for r in results.values()),
                 "mode": mode, "vehicles": results, "plan": plan.__dict__,
+                "send_form": send_form,
                 "elapsed_sec": round(time.time() - t0, 2), "ts": t0,
             }
             self.last_run = summary

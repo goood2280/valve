@@ -1,0 +1,7 @@
+# FAB DB 스캔 설정 — VH_PRODA
+vehicle: VH_PRODA
+eqp_filter: []                 # 빈 배열 = 전체 장비 대상. eqp_id 나열 시 해당 장비만.
+eqp_filter_mode: eqp_id       # eqp_id | eqp_model
+extra_columns: [eqp_id, recipe_id]   # scan_result hits 에 포함할 추가 컬럼
+max_hits: 10                   # step/ppid 당 최대 샘플 수
+main_step_only: true           # main step 만 대상 (sub-step 제외)

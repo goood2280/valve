@@ -1,0 +1,20 @@
+# FAB DB 스캔 설정 — VH_PRODA
+# ─────────────────────────────────
+vehicle: VH_PRODA
+eqp_filter: []                    # 빈 리스트 = 전체 장비 대상
+eqp_filter_mode: eqp_id           # eqp_id | eqp_model
+extra_columns:                    # hits 에 포함할 추가 컬럼
+  - eqp_id
+  - recipe_id
+max_hits: 10                      # step/ppid 당 최대 샘플 수
+main_step_only: true              # true = 메인 공정 step 만 (계측·보조 제외)
+main_step_exclude:                # main_step_only 적용 시 제외 패턴 (fnmatch)
+  step_desc:
+    - MEASURE*
+    - AUX*
+    - INSPECT*
+    - ALIGN*
+  eqp_model:
+    - MEA-*
+    - SEM-*
+    - CD-*

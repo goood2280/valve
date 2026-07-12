@@ -125,6 +125,42 @@ class S3Uploader:
         except Exception:
             return None
 
+    def put_file(self, key: str, local_path) -> bool:
+        """파일(parquet 등 바이너리 포함) 동기 업로드 — 탐색기 S3 전송용. 성공 True."""
+        full = self._full_key(key)
+        p = Path(local_path)
+        if self._is_fake():
+            dst = Path(self.fake_local).resolve() / self.bucket / full
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.copy2(p, dst)
+                return True
+            except Exception:
+                return False
+        if self._s3_client is None:
+            return False
+        try:
+            self._s3_client.upload_file(str(p), self.bucket, full)
+            return True
+        except Exception:
+            return False
+
+    def head(self, key: str) -> dict | None:
+        """object 존재/크기 조회 — sync(변경분만 업로드) 판정용. 없으면 None."""
+        full = self._full_key(key)
+        if self._is_fake():
+            path = Path(self.fake_local).resolve() / self.bucket / full
+            if not path.exists():
+                return None
+            return {"size": path.stat().st_size}
+        if self._s3_client is None:
+            return None
+        try:
+            resp = self._s3_client.head_object(Bucket=self.bucket, Key=full)
+            return {"size": int(resp.get("ContentLength") or 0)}
+        except Exception:
+            return None
+
     def put_text(self, key: str, text: str) -> bool:
         """알람/결과 JSON 등 작은 텍스트 업로드. 성공 True."""
         full = self._full_key(key)

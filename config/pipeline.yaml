@@ -49,10 +49,30 @@ sources:
     - actual_value
     - residual
     - time
+  # ET — auto report 와 동일한 reformatter 인식:
+  #   config/reformatter/{vehicle}_reformatter.csv 의 CATEGORY=REAL 행 ITEMID 만
+  #   raw 쿼리/저장 대상 (파일 없는 vehicle 은 ET 스킵). ADDP 는 파생식이라 raw 제외.
+  ET:
+    table: f_et_test
+    columns:
+    - root_lot_id
+    - wafer_id
+    - item_id
+    - et_value
+    - chip_x_pos
+    - chip_y_pos
+    - eqp_id
+    - step_seq
+    - tkout_time
+    reformatter: config/reformatter
+    match:
+      kind: none
 step_matching: config/step_matching/vehicle_matching.csv
 feature_rules:
   fab: config/feature_rules/fab.csv
-  knob: config/feature_rules/knob_ppid.csv
+  # 사내 룰 형식(feature_name,function_step,rule_order,operator,value,category)
+  # — flow 가 알람 판정을 반영해 내려주는 마스터 룰북. legacy 직접매핑 형식도 지원.
+  knob: config/feature_rules/ppid_knob.csv
   mask: config/feature_rules/mask.csv
   inline: config/feature_rules/inline.csv
   vm: config/feature_rules/vm.csv
@@ -62,3 +82,15 @@ unmatched_scan:
     - AUX_*
     eqp_model:
     - MEA-*
+# knob skip 판정 — knob step 미통과(값이 빈) wafer 처리.
+#   명시: ppid_knob.csv 의 AND 블록(같은 feature+rule_order 복수 행, category=SKIP,
+#         예: "다음 main step not_null") 이 있으면 그 조건대로.
+#   auto: 블록이 없는 feature 도 wafer 가 뒤쪽 step 을 지났으면 "SKIP" 처리.
+#         뒤쪽 step 판별은 두 step 공동 통과 wafer 의 tkout_time 상대순서
+#         (sleuth_order 미사용). 표본/비율 미달이면 보류(null 유지) 후 리포트.
+knob_skip:
+  enabled: true
+  auto: true
+  min_support: 5      # 뒤쪽 step 판별에 필요한 공동 통과 wafer 최소 수
+  after_fraction: 0.8 # 그 중 시간이 뒤인 비율 임계
+

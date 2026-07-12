@@ -9,9 +9,19 @@
     "max_concurrent": 3,
     "retry": {
       "attempts": 3,
-      "backoff_sec": [10, 30, 120]
+      "backoff_sec": [
+        10,
+        30,
+        120
+      ]
     },
-    "retryable_errors": ["HY000", "ConnectionError", "TimeoutError", "Timeout", "5xx"]
+    "retryable_errors": [
+      "HY000",
+      "ConnectionError",
+      "TimeoutError",
+      "Timeout",
+      "5xx"
+    ]
   },
   "s3": {
     "endpoint_url": "",
@@ -19,7 +29,7 @@
     "prefix": "",
     "access_key": "",
     "secret_key": "",
-    "fake_local_path": "./s3_local",
+    "fake_local_path": "D:/semi all/flow/data/flow-data/s3_bucket",
     "upload_mode": "immediate",
     "upload_interval_sec": 300,
     "retry_failed_sec": 120
@@ -46,6 +56,7 @@
     "flow_enabled": true,
     "s3_prefix": "valve-alerts",
     "s3_enabled": true,
+    "s3_interval_min": 10,
     "config_prefix": "valve-config",
     "max_per_hour": 60,
     "dedupe_window_sec": 60

@@ -1,0 +1,7 @@
+[
+  {
+    "type": "step",
+    "key": "AX550000",
+    "reason": "AUX_CLEAN — 보조 세정 step, 매칭 불필요"
+  }
+]
