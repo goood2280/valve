@@ -29,3 +29,6 @@ Thumbs.db
 
 # claude code
 .claude/
+
+# build artifacts
+valve.egg-info/
