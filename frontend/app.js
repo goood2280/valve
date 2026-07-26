@@ -117,7 +117,9 @@ function connectSSE() {
       STATE.chunks = snap.chunks || {};
       STATE.partitions = snap.partitions || {};
       setSseStatus('ok');
-      renderCurrentTab();
+      // 재연결 때마다 오는 snapshot 으로 탭을 통째로 다시 그리지 않는다 (heatmap 깜빡임)
+      if (STATE.currentTab === 'monitor' && $('#monRunning')) refreshMonitorLive();
+      else renderCurrentTab();
     } catch (err) { console.warn('snapshot parse', err); }
   });
 
@@ -125,7 +127,7 @@ function connectSSE() {
     try {
       const evt = JSON.parse(e.data);
       applyEvent(evt);
-      if (STATE.currentTab === 'monitor') renderMonitor();
+      if (STATE.currentTab === 'monitor') refreshMonitorLive();
     } catch (err) { console.warn('update parse', err); }
   });
 
@@ -206,10 +208,21 @@ function renderMonitor() {
       el('button', { class: 'btn primary', onclick: onEnqueueAll }, '▶ 전체 실행 (backfill 범위)'),
       el('button', { class: 'btn', onclick: onProbeInvalidateAll }, '↻ Probe 캐시 전체 무효화'),
     ),
-    renderInProgressCard(),
+    el('div', { id: 'monRunning' }, renderInProgressCard()),
     renderDbHeatmapCard(),
-    renderFailuresCard(),
+    el('div', { id: 'monFails' }, renderFailuresCard()),
   );
+}
+
+// SSE 로 갱신되는 카드(진행 chunk · 최근 실패)만 부분 렌더.
+// 예전엔 이벤트마다 renderMonitor() 로 탭 전체를 다시 그렸는데, 그러면 DB heatmap
+// 카드까지 통째로 교체되어 실시간 진행 표시가 매 이벤트마다 사라졌다 다시 나타났다
+// (= 화면이 깜빡임). heatmap 은 자체 폴링으로만 갱신한다.
+function refreshMonitorLive() {
+  const run = $('#monRunning'), fail = $('#monFails');
+  if (!run || !fail) { renderMonitor(); return; }
+  run.replaceChildren(renderInProgressCard());
+  fail.replaceChildren(renderFailuresCard());
 }
 
 function renderInProgressCard() {
@@ -263,6 +276,31 @@ function renderDbHeatmapCard() {
 // 소스 → feature 카테고리 (FAB 는 fab/knob/mask 로 파생, INLINE·VM 은 동명 카테고리)
 const FEATURE_CATS = { FAB: ['fab', 'knob', 'mask'], INLINE: ['inline'], VM: ['vm'] };
 
+// feature 가 담고 있는 구간 — 소스별 커버(feature_cov)를 vehicle 하나로 합친 값.
+// feature parquet 자체엔 날짜가 없어서, 산출 시점의 event 파티션 범위가 근거다.
+function featureSpan(st) {
+  const covs = Object.values(st.feature_cov || {}).filter((c) => c && c.days);
+  if (!covs.length) return null;
+  return {
+    days: Math.max(...covs.map((c) => c.days)),
+    start: covs.map((c) => c.start).sort()[0],
+    end: covs.map((c) => c.end).sort().slice(-1)[0],
+    approx: covs.some((c) => c.approx),
+  };
+}
+
+function featureTitle(st, featTotal, fmtTs) {
+  const lines = [`feature store 산출물(컬럼) ${featTotal}개`,
+    Object.entries(st.features || {}).map(([k, n]) => `${k} ${n}`).join(' · ')];
+  const covs = Object.entries(st.feature_cov || {}).filter(([, c]) => c && c.days);
+  if (covs.length) {
+    lines.push('', '대상 event 구간 (소스별):');
+    covs.forEach(([s, c]) => lines.push(`  ${s}: ${c.days}일 · ${c.start} ~ ${c.end}${c.approx ? ' (추정)' : ''}`));
+    lines.push(`산출 ${fmtTs(st.feature_ts)}`);
+  }
+  return lines.join('\n');
+}
+
 // DB heatmap 조회 기간 — 일 단위 vs 주/월 버킷. 재렌더에도 유지되도록 모듈 상태.
 const DBHM_PERIODS = ['2주', '1달', '6개월', '2년'];
 let DBHM_PERIOD = '1달';
@@ -308,8 +346,12 @@ async function loadDbHeatmap() {
     const buckets = dbhmBuckets(DBHM_PERIOD);
     const fmtTs = (ts) => ts ? new Date(ts * 1000).toLocaleString('ko-KR', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '-';
 
-    const rt = await api.get('/api/pipeline/runtime').catch(() => null);
-    const runtimeBar = rt ? renderRuntimeBar(rt) : null;
+    // 실행 관련(전역 주기 · 금지 시간대 · 제품별 주기 · 수동 실행)은 이 패널 한 곳에 모은다
+    const [rt, sched] = await Promise.all([
+      api.get('/api/pipeline/runtime').catch(() => null),
+      api.get('/api/pipeline/schedule').catch(() => null),
+    ]);
+    const runtimeBar = rt ? renderRuntimeBar(rt, sched) : null;
 
     // 기간 선택 세그먼트
     const picker = el('div', { class: 'dbhm-period' },
@@ -325,6 +367,7 @@ async function loadDbHeatmap() {
     vehicles.forEach((v, vi) => {
       const st = status[v];
       const featTotal = Object.values(st.features || {}).reduce((a, n) => a + n, 0);
+      const cov = featureSpan(st);
       tbody.append(el('tr', { class: 'prod-head-row' + (vi > 0 ? ' divider' : '') },
         el('td', { class: 'prod-head-cell', colspan: String(buckets.length + 1) },
           el('div', { class: 'prod-head-inner clickable', title: `클릭 → ${v} 파이프라인 재실행 (raw→event→feature)`,
@@ -332,20 +375,29 @@ async function loadDbHeatmap() {
             el('span', { class: 'prod-head-name' }, v),
             el('span', { class: 'hint' }, st.product),
             el('span', { class: 'spacer' }),
-            el('span', { class: 'prod-head-count' },
-              `matching ${fmtTs(st.event.FAB?.applied_ts)} · ${st.matching.steps} step · feature ${featTotal}`)))));
+            el('span', { class: 'prod-head-count', title: featureTitle(st, featTotal, fmtTs) },
+              `matching ${fmtTs(st.event.FAB?.applied_ts)} · ${st.matching.steps} step`
+              + ` · feature ${featTotal}${cov ? ` · ${cov.days}일 (${cov.start}~${cov.end})` : ''}`)))));
       Object.keys(st.raw).forEach((src) => {
         const rawOnly = !(src in (st.event || {}));   // ET 등 raw 전용 소스 — event 없음
         const ev = st.event[src] || {};
         const evDates = new Set(ev.dates || []);
         const featN = (FEATURE_CATS[src] || []).reduce((a, c) => a + (st.features?.[c] || 0), 0);
+        const fc = (st.feature_cov || {})[src];
+        const cats = (FEATURE_CATS[src] || []).map((c) => `${c} ${st.features?.[c] || 0}`).join(' · ');
         const tr = el('tr', { class: 'src-row' },
           el('td', { class: 'row-label src-label',
             title: rawOnly ? 'raw 전용 소스 — event DB 를 만들지 않음'
               : `매칭 파일: ${ev.matching_file || '-'}\n적용: ${fmtTs(ev.applied_ts)} · sha ${ev.matching_sha || '-'}` },
             el('span', { class: 'src-bullet' }, '●'), src,
             rawOnly ? el('span', { class: 'hint' }, 'raw 전용') : null,
-            featN ? el('span', { class: 'feat-badge', title: 'feature store 산출물 수' }, `feat ${featN}`) : null,
+            featN ? el('span', { class: 'feat-badge', title:
+              `feature store 산출물(컬럼) ${featN}개 — ${cats}\n`
+              + (fc ? `대상 event ${fc.days}일치 · ${fc.start} ~ ${fc.end}`
+                      + (fc.approx ? '\n(산출 기록 없음 — 현재 event 기준 추정. 다음 실행 후 정확해집니다)' : '')
+                      + `\n산출 ${fmtTs(st.feature_ts)}`
+                    : '대상 구간 기록 없음 — 파이프라인을 한 번 실행하면 기록됩니다') },
+              `feat ${featN}${fc ? ` · ${fc.days}일 (${fc.start.slice(5)}~${fc.end.slice(5)})` : ''}`) : null,
             ev.stale ? el('span', { class: 'hint stale-tag' }, '재처리 필요') : null));
         buckets.forEach((b) => {
           // 이 버킷 [start,end] 안에 든 raw 날짜들의 단계 집계 (긴급도: 재처리>대기>완료)
@@ -378,10 +430,22 @@ async function loadDbHeatmap() {
         legendItem('s-success', 'event 완료'),
         legendItem('s-partial', 'event 재처리 필요 (matching 변경)'),
         legendItem('s-off', 'raw 없음'),
-        el('span', { class: 'hint' }, '주/월 버킷은 가장 긴급한 단계 색 · feat N = 소스별 feature 수 · vehicle 헤더 클릭 = 재실행')));
-    // 루프/스케줄 실행 중이거나 진행 중이면 진행상황 폴링 시작
-    if (rt && (rt.loop_running || rt.scheduler_running)) { DBHM_LAST_RUNNING = true; startProgPoll(); }
-    else if (!DBHM_PROG_TIMER) { const pr = await api.get('/api/pipeline/progress').catch(() => null); if (pr && pr.running) { DBHM_LAST_RUNNING = true; startProgPoll(); } }
+        el('span', { class: 'hint' }, '주/월 버킷은 가장 긴급한 단계 색 · '
+          + 'feat N · D일 (시작~끝) = 소스별 feature 컬럼 수와 그 feature 가 담은 event 구간 · '
+          + 'vehicle 헤더 클릭 = 재실행')));
+    DBHM_LAST_RELOAD = Date.now();
+    // 카드를 새로 그렸으므로 진행 표시부터 즉시 복원한다 — 비워둔 채 다음 폴링(최대 1.2초)을
+    // 기다리면 실행 중에도 표시가 사라졌다 나타나 깜빡인다.
+    if (DBHM_PROG_TIMER) {
+      renderProg($('#dbhmProg'), DBHM_LAST_PROG);
+    } else {
+      const pr = await api.get('/api/pipeline/progress').catch(() => null);
+      if (pr) {
+        renderProg($('#dbhmProg'), pr);
+        DBHM_LAST_RUNNING = !!pr.running;   // running 전이는 실제 running 으로만 판단
+        if (pr.running || pr.loop_enabled || pr.schedule_enabled || pr.quiet?.now) startProgPoll();
+      }
+    }
   } catch (e) {
     const body = $('#dbhmBody');
     if (body) { body.innerHTML = ''; body.append(el('div', { class: 'empty' }, String(e.message || e))); }
@@ -394,8 +458,11 @@ async function onRunVehicle(v) {
   catch (e) { alert(e.message); }
 }
 
-// 워커 계획 + 전체 병렬 실행 + 스케줄/루프 토글 + 실시간 진행상황
-function renderRuntimeBar(rt) {
+// ⚙ 실행 관리 — 실행에 관한 것은 전부 여기 한 곳에서 본다/바꾼다.
+//   1줄: 자원·워커 계획
+//   2줄: 전역 자동 주기 · 실행 금지 시간대 · 루프 · 수동 전체 실행
+//   3줄: 제품별 주기(하루 N회)와 다음 실행 예정  ← 예전엔 알람 탭에 흩어져 있던 것
+function renderRuntimeBar(rt, sched) {
   const p = rt.plan || {}, c = rt.config || {};
   const mem = p.total_mem_gb ? `${p.total_mem_gb}GB` : 'mem?';
   const info = el('span', { class: 'rt-info', title: `산정근거: ${p.reason || '-'} · ${p.sizing}` },
@@ -439,9 +506,88 @@ function renderRuntimeBar(rt) {
     onclick: () => putRuntime({ loop_enabled: !c.loop_enabled }),
   }, c.loop_enabled ? '🔁 루프 실행 중 (정지)' : '🔁 루프 실행');
 
-  return el('div', { class: 'rt-bar' },
-    info, el('span', { class: 'spacer' }), schedule, loopBtn, runBtn);
+  return el('div', { class: 'rt-panel' },
+    el('div', { class: 'rt-line' }, info),
+    el('div', { class: 'rt-line' },
+      el('span', { class: 'rt-cap' }, '⚙ 실행 관리'),
+      schedule, renderQuietControl(rt), el('span', { class: 'spacer' }), loopBtn, runBtn),
+    renderVehicleSchedLine(sched),
+  );
 }
+
+// 실행 금지 시간대 — 이 구간엔 자동 실행(스케줄·루프)이 뜨지 않는다. 시각은 조절 가능.
+function renderQuietControl(rt) {
+  const q = rt.quiet || {};
+  const timeInput = (key, val) => el('input', {
+    type: 'time', class: 'rt-time', value: val || '',
+    title: `${key} — 서버 로컬 시각 (HH:MM)`,
+    onchange: (e) => putRuntime({ [key]: e.target.value }),
+  });
+  const on = !!q.enabled;
+  const blocking = !!q.now;
+  const bits = [
+    el('input', {
+      type: 'checkbox', ...(on ? { checked: 'checked' } : {}),
+      onchange: (e) => putRuntime({ quiet_enabled: e.target.checked }),
+    }),
+    '🌙 금지 ',
+    timeInput('quiet_start', q.start),
+    '~',
+    timeInput('quiet_end', q.end),
+  ];
+  if (on && !q.valid) {
+    bits.push(el('span', { class: 'hint', style: { color: '#e5484d' } }, '시각 확인 필요'));
+  } else if (blocking) {
+    bits.push(el('span', { class: 'rt-quiet-now' },
+      `지금 금지 중 → ${fmtClock(q.until)} 해제`));
+  }
+  return el('label', {
+    class: 'rt-quiet' + (blocking ? ' on' : ''),
+    title: '이 시간대에는 자동 실행(주기·루프)을 띄우지 않습니다.\n'
+         + '· 시작 > 종료 면 자정을 넘는 구간 (예 23:00~02:00)\n'
+         + '· 사람이 누르는 수동 실행은 막지 않습니다\n'
+         + '· 이미 돌고 있는 실행은 중단하지 않습니다',
+  }, ...bits);
+}
+
+// 제품별 주기 — 하루 N회. 비우면 전역 주기를 따르고 0 이면 자동 실행 제외.
+function renderVehicleSchedLine(sched) {
+  const vehs = Object.entries(sched?.vehicles || {});
+  if (!vehs.length) return null;
+  const chips = vehs.map(([v, sc]) => {
+    const inp = el('input', {
+      type: 'number', class: 'rt-hours', min: '0', max: '48', step: '1',
+      value: sc.source === 'vehicle' ? String(sc.runs_per_day) : '',
+      placeholder: String(sc.runs_per_day || 0),
+      title: '하루 실행 횟수 (3=8시간 간격 · 6=4시간 간격 · 0=자동 실행 안 함)\n'
+           + '비우면 전역 주기를 따른다',
+      onchange: async (e) => {
+        try {
+          await api.put(`/api/pipeline/schedule/${encodeURIComponent(v)}`,
+            { runs_per_day: e.target.value === '' ? null : Number(e.target.value) });
+        } catch (err) { alert(err.message); }
+        loadDbHeatmap();
+      },
+    });
+    const next = !sc.enabled ? '자동 안 함'
+      : sc.quiet_blocked ? `금지 해제 후 ${fmtClock(sc.next_ts)}`
+      : sc.due ? '곧 실행' : fmtClock(sc.next_ts);
+    return el('span', {
+      class: 'rt-veh' + (sc.enabled ? '' : ' off') + (sc.due && sc.enabled ? ' due' : ''),
+      title: `${v} · ${sc.source === 'global' ? '전역 주기 사용' : '제품 개별 주기'}`,
+    },
+      el('b', {}, v), '일', inp, '회',
+      el('span', { class: 'hint' },
+        sc.interval_sec > 0 ? `${sc.interval_hours}h 간격 → ${next}` : '자동 실행 안 함'));
+  });
+  return el('div', { class: 'rt-line rt-veh-line' },
+    el('span', { class: 'rt-cap' }, '제품별 주기'), ...chips,
+    sched.master_enabled ? null
+      : el('span', { class: 'hint', style: { color: '#f5a524' } }, '자동 실행 꺼짐 — 위 ⏱ 자동 체크'));
+}
+
+const fmtClock = (ts) => (ts ? new Date(ts * 1000).toLocaleString('ko-KR',
+  { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '-');
 
 async function putRuntime(patch) {
   try { await api.put('/api/pipeline/runtime', patch); await loadDbHeatmap(); }
@@ -457,8 +603,17 @@ async function onRunAll() {
 }
 
 // ── 실시간 진행상황 폴링 (raw/event/feature 단계 표시) ──
+//
+// 표시는 "상태가 바뀔 때만" 바뀌어야 한다. 예전 구현이 깜빡였던 이유 세 가지:
+//   (a) 폴링마다 box 를 통째로 지우고 다시 만들었다 (.dbhm-prog:empty 는 display:none —
+//       지우는 순간 줄이 접혔다가 다시 펴져 화면이 튄다)
+//   (b) 루프/스케줄은 회차 사이에 running 이 잠깐 false 가 된다 → "실행 중"과 "대기"가
+//       1초 간격으로 번갈아 떴다. 이제 loop_enabled/schedule_enabled/busy 로 그 공백을 메운다
+//   (c) 회차가 끝날 때마다 heatmap 을 통째로 다시 로드했다 → 카드 전체가 교체됐다
 let DBHM_PROG_TIMER = null;
 let DBHM_LAST_RUNNING = false;
+let DBHM_LAST_PROG = null;      // 카드 재렌더 시 진행 표시를 즉시 복원하기 위한 마지막 스냅샷
+let DBHM_LAST_RELOAD = 0;       // heatmap 전체 재로드 시각 (루프 회차마다 재로드하지 않도록)
 const PROG_STAGE = { queued: '대기', raw: 'raw 쿼리', event: 'event DB화', feature: 'feature(전체 event)',
   wide: 'wide 병합', manual: '수동 실행', rebuild: '매칭 갱신 재생성', done: '완료', error: '오류' };
 
@@ -471,24 +626,60 @@ function startProgPoll() {
     if (!box) return stopProgPoll();
     let pr; try { pr = await api.get('/api/pipeline/progress'); } catch { return; }
     renderProg(box, pr);
-    if (DBHM_LAST_RUNNING && !pr.running) { DBHM_LAST_RUNNING = false; loadDbHeatmap(); return; }
+    // 실행 → 종료 전이에서만 heatmap 갱신. 루프면 회차마다 전이가 생기므로 최소 간격을 둔다.
+    if (DBHM_LAST_RUNNING && !pr.running) {
+      DBHM_LAST_RUNNING = false;
+      if (Date.now() - DBHM_LAST_RELOAD > 10000) { loadDbHeatmap(); return; }
+    }
     if (pr.running) DBHM_LAST_RUNNING = true;
+    // 완전히 놀고 있으면(루프·스케줄도 꺼짐) 폴링 중단 — 마지막 상태 그대로 멈춰 있는다
+    if (!pr.running && !pr.loop_enabled && !pr.schedule_enabled && !pr.busy
+        && !pr.quiet?.now) stopProgPoll();
   }, 1200);
 }
 
+// 실행 상태 한 줄. running 이 아니어도 루프/스케줄이 켜져 있으면 계속 "실행 중"으로 —
+// 회차 사이 공백에 "대기"로 떨어졌다 올라오지 않게 한다.
+function progHeadText(pr) {
+  if (pr.running || pr.busy) {
+    if (pr.mode === 'loop') return `🔁 루프 #${pr.loop_iter} 실행 중`;
+    if (pr.mode === 'schedule') return '⏱ 자동 실행 중';
+    return '⏳ 실행 중';
+  }
+  // 금지 시간대에는 루프/스케줄이 켜져 있어도 새 실행이 뜨지 않는다 — 그대로 표시
+  if (pr.quiet?.now) return `🌙 실행 금지 시간대 (${fmtClock(pr.quiet.until)} 해제)`;
+  if (pr.loop_enabled) return '🔁 루프 실행 중 (다음 회차 준비)';
+  if (pr.schedule_enabled) return '⏱ 자동 실행 대기';
+  return '· 대기';
+}
+
+// 노드를 새로 만들지 않고 텍스트/클래스만 갱신 (재생성하면 매 폴링마다 화면이 튄다)
+function setText(node, text) { if (node.textContent !== text) node.textContent = text; }
+
 function renderProg(box, pr) {
-  box.innerHTML = '';
-  if (!pr || (!pr.running && !pr.mode)) return;
-  const head = pr.running
-    ? (pr.mode === 'loop' ? `🔁 루프 #${pr.loop_iter} 실행 중` : (pr.mode === 'schedule' ? '⏱ 자동 실행 중' : '⏳ 실행 중'))
-    : '· 대기';
-  const items = Object.entries(pr.vehicles || {}).map(([v, s]) => {
+  if (!box) return;
+  DBHM_LAST_PROG = pr || null;
+  const show = pr && (pr.running || pr.busy || pr.mode || pr.loop_enabled
+                      || pr.schedule_enabled || pr.quiet?.now);
+  if (!show) { if (box.firstChild) box.replaceChildren(); return; }
+
+  let head = box.querySelector('.prog-head');
+  if (!head) { head = el('span', { class: 'prog-head' }); box.append(head); }
+  setText(head, progHeadText(pr));
+
+  const seen = new Set();
+  Object.entries(pr.vehicles || {}).forEach(([v, s]) => {
+    seen.add(v);
     let d = PROG_STAGE[s.stage] || s.stage || '-';
     if (s.stage === 'raw' && s.raw_total) d += ` ${s.raw_done || 0}/${s.raw_total}`;
     if (s.stage === 'feature' && s.event_dates) d += ` ${s.event_dates}일`;
-    return el('span', { class: `prog-veh stage-${s.stage || ''}` }, `${v} · ${d}`);
+    let chip = [...box.querySelectorAll('[data-veh]')].find((n) => n.dataset.veh === v);
+    if (!chip) { chip = el('span', { 'data-veh': v }); box.append(chip); }
+    const cls = `prog-veh stage-${s.stage || ''}`;
+    if (chip.className !== cls) chip.className = cls;
+    setText(chip, `${v} · ${d}`);
   });
-  box.append(el('span', { class: 'prog-head' }, head), ...items);
+  box.querySelectorAll('[data-veh]').forEach((n) => { if (!seen.has(n.dataset.veh)) n.remove(); });
 }
 
 function legendItem(cls, text) {
@@ -2320,10 +2511,17 @@ async function loadAlerts() {
 
     // ── 처리 현황 (vehicle 별 한 줄 — 주기 조절 포함)
     wrap.append(alSub('파이프라인 처리 현황',
-      'raw → event → feature · vehicle_matching 변경 시 재처리 필요 표시 · 제품별 실행 주기 조절'));
+      'raw → event → feature · vehicle_matching 변경 시 재처리 필요 표시 · '
+      + '실행 주기/금지 시간대 조절은 모니터 탭 DB heatmap 의 ⚙ 실행 관리'));
     if (sched && !sched.master_enabled) {
       wrap.append(el('div', { class: 'alert warn', style: { fontSize: '11px', margin: '4px 0' } },
-        '자동 실행 마스터 스위치가 꺼져 있습니다 — 제품 주기와 무관하게 스케줄이 돌지 않습니다 (모니터 탭 ⏱).'));
+        '자동 실행 마스터 스위치가 꺼져 있습니다 — 제품 주기와 무관하게 스케줄이 돌지 않습니다 '
+        + '(모니터 탭 → DB heatmap → ⚙ 실행 관리 → ⏱ 자동).'));
+    }
+    if (sched?.quiet?.now) {
+      wrap.append(el('div', { class: 'alert warn', style: { fontSize: '11px', margin: '4px 0' } },
+        `🌙 실행 금지 시간대 (${sched.quiet.start}~${sched.quiet.end}) — `
+        + `${fmtClock(sched.quiet.until)} 까지 자동 실행이 뜨지 않습니다. 수동 ▶ 실행은 가능합니다.`));
     }
     Object.keys(status).forEach((v) => wrap.append(
       alStatusLine(v, status[v], sched?.vehicles?.[v], sched?.summary?.[v])));
@@ -2388,30 +2586,19 @@ function alStatusLine(v, st, sc, sum) {
   return line;
 }
 
-// 제품별 실행 주기 — 하루 N회. 비우면 전역 interval_hours 를 따르고 0 이면 자동 실행 제외.
+// 제품별 실행 주기 — 여기서는 "읽기 전용" 표시만 한다.
+// 실행에 관한 설정(전역 주기 · 금지 시간대 · 제품별 주기)은 모니터 탭 DB heatmap 의
+// ⚙ 실행 관리 한 곳에 모았다 — 두 곳에서 같은 값을 바꾸면 어느 쪽이 최신인지 헷갈린다.
 function alSchedCell(v, sc, sum) {
   if (!sc) return el('span', {});
-  const inp = el('input', {
-    type: 'number', min: '0', max: '48', step: '1',
-    value: sc.source === 'vehicle' ? String(sc.runs_per_day) : '',
-    placeholder: String(sc.runs_per_day || 0),
-    style: { width: '46px', fontSize: '11px' },
-    title: '하루 실행 횟수 (3=8시간 간격 · 6=4시간 간격 · 0=자동 실행 안 함)\n'
-         + '비우면 전역 interval_hours 를 따른다',
-    onchange: async (e) => {
-      try {
-        await api.put(`/api/pipeline/schedule/${encodeURIComponent(v)}`,
-          { runs_per_day: e.target.value === '' ? null : Number(e.target.value) });
-      } catch (err) { alert(err.message); }
-      loadAlerts();
-    },
-  });
   const period = sc.interval_sec > 0 ? `${sc.interval_hours}h 간격` : '자동 실행 안 함';
   const next = !sc.enabled ? '—'
-    : (sc.due ? '곧 실행' : new Date(sc.next_ts * 1000).toLocaleString('ko-KR',
-        { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }));
-  const bits = [el('span', { style: { color: 'var(--text-muted)' } }, '일'), inp,
-    el('span', { style: { color: 'var(--text-muted)' } }, `회 · ${period}`),
+    : sc.quiet_blocked ? `금지 해제 후 ${fmtClock(sc.next_ts)}`
+    : (sc.due ? '곧 실행' : fmtClock(sc.next_ts));
+  const bits = [el('span', {
+    title: '실행 주기 조절 → 모니터 탭 DB heatmap 의 ⚙ 실행 관리',
+    style: { color: 'var(--text-muted)' },
+  }, `자동 일 ${sc.runs_per_day}회 · ${period}`),
     el('span', { title: '다음 자동 실행 예정', style: { color: sc.due ? '#f5a524' : 'var(--text-muted)' } },
       `→ ${next}`)];
   if (sc.source === 'global') {

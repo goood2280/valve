@@ -118,6 +118,23 @@ auto_upload_enabled: true
 
 점 색은 **상태** — 초록 정상 · 주황 대기/미수신 · 빨강 실패.
 
+## DB heatmap — 처리 현황과 `feat` 배지
+
+모니터 탭의 DB heatmap 은 vehicle × 소스 × 날짜로 `db/` 처리 단계를 보여준다.
+소스 행의 배지가 **feature store 산출물**이다.
+
+```
+● FAB   feat 7 · 20일 (07-04~07-27)
+        └ 7 = feature 컬럼(parquet) 수 — fab 4 · knob 2 · mask 1
+          20일 (07-04~07-27) = 그 feature 가 대상으로 삼은 event 구간
+```
+
+feature 는 특정 기간이 아니라 **그때 event DB 에 있던 전체**를 대상으로 산출된다.
+feature parquet 은 `root_lot_id`·`wafer_id` 키만 있고 날짜 컬럼이 없어서,
+무엇을 며칠치 담았는지는 산출 시점에 `db/3.FEATURE_STORE/{vehicle}/_meta.json` 으로 남긴다.
+(그 기록이 없는 예전 산출물은 현재 event 기준 **추정**으로 표시하고 툴팁에 그렇게 적는다 —
+한 번 실행하면 정확해진다.)
+
 ## 제품별 실행 주기 · 실행 로그
 
 파이프라인(raw→event→feature→wide)은 **제품마다 다른 주기**로 돈다. 중요한 제품만 자주 돌릴 수 있다.
@@ -140,7 +157,26 @@ VH_PRODC: {}          # 생략 → 전역 runtime.interval_hours 를 따름
 - 스케줄러는 `sched_tick_sec`(기본 60초)마다 **돌 때가 된 제품만** 골라 실행한다. 주기 자체가 아니라 "확인 간격"이다.
 - 마지막 실행 시각의 근거는 `logs/pipeline_runs.jsonl` — **재기동해도 주기가 유지된다.**
 - `runtime.schedule_enabled: false` 면 제품 설정과 무관하게 전부 정지한다 (마스터 스위치).
-- 알람 탭 › 파이프라인 처리 현황에서 제품별로 웹 편집 가능. `PUT /api/pipeline/schedule/{vehicle}`.
+- 실행에 관한 설정은 **모니터 탭 › DB heatmap › ⚙ 실행 관리** 한 곳에 모여 있다 —
+  전역 주기 · 실행 금지 시간대 · 루프 · 수동 전체 실행 · 제품별 주기(일 N회).
+  알람 탭에는 같은 내용이 **읽기 전용**으로 표시된다. `PUT /api/pipeline/schedule/{vehicle}`.
+
+### 실행 금지 시간대 (quiet window)
+
+야간 백업·사내 API 점검처럼 파이프라인이 돌면 안 되는 구간을 비워둔다.
+
+```yaml
+# config/pipeline.yaml
+runtime:
+  quiet_enabled: true
+  quiet_start: '00:00'    # 시작 > 종료 면 자정을 넘는 구간 (예 '23:00'~'02:00')
+  quiet_end: '02:00'
+```
+
+- 대상은 **자동 실행(주기·루프)뿐** — 사람이 누르는 ▶ 실행은 그대로 된다.
+- **이미 돌고 있는 실행은 중단하지 않는다** (중간에 끊으면 event 파티션이 반만 남는다).
+- 예정 시각은 건너뛰는 게 아니라 **해제 시각으로 밀린다** — 02:00 에 밀렸던 제품이 돈다.
+- 키가 없는 기존 설치도 코드 기본값(`00:00~02:00`)이 적용된다. 끄려면 `quiet_enabled: false`.
 
 **실행 로그** — 제품 × 1회 실행 = 1레코드 (`logs/pipeline_runs.jsonl`).
 알람 탭 › 실행 로그에서 행을 클릭하면 단계별 상세가 펼쳐진다.

@@ -17,6 +17,14 @@ runtime:
   schedule_enabled: true
   sched_tick_sec: 60
   loop_enabled: false
+  # 실행 금지 시간대 — 이 구간에는 자동 실행(스케줄·루프)을 띄우지 않는다.
+  # 서버 로컬 시각 "HH:MM" · start > end 면 자정을 넘는 구간(예 '23:00'~'02:00').
+  # 사람이 누르는 수동 실행은 막지 않으며, 이미 돌고 있는 실행도 중단하지 않는다.
+  # 키가 없으면 코드 기본값(00:00~02:00)이 적용된다.
+  # (손으로 고칠 땐 따옴표를 붙일 것 — 9:00 은 yaml 이 540 으로 읽는다)
+  quiet_enabled: true
+  quiet_start: '00:00'
+  quiet_end: '02:00'
 sources:
   FAB:
     table: RAW_FAB_DATA

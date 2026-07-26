@@ -951,12 +951,15 @@ class FeaturePipeline:
             return None
         return pl.concat([pl.read_parquet(f) for f in files])
 
+    def event_dates(self, vehicle: str, source: str = "FAB") -> list[str]:
+        """소스 event DB 의 날짜 파티션 목록 (오름차순). feature 커버 구간의 근거."""
+        return sorted(p.name[5:] for p in self.event_dir(vehicle, source).glob("date=*"))
+
     def event_date_count(self, vehicle: str) -> int:
         """event DB 에 쌓인 전체 날짜 파티션 수 (event 소스 통합). feature 는 이 전체 대상."""
         dates = set()
         for source in self.event_sources():
-            for p in self.event_dir(vehicle, source).glob("date=*"):
-                dates.add(p.name[5:])
+            dates.update(self.event_dates(vehicle, source))
         return len(dates)
 
     # ─────────────────────────────────────────
@@ -1123,6 +1126,20 @@ class FeaturePipeline:
                     self._save_feature(fdir, feat, col, features["vm"])
                 except Exception as e:
                     skipped.append({"feature": col, "reason": str(e)})
+
+        # feature 커버 구간 기록 — feature 는 "그때 event DB 에 있던 전체" 를 대상으로
+        # 산출되므로, 무엇을 며칠치 담았는지는 지금 남겨두지 않으면 나중에 알 수 없다
+        # (feature parquet 은 root_lot·wafer 키만 있고 날짜 컬럼이 없다).
+        # 카테고리 → 입력 소스: fab/knob/mask ← FAB · inline ← INLINE · vm ← VM
+        cov = {}
+        for src in ("FAB", "INLINE", "VM"):
+            ds = self.event_dates(vehicle, src)
+            if ds:
+                cov[src] = {"days": len(ds), "start": ds[0], "end": ds[-1]}
+        (fdir / "_meta.json").write_text(
+            json.dumps({"ts": time.time(), "sources": cov,
+                        "features": {k: len(v) for k, v in features.items()}},
+                       ensure_ascii=False, indent=2), encoding="utf-8")
 
         # knob miss / skip 리포트 저장
         rdir = self.report_dir(vehicle)
@@ -1478,6 +1495,24 @@ class FeaturePipeline:
                 if cat in features:
                     features[cat] += 1
 
+        # feature 가 실제로 담은 구간 — 산출 시점에 남긴 _meta.json 이 정답이다.
+        # 메타가 없는 기존 산출물은 현재 event 파티션으로 갈음하고 approx 로 표시한다
+        # (그 사이 event 가 늘었다면 실제 커버보다 넓게 보일 수 있음).
+        feature_cov, feature_ts = {}, None
+        meta_path = fdir / "_meta.json"
+        if meta_path.exists():
+            try:
+                fm = json.loads(meta_path.read_text(encoding="utf-8"))
+                feature_cov = fm.get("sources") or {}
+                feature_ts = fm.get("ts")
+            except Exception:
+                feature_cov = {}
+        for source, ev in event.items():
+            ds = ev.get("dates") or []
+            if source not in feature_cov and ds:
+                feature_cov[source] = {"days": len(ds), "start": ds[0], "end": ds[-1],
+                                       "approx": True}
+
         matching_path = self.matching_file("FAB")
         return {
             "vehicle": vehicle,
@@ -1487,6 +1522,8 @@ class FeaturePipeline:
             "raw": raw,
             "event": event,
             "features": features,
+            "feature_cov": feature_cov,   # 소스 → {days, start, end, approx?}
+            "feature_ts": feature_ts,     # feature 산출 시각 (epoch)
         }
 
     def load_report(self, vehicle: str, name: str):

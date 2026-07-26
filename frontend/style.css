@@ -840,19 +840,42 @@ main {
 .dot.pending { background: var(--text-muted); }
 
 /* ─── heatmap ─── */
-/* DB heatmap 런타임 바 — 워커 계획 + 전체 실행 + 스케줄러 */
-.rt-bar {
-  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+/* DB heatmap 실행 관리 패널 — 자원 계획 · 전역 주기 · 금지 시간대 · 제품별 주기 · 수동 실행 */
+.rt-panel {
+  display: flex; flex-direction: column; gap: 8px;
   margin-bottom: 12px; padding: 8px 12px;
   background: var(--bg-hover); border: 1px solid var(--border); border-radius: 8px;
   font-size: 12px;
 }
+.rt-line { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.rt-line + .rt-line { border-top: 1px dashed var(--border); padding-top: 8px; }
+.rt-cap { font-size: 11px; font-weight: 700; color: var(--text-muted); white-space: nowrap; }
 .rt-info { font-family: 'JetBrains Mono',monospace; color: var(--text-secondary); }
 .rt-sched { display: inline-flex; align-items: center; gap: 5px; color: var(--text-secondary); font-size: 11px; }
-.rt-bar .rt-hours { width: 46px; padding: 2px 4px; border: 1px solid var(--border); border-radius: 4px;
+.rt-panel .rt-hours { width: 46px; padding: 2px 4px; border: 1px solid var(--border); border-radius: 4px;
   background: var(--bg-secondary); color: var(--text-primary); font-family: 'JetBrains Mono',monospace; }
 .btn.small { padding: 4px 10px; font-size: 11px; }
 .rt-loop.on { background: #16a34a; color: #fff; border-color: #15803d; }
+
+/* 실행 금지 시간대 */
+.rt-quiet { display: inline-flex; align-items: center; gap: 5px; color: var(--text-secondary); font-size: 11px; }
+.rt-quiet.on { color: #b45309; font-weight: 600; }
+.rt-panel .rt-time { padding: 2px 4px; border: 1px solid var(--border); border-radius: 4px;
+  background: var(--bg-secondary); color: var(--text-primary);
+  font-family: 'JetBrains Mono',monospace; font-size: 11px; }
+.rt-quiet-now { padding: 1px 6px; border-radius: 4px; color: #b45309;
+  background: rgba(245,158,11,0.12); border: 1px solid rgba(245,158,11,0.3); }
+
+/* 제품별 주기 칩 */
+.rt-veh-line { font-size: 11px; }
+.rt-veh {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 9px; border: 1px solid var(--border); border-radius: 999px;
+  background: var(--bg-secondary); color: var(--text-secondary);
+}
+.rt-veh b { color: var(--text-primary); font-family: 'JetBrains Mono',monospace; }
+.rt-veh.due { border-color: #f5a524; }
+.rt-veh.off { opacity: 0.55; }
 
 /* 실시간 진행상황 (raw/event/feature 단계) */
 .dbhm-prog:empty { display: none; }

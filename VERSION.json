@@ -1,12 +1,25 @@
 {
   "name": "Valve",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "codename": "valve",
   "pairs_with": "flow",
   "purpose": "DataLake 수도꼭지 — 사내 API 에서 데이터를 뽑아 S3 로 흘려 flow 에 공급",
   "tagline": "turn the valve · feed the flow",
   "created": "2026-04-24",
   "changelog": [
+    {
+      "version": "0.3.1",
+      "date": "2026-07-27",
+      "tag": "feat",
+      "title": "feat 배지에 커버 구간 표시 + 실행 금지 시간대 + 실행 관리 한 곳으로 + 진행 표시 깜빡임 제거",
+      "changes": [
+        "DB heatmap feat 배지: 'feat 7 · 20일 (07-04~07-27)' — feature 가 담은 event 구간을 같이 표시. feature parquet 은 날짜 컬럼이 없어 산출 시점에 3.FEATURE_STORE/{vehicle}/_meta.json 으로 기록 (기록 없는 기존 산출물은 현재 event 기준 추정 표시)",
+        "실행 금지 시간대(quiet window) — runtime.quiet_enabled/quiet_start/quiet_end, 기본 00:00~02:00. 이 구간엔 자동 실행(주기·루프)을 띄우지 않음. 시작>종료면 자정을 넘는 구간. 수동 실행은 허용하고 진행 중인 실행은 중단하지 않음. 예정 시각은 건너뛰지 않고 해제 시각으로 밀림",
+        "DB heatmap ⚙ 실행 관리 — 전역 주기·금지 시간대·루프·수동 실행·제품별 주기(일 N회)를 한 패널에 모음. 알람 탭의 주기 입력은 읽기 전용 표시로 전환 (같은 값을 두 곳에서 바꾸지 않도록)",
+        "fix: 진행 표시가 계속 깜빡이던 문제 3건 — SSE 이벤트마다 모니터 탭 전체를 다시 그리던 것(이제 chunk/실패 카드만 부분 렌더) · 폴링마다 진행 줄을 지우고 다시 만들던 것(노드 유지, 텍스트만 갱신) · 루프 회차 사이 running=false 구간이 '대기'로 떨어지던 것(loop/schedule/busy/quiet 상태를 스냅샷에 실어 계속 '실행 중'으로 표시)",
+        "fix: 루프 회차마다 heatmap 전체를 다시 로드하던 것 — 실제 실행→종료 전이에서만, 최소 10초 간격으로"
+      ]
+    },
     {
       "version": "0.3.0",
       "date": "2026-07-26",

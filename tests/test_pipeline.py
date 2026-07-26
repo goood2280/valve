@@ -31,7 +31,13 @@ def pipe(tmp_path):
         "METAL_ETCH,METAL_ETCH,R1,eq,PP_ME_C1,KNOB_M1\n"
         "METAL_ETCH,METAL_ETCH,RO,,,\n",
         encoding="utf-8")
-    return FeaturePipeline(tmp_path, {})
+    p = FeaturePipeline(tmp_path, {})
+    # 실행 금지 시간대는 기본 on(00:00~02:00) — 켠 채로 두면 스케줄 테스트가
+    # "새벽에 돌리면 실패" 하는 시계 의존 테스트가 된다. 필요한 테스트만 직접 켠다.
+    cfg = p.global_cfg()
+    cfg["runtime"]["quiet_enabled"] = False
+    p.save_global_cfg(cfg)
+    return p
 
 
 @pytest.fixture()
@@ -207,6 +213,32 @@ def test_status_tracks_event_progress_and_stale_matching(pipe):
     assert r["FAB"]["rebuilt"] and r["VM"]["rebuilt"] and not r["INLINE"]["rebuilt"]
     st = pipe.status("VH_PRODA")
     assert not any(st["event"][s]["stale"] for s in ("FAB", "INLINE", "VM"))
+
+
+def test_status_reports_feature_covered_span(pipe):
+    """feat 배지의 근거 — feature 가 며칠치(언제~언제) event 를 담았는지.
+    feature parquet 에는 날짜 컬럼이 없어서 산출 시점에 남긴 _meta.json 이 유일한 근거다."""
+    pipe.run_raw_query("VH_PRODA")
+    pipe.run_event("VH_PRODA")
+
+    # feature 산출 전 — 기록이 없으니 현재 event 기준 추정으로 채운다
+    st = pipe.status("VH_PRODA")
+    assert st["feature_ts"] is None
+    assert st["feature_cov"]["FAB"]["approx"] is True
+
+    pipe.run_feature("VH_PRODA")
+    st = pipe.status("VH_PRODA")
+    for src in ("FAB", "INLINE", "VM"):
+        dates = st["event"][src]["dates"]
+        cov = st["feature_cov"][src]
+        assert cov["days"] == len(dates)
+        assert (cov["start"], cov["end"]) == (dates[0], dates[-1])
+        assert "approx" not in cov            # 산출 기록이 있으면 추정이 아니다
+    assert st["feature_ts"] > 0
+    assert sum(st["features"].values()) > 0
+    # _meta.json 이 feature 목록(*.parquet)으로 새지 않아야 한다
+    assert (pipe.feature_dir("VH_PRODA") / "_meta.json").exists()
+    assert all(f.suffix == ".parquet" for f in pipe.feature_dir("VH_PRODA").glob("*.parquet"))
 
 
 def test_inline_matching_change_rebuilds_inline_event(pipe):
@@ -955,6 +987,75 @@ def test_runs_per_day_zero_excludes_from_schedule(pipe):
     plan = runner.schedule_plan()
     assert plan["VH_PRODB"]["interval_sec"] == 0 and plan["VH_PRODB"]["enabled"] is False
     assert runner.due_vehicles() == ["VH_PRODA"]
+
+
+# ── 실행 금지 시간대 (quiet window) ─────────────────────────
+def _at(hour, minute=0):
+    """오늘 로컬 HH:MM 의 epoch."""
+    import time as _time
+    lt = _time.localtime()
+    return _time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, hour, minute, 0, 0, 0, -1))
+
+
+def _set_quiet(pipe, **kw):
+    cfg = pipe.global_cfg()
+    cfg["runtime"].update(kw)
+    pipe.save_global_cfg(cfg)
+
+
+def test_quiet_window_blocks_auto_runs(pipe):
+    """금지 시간대(00:00~02:00)에는 자동 실행 대상이 비어야 한다 — 수동은 별개."""
+    runner = PipelineRunner(pipe)
+    _set_rpd(pipe, VH_PRODA=24, VH_PRODB=24)
+    _set_quiet(pipe, quiet_enabled=True, quiet_start="00:00", quiet_end="02:00")
+
+    assert runner.quiet_now(_at(1)) is True
+    assert runner.quiet_now(_at(3)) is False
+    assert runner.due_vehicles(_at(1)) == []                       # 금지 — 아무것도 안 뜬다
+    assert runner.due_vehicles(_at(3)) == ["VH_PRODA", "VH_PRODB"]
+    assert abs(runner.quiet_until(_at(1)) - _at(2)) < 1            # 02:00 에 해제
+    assert runner.quiet_until(_at(3)) is None
+    # 예정 시각은 건너뛰는 게 아니라 해제 시각으로 밀린다
+    assert abs(runner.schedule_plan(_at(1))["VH_PRODA"]["next_ts"] - _at(2)) < 1
+    assert runner.schedule_plan(_at(1))["VH_PRODA"]["quiet_blocked"] is True
+
+
+def test_quiet_window_wraps_over_midnight(pipe):
+    """시작 > 종료 = 자정을 넘는 구간 (23:00~02:00)."""
+    runner = PipelineRunner(pipe)
+    _set_quiet(pipe, quiet_enabled=True, quiet_start="23:00", quiet_end="02:00")
+    assert runner.quiet_now(_at(23, 30)) is True
+    assert runner.quiet_now(_at(1)) is True
+    assert runner.quiet_now(_at(12)) is False
+    # 23:30 의 해제는 "다음날" 02:00
+    assert abs(runner.quiet_until(_at(23, 30)) - (_at(2) + 86400)) < 1
+
+
+def test_quiet_window_off_or_invalid_never_blocks(pipe):
+    """꺼져 있거나 값이 이상하면 막지 않는다 — 조용히 파이프라인이 멈추면 안 된다."""
+    runner = PipelineRunner(pipe)
+    _set_quiet(pipe, quiet_enabled=False, quiet_start="00:00", quiet_end="02:00")
+    assert runner.quiet_now(_at(1)) is False
+    _set_quiet(pipe, quiet_enabled=True, quiet_start="25:00", quiet_end="02:00")
+    assert runner.quiet_window() is None and runner.quiet_now(_at(1)) is False
+    _set_quiet(pipe, quiet_enabled=True, quiet_start="01:00", quiet_end="01:00")
+    assert runner.quiet_window() is None          # 빈 구간 = 없는 것
+    assert PipelineRunner.parse_hhmm("07:30") == 450
+    assert PipelineRunner.parse_hhmm("7:5") is None
+    assert PipelineRunner.parse_hhmm(540) == 540  # yaml 60진수(9:00)로 읽힌 값도 수용
+
+
+def test_quiet_defaults_apply_to_installs_without_the_keys(pipe):
+    """config/ 는 seed-only — 업그레이드해도 pipeline.yaml 이 안 바뀐다.
+    키가 없으면 기본값(00:00~02:00)이 적용돼야 요청한 동작이 그대로 산다."""
+    cfg = pipe.global_cfg()
+    for k in ("quiet_enabled", "quiet_start", "quiet_end"):
+        cfg["runtime"].pop(k, None)
+    pipe.save_global_cfg(cfg)
+    runner = PipelineRunner(pipe)
+    assert runner.quiet_state()["start"] == "00:00"
+    assert runner.quiet_now(_at(1)) is True
+    assert runner.quiet_now(_at(5)) is False
 
 
 def test_due_only_returns_vehicles_past_their_interval(pipe):

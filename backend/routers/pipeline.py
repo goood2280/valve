@@ -88,23 +88,32 @@ def runtime():
     """호스트 자원으로 산정한 워커 계획 + runtime 설정. UI 표시/조정용."""
     cfg = _p().global_cfg().get("runtime") or {}
     return {"plan": plan_dict(cfg), "config": cfg,
-            "scheduler_running": runner.schedule_enabled(), "loop_running": runner.loop_enabled()}
+            "scheduler_running": runner.schedule_enabled(), "loop_running": runner.loop_enabled(),
+            "quiet": runner.quiet_state()}
 
 
 @router.put("/api/pipeline/runtime")
 def put_runtime(body: dict = Body(...)):
     """runtime 설정 저장 (raw_days/split_days/max_workers/interval_hours/
-    schedule_enabled/loop_enabled/loop_gap_sec 등)."""
+    schedule_enabled/loop_enabled/loop_gap_sec/quiet_* 등)."""
     cfg = _p().global_cfg()
     rt = cfg.get("runtime") or {}
     for k in ("raw_days", "split_days", "raw_api_max", "max_workers", "vehicle_workers",
               "feature_workers", "mem_per_worker_gb", "cpu_cores", "interval_hours",
-              "schedule_enabled", "loop_enabled", "loop_gap_sec", "sched_tick_sec"):
+              "schedule_enabled", "loop_enabled", "loop_gap_sec", "sched_tick_sec",
+              "quiet_enabled"):
         if k in body:
             rt[k] = body[k]
+    # 실행 금지 시간대 — 형식이 틀린 값을 저장하면 조용히 무시되는 설정이 되어버린다.
+    for k in ("quiet_start", "quiet_end"):
+        if k in body:
+            val = str(body[k] or "").strip()
+            if val and PipelineRunner.parse_hhmm(val) is None:
+                raise HTTPException(400, f"{k}: 'HH:MM' 형식이어야 합니다 (예 00:00)")
+            rt[k] = val
     cfg["runtime"] = rt
     _p().save_global_cfg(cfg)
-    return {"ok": True, "config": rt, "plan": plan_dict(rt)}
+    return {"ok": True, "config": rt, "plan": plan_dict(rt), "quiet": runner.quiet_state()}
 
 
 @router.get("/api/pipeline/schedule")
@@ -113,6 +122,7 @@ def pipeline_schedule():
     return {"master_enabled": bool((_p().global_cfg().get("runtime") or {}).get("schedule_enabled")),
             "default_runs_per_day": runner.default_runs_per_day(),
             "vehicles": runner.schedule_plan(),
+            "quiet": runner.quiet_state(),
             "summary": runner.runs.vehicle_summary()}
 
 

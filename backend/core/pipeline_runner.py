@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -49,6 +50,8 @@ from backend.core.run_log import RunLog
 from backend.core.runtime_env import WorkerPlan, plan_workers
 
 DAY_SEC = 86400.0
+# 실행 금지 시간대 기본값 — pipeline.yaml 에 키가 없는 기존 설치에도 적용된다
+QUIET_DEFAULT = ("00:00", "02:00")
 
 
 class PipelineBusy(RuntimeError):
@@ -87,6 +90,81 @@ class PipelineRunner:
     def loop_enabled(self) -> bool:
         return bool(self.runtime_cfg().get("loop_enabled"))
 
+    # ── 실행 금지 시간대 (quiet window) ──────────────────────
+    # 야간 백업/사내 API 점검처럼 파이프라인이 돌면 안 되는 구간을 비워둔다.
+    #   quiet_start/quiet_end : "HH:MM" (서버 로컬 시각) · start > end 면 자정을 넘는 구간
+    #   대상은 자동 실행(스케줄·루프)뿐 — 사람이 직접 누른 수동 실행은 막지 않는다.
+    #   이미 돌고 있는 실행은 중단하지 않는다 (중간에 끊으면 event 파티션이 반만 남는다).
+    @staticmethod
+    def parse_hhmm(text) -> int | None:
+        """'HH:MM' → 자정 기준 분. 형식이 틀리면 None (24:00 = 1440 허용).
+
+        yaml 을 손으로 고쳐 `quiet_start: 9:00` 처럼 따옴표 없이 적으면 YAML 1.1 의
+        60진수 규칙에 걸려 정수 540(=9*60) 으로 읽힌다 — 그 값도 분으로 받아준다.
+        (`09:00` 처럼 0 으로 시작하면 문자열로 남는다. UI 저장은 항상 문자열.)
+        """
+        if isinstance(text, int) and not isinstance(text, bool):
+            return text if 0 <= text <= 1440 else None
+        m = re.match(r"^\s*(\d{1,2}):(\d{2})\s*$", str(text or ""))
+        if not m:
+            return None
+        h, mi = int(m.group(1)), int(m.group(2))
+        if h > 24 or mi > 59 or (h == 24 and mi):
+            return None
+        return h * 60 + mi
+
+    def quiet_cfg(self) -> tuple[bool, str, str]:
+        """(사용여부, 시작, 종료). 키가 아예 없는 기존 설치도 기본값(00:00~02:00)을 받는다 —
+        config/ 는 seed-only 라 업그레이드해도 pipeline.yaml 이 갱신되지 않기 때문.
+        빈 문자열은 '지웠다' 는 뜻이므로 기본값으로 되살리지 않는다."""
+        rt = self.runtime_cfg()
+        return (bool(rt.get("quiet_enabled", True)),
+                rt["quiet_start"] if "quiet_start" in rt else QUIET_DEFAULT[0],
+                rt["quiet_end"] if "quiet_end" in rt else QUIET_DEFAULT[1])
+
+    def quiet_window(self) -> tuple[int, int] | None:
+        """(시작분, 종료분). 꺼져 있거나 값이 없거나 시작==종료(빈 구간)면 None."""
+        enabled, start, end = self.quiet_cfg()
+        if not enabled:
+            return None
+        s, e = self.parse_hhmm(start), self.parse_hhmm(end)
+        if s is None or e is None or s == e:
+            return None
+        return s, e
+
+    def quiet_now(self, now: float | None = None) -> bool:
+        w = self.quiet_window()
+        if not w:
+            return False
+        s, e = w
+        lt = time.localtime(now if now is not None else time.time())
+        cur = lt.tm_hour * 60 + lt.tm_min
+        return (s <= cur < e) if s < e else (cur >= s or cur < e)
+
+    def quiet_until(self, now: float | None = None) -> float | None:
+        """지금이 금지 시간대면 해제 시각(epoch), 아니면 None."""
+        w = self.quiet_window()
+        if not w or not self.quiet_now(now):
+            return None
+        now = now if now is not None else time.time()
+        lt = time.localtime(now)
+        midnight = now - (lt.tm_hour * 3600 + lt.tm_min * 60 + lt.tm_sec)
+        end = midnight + w[1] * 60
+        return end if end > now else end + DAY_SEC
+
+    def quiet_state(self, now: float | None = None) -> dict:
+        """UI 표시용 — 설정값 + 지금 막고 있는지 + 언제 풀리는지."""
+        enabled, start, end = self.quiet_cfg()
+        w = self.quiet_window()
+        return {
+            "enabled": enabled,
+            "start": str(start or ""),
+            "end": str(end or ""),
+            "valid": w is not None,
+            "now": self.quiet_now(now),
+            "until": self.quiet_until(now),
+        }
+
     # ── 제품별 주기 ──────────────────────────────────────────
     def default_runs_per_day(self) -> float:
         """runs_per_day 가 없는 제품의 기본값 — 전역 interval_hours 에서 환산."""
@@ -109,19 +187,25 @@ class PipelineRunner:
         now = now or time.time()
         last = self.runs.last_started()
         master = bool(self.runtime_cfg().get("schedule_enabled"))
+        quiet_until = self.quiet_until(now)   # 금지 시간대면 해제 시각, 아니면 None
         out = {}
         for v, cfg in self.pipe.vehicles().items():
             rpd, src = self.runs_per_day(cfg or {})
             interval = DAY_SEC / rpd if rpd > 0 else 0.0
             t = last.get(v)
             next_ts = (t + interval) if (t and interval > 0) else (now if interval > 0 else None)
+            # 금지 시간대에 걸린 예정은 해제 시각으로 밀린다 (건너뛰는 게 아니라 미뤄짐)
+            if quiet_until and next_ts is not None and next_ts < quiet_until:
+                next_ts = quiet_until
             out[v] = {
                 "vehicle": v, "product": (cfg or {}).get("product"),
                 "runs_per_day": rpd, "source": src,
                 "interval_sec": interval,
                 "interval_hours": round(interval / 3600, 2) if interval else 0,
                 "last_ts": t, "next_ts": next_ts,
-                "due": bool(interval > 0 and (t is None or now - t >= interval)),
+                "due": bool(interval > 0 and (t is None or now - t >= interval)
+                            and not quiet_until),
+                "quiet_blocked": bool(quiet_until and interval > 0),
                 "enabled": bool(master and interval > 0),
             }
         return out
@@ -141,6 +225,20 @@ class PipelineRunner:
             snap = copy.deepcopy(self.progress)
         if self.last_rebuild is not None:
             snap["last_rebuild"] = self.last_rebuild
+        # running 만 보면 회차 사이(loop_gap_sec)·스케줄 tick 사이에 잠깐 False 가 되어
+        # 화면이 "실행 중 ↔ 대기" 를 오간다. 루프/스케줄이 켜져 있다는 사실을 같이 실어
+        # 프론트가 그 공백을 "실행 중(다음 회차 준비)" 으로 계속 표시하게 한다.
+        try:
+            rt = self.runtime_cfg()
+        except Exception:
+            rt = {}
+        snap["loop_enabled"] = bool(rt.get("loop_enabled"))
+        snap["schedule_enabled"] = bool(rt.get("schedule_enabled"))
+        snap["busy"] = self._run_lock.locked()   # 재생성 등 락을 잡은 다른 작업 포함
+        try:
+            snap["quiet"] = self.quiet_state()
+        except Exception:
+            snap["quiet"] = {"enabled": False, "now": False}
         return snap
 
     def _raw_guarded(self, cfg, source, start, end, split) -> int:
@@ -391,6 +489,11 @@ class PipelineRunner:
         제품마다 runs_per_day 가 달라도 한 루프가 전부 커버한다."""
         while True:
             rt = self.runtime_cfg()
+            # 실행 금지 시간대 — 자동/루프 모두 새 실행을 띄우지 않는다.
+            # (이미 돌고 있던 실행은 그대로 끝까지 간다 — 중간에 끊으면 산출물이 반만 남는다)
+            if self.quiet_now():
+                await asyncio.sleep(30)
+                continue
             if rt.get("loop_enabled"):
                 try:
                     await asyncio.to_thread(self.run_all, None, "loop")
