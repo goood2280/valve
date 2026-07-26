@@ -46,38 +46,126 @@ uvicorn app:app --host 0.0.0.0 --port 8090 --reload
 
 기본값은 **Mock 모드** (가짜 데이터 · HY000 5% 확률 · 1% 확률 6분 timeout 주입). 웹에서 Settings → `lake_api.mode: real` 로 바꾸고 `module: mycorp.datalake:query` 같은 실제 경로를 넣으면 전환.
 
-## 폴더 구조
+## 파일 구조
 
 ```
 Valve/
-├── app.py                    FastAPI entry
-├── config/
-│   ├── settings.json         사내 API · S3 · schedule · probe 설정 (웹 CRUD)
-│   ├── products.yaml         제품별 params 템플릿
-│   └── probe_cache.json      probe 결과 7일 캐시 (자동 생성)
-├── backend/
-│   ├── core/
-│   │   ├── lake_api.py       Mock + Real 어댑터 · retry · timeout
-│   │   ├── planner.py        probe + chunk plan + 7일 cache
-│   │   ├── executor.py       asyncio worker(3 concurrent) + merge + completeness
-│   │   ├── s3_up.py          atomic put + fake_local 모드
-│   │   └── state.py          jobs.jsonl + SSE broadcast + crash recovery
-│   └── routers/
-│       ├── jobs.py           /api/jobs — state · stream · enqueue · cancel · retry
-│       ├── settings.py       /api/settings — GET/POST (secret 마스킹)
-│       ├── schedule.py       /api/schedule — 예정 목록 · products CRUD
-│       ├── browser.py        /api/browser — staging · s3_local 탐색
-│       ├── query.py          /api/query — parquet + polars SQL 필터
-│       └── probe_preview.py  /api/probe-preview — probe dry-run
-├── staging/                  임시 parquet (자동 정리)
-├── s3_outbox/valve-alerts/   ★ S3 업로드 폴더 — flow 매칭알람이 읽는 파일 (아래 참조)
-├── logs/jobs.jsonl           append-only 이벤트 로그
-├── logs/pipeline_runs.jsonl  파이프라인 실행 로그 (제품 × 1회 = 1행)
-├── logs/s3_jobs_*.json(l)    S3 전송 상태 · 이력
-├── s3_local/                 fake_local_path (개발용 가짜 S3)
-├── frontend/index.html       단일 페이지 (v0.2)
-└── scripts/smoke_test.py     stdlib 만으로 핵심 라우트 검증 (v0.2)
+├── app.py                       FastAPI entry (라우터 등록 · startup 백그라운드 루프)
+├── setup.py                     self-extracting 설치본 (_build_setup.py 로 생성)
+├── _build_setup.py              설치본 빌더 — 코드는 항상 교체, config 는 seed-only
+├── VERSION.json                 버전 · changelog (설치본 메타의 원본)
+├── requirements.txt             의존성
+│
+├── config/                      ★ 설정·룰북 (아래 표 참조) — 설치본이 덮지 않는다
+├── backend/                     서버 코드
+├── frontend/                    단일 페이지 UI (index.html · app.js · style.css · favicon.svg)
+│
+├── db/                          ★ 파이프라인 산출물 (번들 대상 아님)
+│   ├── 1.RAWDATA_DB/{SOURCE}/{vehicle}/date=YYYY-MM-DD/data.parquet
+│   ├── 2.EVENT_DB/{vehicle}/{SOURCE}/date=YYYY-MM-DD/data.parquet  (+ _meta.json)
+│   ├── 3.FEATURE_STORE/{vehicle}/{FEATURE}.parquet                 (+ _meta.json)
+│   ├── 4.WIDE_FORM/ML_TABLE_{vehicle}.parquet
+│   ├── 5.SEND_FORM/{0.KNOB,1.FAB,2.VM,3.INLINE}/*.parquet · *.csv
+│   └── REPORTS/{vehicle}/       knob_miss · knob_skip · unmatched · scan_result ·
+│                                alerts_published (알람 탭 원본)
+│
+├── staging/{product}/{SOURCE}/  임시 parquet (머지 후 정리)
+├── s3_outbox/valve-alerts/      ★ S3 업로드 폴더 — flow 매칭알람이 읽는다 (아래 참조)
+├── s3_local/                    fake_local_path (개발용 가짜 S3 · 실제 운영엔 없음)
+├── logs/                        운영 로그 (아래 표)
+├── docs/                        설계 문서 · 매뉴얼 PDF
+├── scripts/smoke_test.py        stdlib 만으로 핵심 라우트 검증
+├── scripts/gen_manual_pdf.py    docs/valve_manual.pdf 생성
+└── tests/                       pytest (170개 · `python -m pytest tests -q`)
 ```
+
+### `config/` — 있어야 도는 파일들
+
+**필수** 은 없으면 해당 기능이 죽는다는 뜻이다. *누가 쓰나* 는 그 파일을 **덮어쓰는 주체** —
+같은 파일을 다른 데서 고치면 다음 동기화/저장에 날아간다.
+
+| 파일 | 필수 | 누가 쓰나 | 내용 |
+|---|---|---|---|
+| `pipeline.yaml` | ✅ 전체 | 웹(모니터 ⚙ 실행 관리 · 알람 탭) | `db_root` · `runtime`(워커·주기·**실행 금지 시간대**) · `sources`(테이블/컬럼) · 룰북 경로 · `unmatched_scan.exclude` · `knob_skip` |
+| `vehicles.yaml` | ✅ 전체 | 웹(제품별 주기) | vehicle 정의 — `product` `process_id` `line_id` `QueryTimeSpan` `SplitTimeSpan` `event_days_back` `event_lot_startwith` `runs_per_day` |
+| `settings.json` | ✅ 전체 | 웹(설정 탭) | `lake_api`(mode·module·user·timeout·retry) · `s3`(bucket·key) · `schedule` · `probe` · `alerts` |
+| `products.yaml` | ✅ 모니터 백필 | 웹(제품 탭) | 제품 × 소스 테이블 · `shard_hierarchy` · `target_chunk_rows` · `params_template` |
+| `source_types.yaml` | ✅ 제품 편집기 | 웹(설정 › Source types) | 소스 메타 — 컬럼 풀 · 기본 shard · 색 · 힌트 |
+| `step_matching/vehicle_matching.csv` | ✅ event·feature | **flow → S3 ↓** | `vehicle,product,step_id,step_desc` — 이게 없으면 event DB 가 비어 feature 도 안 나온다 |
+| `feature_rules/fab.csv` | FAB feature | **flow → S3 ↓** | `step_desc,feature_name,agg` |
+| `feature_rules/ppid_knob.csv` | KNOB feature | **flow → S3 ↓** | 사내 룰 형식 `feature_name,function_step,rule_order,operator,value,category[,use]`. flow 판정 결과가 반영되는 마스터 룰북 |
+| `feature_rules/mask.csv` | MASK feature | **flow → S3 ↓** | `step_desc,agg` (photo step 의 `part\|reticle`) |
+| `feature_rules/inline.csv` | INLINE feature | **flow → S3 ↓** | `item_id,agg` |
+| `feature_rules/vm.csv` | VM feature | **flow → S3 ↓** | `sensor_id,agg` (residual 집계) |
+| `feature_rules/knob_ppid.csv` | 선택 | 사람 | legacy **직접 매핑** 형식 `vehicle,step_id,step_desc,ppid,knob[,agg]` 예시. `pipeline.yaml` 의 `feature_rules.knob` 을 이 파일로 바꾸면 그대로 쓴다 (기본값은 `ppid_knob.csv`) |
+| `reformatter/{vehicle}_reformatter.csv` | ET raw | 사람 / auto report 공유 | auto report 와 같은 포맷. `CATEGORY=REAL` 행의 `ITEMID` 만 ET 쿼리 대상. **파일 없는 vehicle 은 ET 를 건너뛴다** |
+| `fab_scan/{vehicle}/scan_config.yaml` | FAB 스캔 | 웹(스캔 탭) | 스캔 대상 기간·step 범위 |
+| `fab_scan/{vehicle}/scan_ignore.json` | FAB 스캔 | **flow → S3 ↓** | 무시할 step/ppid (flow 에서 "반영불필요" 판정한 것) |
+| `feature_funcs.py` | 선택 | 사람 | 커스텀 feature 함수. `def <이름>` → `fab.csv` 의 `feature_name`, `def agg_<이름>` → `agg` 컬럼. **재시작 없이** 실행 시점마다 다시 읽는다 |
+| `s3_jobs.yaml` | 자동 생성 | 탐색기 ⚙ | S3 전송 항목(방향·key·주기). 최초 기동 때 아래 두 파일에서 이관된다 |
+| `csv_sync.yaml` | legacy | — | 구 다운로드 설정. `s3_jobs.yaml` 로 이관된 뒤에는 참고용 |
+| `s3_transfer.yaml` | legacy | — | 구 업로드 규칙 + `destinations`(S3 접속 정보). destinations 는 지금도 쓴다 |
+| `probe_cache.json` | 자동 생성 | planner | probe 결과 7일 캐시. 지워도 다시 만들어진다 (다음 실행이 느려질 뿐) |
+| `scan/` | ❌ 미사용 | — | `fab_scan/` 으로 대체된 옛 경로. 코드가 참조하지 않는다 |
+
+### 설정 파일은 언제 덮이나 — 3가지 경로
+
+같은 `config/` 를 건드리는 주체가 셋이라, "내가 고친 게 왜 사라졌지" 는 대부분 여기서 갈린다.
+
+| 경로 | 무엇을 덮나 | 안전장치 |
+|---|---|---|
+| **설치본 재실행** (`python setup.py`) | 코드(`backend/` `frontend/` `app.py` …)는 **항상 교체**. `config/` 는 **이미 있으면 절대 안 덮는다**(seed-only) | 추출 직전 `~/.valve_backups/` 로 스냅샷 → `python setup.py restore latest` |
+| **S3 동기화** (flow → Valve) | 위 표의 **flow → S3 ↓** 행 — 룰북 csv 와 `scan_ignore.json`. 로컬에서 고쳐도 다음 sync 에 덮인다 | 탐색기 신호등(↓)으로 소유자 표시. 룰북은 flow 판정 페이지에서 고칠 것 |
+| **웹에서 저장** | 그 파일 하나를 통째로 다시 쓴다 (`pipeline.yaml` `vehicles.yaml` `settings.json` …) | 값은 그대로. 단 yaml **주석**은 파일 맨 앞 블록만 살아남는다 — 아래 참조 |
+
+> **주석 유실 주의.** yaml 저장은 `yaml.safe_dump` 라 주석을 전부 버리고, 복원되는 건
+> **파일 첫 줄부터 이어지는 주석 블록**뿐이다. 그래서 `pipeline.yaml` · `vehicles.yaml` 은
+> 설명을 전부 파일 맨 위에 모아 뒀다. **키 옆에 주석을 달면 웹에서 한 번 저장하는 순간 지워진다** —
+> 설명을 추가할 땐 맨 위 블록에 넣을 것. (**설정 값 자체가 사라지는 일은 없다.**)
+
+### `logs/` — 운영 기록
+
+| 파일 | 내용 |
+|---|---|
+| `pipeline_runs.jsonl` | 제품 × 1회 실행 = 1행. 단계별 소요·산출·실패 사유. **스케줄 주기의 근거**(재기동해도 유지) |
+| `jobs.jsonl` | 모니터 탭 plan/chunk/partition 이벤트 (append-only · crash recovery) |
+| `s3_jobs_status.json` · `s3_jobs_history.jsonl` | S3 전송 진행 상태 · 이력(최근 500) |
+| `csv_sync.json` | legacy csv 동기화 상태 |
+| `alerts_ack.json` | 알람 확인 상태 로컬 캐시 (원본은 S3 `ack.json`) |
+| `agent_audit.jsonl` | 에이전트 호출 감사 로그 |
+
+`db/` · `logs/` · `staging/` · `s3_local/` 은 **설치본에 들어가지도, 건드려지지도 않는다**
+(`_build_setup.py` 의 제외 목록 + `setup.py` 쓰기 가드 이중 방어).
+
+### `backend/` — 코드 지도
+
+| `core/` | 역할 |
+|---|---|
+| `feature_pipeline.py` | **파이프라인 본체** — raw → event → feature → wide → send 전 단계 + 룰북 로딩 + 리포트 |
+| `pipeline_runner.py` | 병렬 오케스트레이터 + 진행상황(stage) 추적 + 제품별 주기/루프 스케줄러 + **실행 금지 시간대** + 실행 락 |
+| `run_log.py` | 실행 이력 (vehicle 1회 = 1레코드, append-only JSONL) |
+| `runtime_env.py` | 호스트 코어/메모리 → 워커 수 산정 (`auto` 값의 근거) |
+| `lake_api.py` | 사내 DataLake `query()` 어댑터 — Mock/Real · rate limit · retry · timeout |
+| `planner.py` | probe → chunk plan (7일 캐시) |
+| `executor.py` | asyncio chunk worker (`max_concurrent=3`) + 머지 + completeness |
+| `state.py` | plan/chunk/partition 상태 + SSE broadcast + crash recovery |
+| `alert_store.py` | 알람 통합 리스트 + flow 와의 S3 순환(ack) |
+| `fab_scanner.py` | FAB DB 스캔 — 미매칭 step · 미등록 PPID |
+| `s3_jobs.py` | S3 전송 항목 엔진 (단일 워커 큐 · 파일 경계 중지 · 이력) |
+| `s3_up.py` · `s3_queue.py` · `s3_link.py` | atomic put · 지연 큐 · 탐색기 신호등(방향 판정) |
+| `csv_sync.py` · `config_sync.py` | legacy csv 동기화 · 다중 인스턴스 config 공유 |
+| `fab_scan.py` | 스텁 — `fab_scanner.py` 로 통합됨 |
+
+| `routers/` | 경로 |
+|---|---|
+| `pipeline.py` | `/api/pipeline` — 실행 · 상태 · 주기 · 진행률 · 알람 · 룰북 설정 (알람 탭 + DB heatmap) |
+| `jobs.py` | `/api/jobs` — plan/chunk 상태 · SSE · enqueue · cancel · retry |
+| `scanner.py` | `/api/scanner` — FAB 스캔 |
+| `s3_jobs.py` | `/api/s3` — 전송 항목 CRUD · 실행/중지 · 진행률 · 이력 |
+| `browser.py` · `query.py` | 파일탐색기 · parquet + polars SQL 조회 |
+| `settings.py` · `schedule.py` · `probe_preview.py` | 설정 CRUD(secret 마스킹) · 예정 목록 · probe dry-run |
+| `ops.py` · `agent.py` · `aipd_bridge.py` | Prometheus 메트릭 + webhook · 에이전트 스캐폴딩 · aipd 연결 |
+| `fab_scan.py` | 스텁 — `scanner.py` 로 통합됨 |
 
 ## S3 업/다운로드 — 탐색기 ⚙
 
@@ -226,7 +314,9 @@ aws s3 sync "D:/semi all/Valve/s3_outbox/valve-alerts" s3://<bucket>/valve-alert
 
 - **v0.1** (2026-04-24) — 백엔드 완성 · Mock 으로 end-to-end 돌아감 · API 로 enqueue/조회 가능
 - **v0.2** — frontend 단일 페이지 (Monitor 캘린더 히트맵 · Products · Settings · Browser 4탭) · smoke_test · 실행 검증
-- **v0.3+** — 실사내 API 연결 · 자동 스케줄러 (interval_hours) · 알림 연동
+- **v0.3** (2026-07-26) — 파이프라인 3단계(raw→event→feature)+wide/send · 제품별 실행 주기 · 실행 로그 · S3 전송 항목 엔진(⚙) · 알람 S3 순환 · 실행 락
+- **v0.3.1** (2026-07-27) — `feat` 배지에 커버 구간 · **실행 금지 시간대** · ⚙ 실행 관리로 실행 조작 통합 · 진행 표시 깜빡임 제거
+- **다음** — 실사내 API 연결 (`lake_api.mode: real`) · 알림 연동
 
 ## API 요약
 

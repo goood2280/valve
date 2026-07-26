@@ -1,3 +1,59 @@
+# Valve 파이프라인 설정 (raw → event → feature → wide → send)
+# ══════════════════════════════════════════════════════════════════════
+# ※ 이 파일은 웹에서 설정을 저장할 때마다 통째로 다시 쓰인다.
+#    값은 그대로 보존되지만 yaml 주석은 "파일 맨 앞 주석 블록"만 살아남는다.
+#    그래서 설명은 전부 여기(맨 위)에 모아 둔다 — 키 옆에 주석을 달면 지워진다.
+#
+# db_root            db 산출물 루트 (ROOT 기준 상대)
+#
+# runtime — 실행 계획 / 주기 -------------------------------------------
+#   raw_days         한 번 실행할 때 조회할 최근 일수
+#   split_days       raw 유닛 분할 단위 (1 = 하루씩)
+#   raw_api_max      전 vehicle 합친 동시 raw 쿼리 상한 (사내 API 풀 보호)
+#   vehicle_workers  동시에 처리할 vehicle 수. vehicle 내부는 raw→event→feature 순차
+#   max_workers / feature_workers / mem_per_worker_gb / cpu_cores
+#                    auto = 호스트 자원으로 산정 (모니터 탭에 산정근거 표시)
+#
+#   주기 실행 — raw→event→feature→wide 전 단계가 제품별 주기로 자동 실행
+#   (feature 는 event DB 전체 대상).
+#     interval_hours   vehicles.yaml 에 runs_per_day 가 없는 제품의 기본 주기
+#     schedule_enabled 자동 실행 마스터 스위치 (끄면 제품 설정과 무관하게 전부 정지)
+#     sched_tick_sec   "돌 때가 된 제품" 을 확인하는 간격 — 주기 자체가 아니다
+#     loop_enabled     쉬지 않고 반복 실행 (개발·백필용)
+#
+#   실행 금지 시간대 — 이 구간에는 자동 실행(스케줄·루프)을 띄우지 않는다.
+#     quiet_enabled / quiet_start / quiet_end   서버 로컬 시각 "HH:MM"
+#     · start > end 면 자정을 넘는 구간 (예 '23:00' ~ '02:00')
+#     · 사람이 누르는 수동 실행은 막지 않는다
+#     · 이미 돌고 있는 실행은 중단하지 않는다 (끊으면 event 파티션이 반만 남는다)
+#     · 예정은 건너뛰지 않고 해제 시각으로 밀린다
+#     · 키가 없으면 코드 기본값 00:00~02:00 이 적용된다
+#     · 손으로 고칠 땐 따옴표를 붙일 것 — 9:00 은 yaml 이 540 으로 읽는다
+#
+# sources — 소스별 추출 테이블/컬럼 -------------------------------------
+#   FAB / INLINE / VM  raw + event (event DB 를 만든다)
+#   ET                 raw 전용 (event: false). auto report 와 동일한 reformatter 인식 —
+#                      config/reformatter/{vehicle}_reformatter.csv 의 CATEGORY=REAL 행
+#                      ITEMID 만 쿼리/저장 대상 (파일 없는 vehicle 은 ET 스킵).
+#                      ADDP 는 파생식이라 raw 제외.
+#
+# step_matching / feature_rules — 룰북 경로 -----------------------------
+#   step_matching    vehicle,product,step_id,step_desc (flow 가 S3 로 내려주는 마스터)
+#   feature_rules.knob  사내 룰 형식
+#                    (feature_name,function_step,rule_order,operator,value,category).
+#                    flow 가 알람 판정을 반영해 내려준다. legacy 직접매핑 형식도 지원.
+#
+# unmatched_scan.exclude — 미매칭 step 스캔에서 뺄 eqp_id/eqp_model fnmatch 패턴
+#
+# knob_skip — knob step 미통과(값이 빈) wafer 처리 -----------------------
+#   명시: ppid_knob.csv 의 AND 블록(같은 feature+rule_order 복수 행, category=SKIP,
+#         예: "다음 main step not_null") 이 있으면 그 조건대로.
+#   auto: 블록이 없는 feature 도 wafer 가 뒤쪽 step 을 지났으면 "SKIP" 처리.
+#         뒤쪽 step 판별은 두 step 공동 통과 wafer 의 tkout_time 상대순서
+#         (sleuth_order 미사용). 표본/비율 미달이면 보류(null 유지) 후 리포트.
+#     min_support     뒤쪽 step 판별에 필요한 공동 통과 wafer 최소 수
+#     after_fraction  그 중 시간이 뒤인 비율 임계
+# ══════════════════════════════════════════════════════════════════════
 db_root: db
 runtime:
   raw_days: 5
@@ -8,20 +64,10 @@ runtime:
   feature_workers: auto
   mem_per_worker_gb: 4
   cpu_cores: auto
-  # 주기 실행 — raw→event→feature→wide 전 단계가 제품별 주기로 자동 실행
-  # (feature 는 event DB 전체 대상).
-  #   interval_hours   : vehicles.yaml 에 runs_per_day 가 없는 제품의 기본 주기
-  #   schedule_enabled : 자동 실행 마스터 스위치 (끄면 제품 설정과 무관하게 전부 정지)
-  #   sched_tick_sec   : "돌 때가 된 제품" 을 확인하는 간격 — 주기 자체가 아니다
   interval_hours: 6
   schedule_enabled: true
   sched_tick_sec: 60
   loop_enabled: false
-  # 실행 금지 시간대 — 이 구간에는 자동 실행(스케줄·루프)을 띄우지 않는다.
-  # 서버 로컬 시각 "HH:MM" · start > end 면 자정을 넘는 구간(예 '23:00'~'02:00').
-  # 사람이 누르는 수동 실행은 막지 않으며, 이미 돌고 있는 실행도 중단하지 않는다.
-  # 키가 없으면 코드 기본값(00:00~02:00)이 적용된다.
-  # (손으로 고칠 땐 따옴표를 붙일 것 — 9:00 은 yaml 이 540 으로 읽는다)
   quiet_enabled: true
   quiet_start: '00:00'
   quiet_end: '02:00'
@@ -63,10 +109,6 @@ sources:
     - actual_value
     - residual
     - time
-  # ET — auto report 와 동일한 reformatter 인식:
-  #   config/reformatter/{vehicle}_reformatter.csv 의 CATEGORY=REAL 행 ITEMID 만
-  #   raw 쿼리/저장 대상 (파일 없는 vehicle 은 ET 스킵). ADDP 는 파생식이라 raw 제외.
-  #   event: false = raw 전용 소스 — event DB 를 만들지 않는다 (FAB/INLINE/VM 만 raw+event).
   ET:
     table: f_et_test
     columns:
@@ -84,8 +126,6 @@ sources:
 step_matching: config/step_matching/vehicle_matching.csv
 feature_rules:
   fab: config/feature_rules/fab.csv
-  # 사내 룰 형식(feature_name,function_step,rule_order,operator,value,category)
-  # — flow 가 알람 판정을 반영해 내려주는 마스터 룰북. legacy 직접매핑 형식도 지원.
   knob: config/feature_rules/ppid_knob.csv
   mask: config/feature_rules/mask.csv
   inline: config/feature_rules/inline.csv
@@ -96,15 +136,8 @@ unmatched_scan:
     - AUX_*
     eqp_model:
     - MEA-*
-# knob skip 판정 — knob step 미통과(값이 빈) wafer 처리.
-#   명시: ppid_knob.csv 의 AND 블록(같은 feature+rule_order 복수 행, category=SKIP,
-#         예: "다음 main step not_null") 이 있으면 그 조건대로.
-#   auto: 블록이 없는 feature 도 wafer 가 뒤쪽 step 을 지났으면 "SKIP" 처리.
-#         뒤쪽 step 판별은 두 step 공동 통과 wafer 의 tkout_time 상대순서
-#         (sleuth_order 미사용). 표본/비율 미달이면 보류(null 유지) 후 리포트.
 knob_skip:
   enabled: true
   auto: true
-  min_support: 5      # 뒤쪽 step 판별에 필요한 공동 통과 wafer 최소 수
-  after_fraction: 0.8 # 그 중 시간이 뒤인 비율 임계
-
+  min_support: 5
+  after_fraction: 0.8
