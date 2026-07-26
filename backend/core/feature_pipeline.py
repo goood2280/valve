@@ -4,11 +4,17 @@ Valve · feature_pipeline
 Ref_raw_query / Ref_event / Ref_feature 3단계 파이프라인의 Valve 통합판.
 
   1) raw   : vehicle 설정(QueryTimeSpan/SplitTimeSpan)대로 split 을 나눠
-             FAB · INLINE · VM · ET 를 쿼리 → db/1.RAWDATA_DB/{SOURCE}/{vehicle}/date=…
+             FAB · INLINE · VM · ET 를 쿼리 →
+             db/1.RAWDATA_DB/{SOURCE}/{vehicle}/date={YYYY-MM-DD}/data.parquet
+             · auto report 의 daily DB 와 동일한 hive partitioning —
+               파티션 키는 "데이터의 시간 컬럼(tkout_time/time) 날짜" (쿼리 날짜 아님),
+               파일명은 data.parquet (auto report: {DB_et_daily}/date=…/data.parquet)
              · ET 는 auto report 와 동일한 reformatter 인식 —
                config/reformatter/{vehicle}_reformatter.csv 의 REAL ITEMID 만 대상
   2) event : FAB raw 를 vehicle_matching(step_id↔step_desc) inner join +
-             root_lot prefix 필터 → db/2.EVENT_DB/{vehicle}/date=…
+             root_lot prefix 필터 → db/2.EVENT_DB/{vehicle}/{SOURCE}/date=…/data.parquet
+             · 소스별 event 여부는 pipeline.yaml sources.<name>.event 로 제어 —
+               FAB/INLINE/VM 은 raw+event, ET 는 raw 전용(event: false)
   3) feature: 카테고리별 규칙 CSV (fab / knob_ppid / mask / inline / vm) 에 따라
              FAB_… KNOB_… MASK_… INLINE_… VM_… feature parquet 생성
              → db/3.FEATURE_STORE/{vehicle}/
@@ -139,6 +145,37 @@ def build_part_reticle():
                          separator="|", ignore_nulls=True)
 
 
+# 유효 장비값 판정 — 마지막 '_' 뒤 구간에 숫자가 있는가 (EQP_01 · A_B_1 · EQP_01_CH_2).
+# 마지막 구간만 본다: A_1_B 는 뒤가 'B' 라 무효, EQP_01_CH_A 도 무효.
+VALID_TOOL_SUFFIX = r"_[^_]*[0-9][^_]*$"
+
+
+def _blank_to_null(col: str):
+    """빈 문자열·'-' 를 결측으로 — 사내 raw 는 미기입을 둘 다 쓴다."""
+    c = _clean_str(col)
+    return pl.when(c == "-").then(None).otherwise(c)
+
+
+def build_sleuth_order():
+    """sleuth_order — 비어있는 값을 (step_id, root_lot_id) 안에서
+    wafer_id 오름차순 순번으로 채운다.
+
+    소량 투입 lot 은 wafer 가 섞이지 않고 wafer_id 순서 그대로 투입되므로
+    낮은 wafer_id 가 낮은 순번을 갖는다. 이미 값이 있는 행은 건드리지 않는다.
+
+    wafer_id 는 문자열이라 그냥 정렬하면 "10" < "2" 가 되므로 숫자로 변환해
+    zero-pad 한 키로 순위를 매긴다 (숫자가 아니면 원래 문자열 순서).
+    dense rank 라 같은 wafer 가 한 step 에 여러 행이어도 같은 순번을 받는다.
+    """
+    num = pl.col("wafer_id").cast(pl.Utf8).str.strip_chars().cast(pl.Int64, strict=False)
+    order_key = (pl.when(num.is_not_null())
+                   .then(num.cast(pl.Utf8).str.zfill(9))
+                   .otherwise(pl.col("wafer_id").cast(pl.Utf8)))
+    seq = (order_key.rank("dense").over(["step_id", "root_lot_id"])
+                    .cast(pl.Int64).cast(pl.Utf8))
+    return pl.coalesce(_blank_to_null("sleuth_order"), seq)
+
+
 FEATURE_RULES = {
     "eqp_id": lambda: pl.col("eqp_id").cast(pl.Utf8),
     "chamber_id": lambda: pl.col("chamber_id").cast(pl.Utf8),
@@ -151,11 +188,18 @@ FEATURE_RULES = {
         pl.when(pl.col("tkout_time").is_not_null())
           .then(pl.lit("PASSED")).otherwise(pl.lit("NOT_PASSED"))
     ),
-    "sleuth_order": lambda: pl.col("sleuth_order").cast(pl.Utf8),
+    "sleuth_order": build_sleuth_order,
     "eqpall": build_eqp_all,
     "ecuall": build_ecu_all,
     "reticleall": build_part_reticle,
 }
+
+# feature_name 별 고정 집계 — 룰북(fab.csv)의 agg 와 무관하게 항상 이 규칙으로 뽑는다.
+#   ecuall : 마지막 '_' 뒤에 숫자가 있는 값(유효 장비값) 중 tkout_time 이 가장 늦은 것.
+#            그런 값이 하나도 없으면 tkout_time last.
+# step 별 예외를 두지 않는 것이 요구사항이라 csv 로는 못 바꾼다 — 규칙 자체를 바꾸려면
+# 여기를 고친다. 무시된 csv agg 는 run_feature 결과의 agg_overrides 로 노출된다.
+FORCED_AGG = {"ecuall": "valid_or_last"}
 
 
 def aggregate_feature(df: pl.DataFrame, feature_col: str, agg_type: str,
@@ -181,10 +225,20 @@ def aggregate_feature(df: pl.DataFrame, feature_col: str, agg_type: str,
     if agg_type == "valid_eqp":
         # Ref_feature 동일 — '_뒤에 숫자' 가 있는 유효 장비값만 남기고 첫 값
         # (ecuall/eqp_id 처럼 EQP_01 형태만 유효로 취급, 그 외는 제외)
+        # ※ 유효값이 하나도 없는 wafer 는 행 자체가 사라진다 → valid_or_last 참고
         return (df.with_columns(pl.col("val").cast(pl.Utf8).str.strip_chars().alias("val_str"))
                   .filter(pl.col("val_str").str.contains(r"_[A-Za-z0-9]*[0-9]"))
                   .sort("tkout_time").group_by(KEY_COLS)
                   .agg(pl.col("val_str").first().alias(feature_col)))
+    if agg_type == "valid_or_last":
+        # 유효 장비값(마지막 '_' 뒤에 숫자) 중 tkout_time 이 가장 늦은 것.
+        # 유효값이 하나도 없으면 tkout_time last 값으로 대체 — wafer 가 통째로
+        # 빠지는 valid_eqp 와 달리 항상 한 값을 남긴다.
+        v = pl.col("val").cast(pl.Utf8).str.strip_chars().replace("", None)
+        valid = pl.when(v.str.contains(VALID_TOOL_SUFFIX)).then(v).otherwise(None)
+        return (df.sort("tkout_time").group_by(KEY_COLS)
+                  .agg(pl.coalesce(valid.drop_nulls().last(),
+                                   v.drop_nulls().last()).alias(feature_col)))
     if agg_type == "agg":
         return df.group_by(KEY_COLS).agg(pl.col("val").unique().sort().str.join("_").alias(feature_col))
     raise ValueError(f"unknown agg type: {agg_type}")
@@ -243,12 +297,31 @@ class FeaturePipeline:
     def global_cfg(self) -> dict:
         return yaml.safe_load((self.root / "config" / "pipeline.yaml").read_text(encoding="utf-8")) or {}
 
+    @staticmethod
+    def _save_yaml(path: Path, cfg: dict):
+        """yaml.safe_dump 은 주석을 전부 버린다 — 파일 맨 앞 주석 블록(설정 설명)만은
+        보존해서 다시 붙인다. 웹에서 값 하나 바꿀 때마다 문서가 사라지지 않도록."""
+        header = []
+        if path.exists():
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if line.startswith("#") or not line.strip():
+                    header.append(line)
+                else:
+                    break
+            while header and not header[-1].strip():
+                header.pop()
+        body = yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False)
+        text = ("\n".join(header) + "\n" + body) if header else body
+        path.write_text(text, encoding="utf-8")
+
     def save_global_cfg(self, cfg: dict):
-        (self.root / "config" / "pipeline.yaml").write_text(
-            yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False), encoding="utf-8")
+        self._save_yaml(self.root / "config" / "pipeline.yaml", cfg)
 
     def vehicles(self) -> dict:
         return yaml.safe_load((self.root / "config" / "vehicles.yaml").read_text(encoding="utf-8")) or {}
+
+    def save_vehicles(self, cfg: dict):
+        self._save_yaml(self.root / "config" / "vehicles.yaml", cfg)
 
     def vehicle_cfg(self, vehicle: str) -> dict:
         cfg = self.vehicles()
@@ -477,6 +550,15 @@ class FeaturePipeline:
     def event_dir(self, vehicle: str, source: str = "FAB") -> Path:
         return self.db_root() / "2.EVENT_DB" / vehicle / source
 
+    def event_enabled(self, source: str) -> bool:
+        """소스별 event DB 생성 여부 — pipeline.yaml sources.<name>.event (기본 true).
+        ET 처럼 raw 만 뽑는 소스는 event: false 로 지정 (raw 전용)."""
+        user = (self.global_cfg().get("sources") or {}).get(source) or {}
+        return bool(user.get("event", True))
+
+    def event_sources(self) -> list[str]:
+        return [s for s in self.sources_cfg() if self.event_enabled(s)]
+
     # ── event 매칭 입력 (소스별) — FAB/VM 은 vehicle_matching, INLINE 은 inline matching ──
     def source_match(self, source: str) -> dict:
         """소스별 event 매칭 규칙. kind: step | item | none.
@@ -569,10 +651,41 @@ class FeaturePipeline:
             df = df.filter(pl.col("item_id").is_in(items))  # 실 어댑터 교체 대비 안전망
         keep = [c for c in sc["columns"] if c in df.columns] + ["split"]
         df = df.select(keep)
-        out = self.raw_dir(cfg["vehicle"], source) / f"date={start}"
-        out.mkdir(parents=True, exist_ok=True)
-        df.write_parquet(out / "part-000.parquet", compression="zstd", compression_level=3)
+        self._write_raw_partitions(cfg["vehicle"], source, df, fallback_date=start)
         return df.height
+
+    def _time_col(self, source: str) -> str | None:
+        """소스의 시간 컬럼 (raw 파티션 키) — tkout_time/time 등 'time' 포함 첫 컬럼."""
+        for c in self.sources_cfg()[source]["columns"]:
+            if "time" in c.lower():
+                return c
+        return None
+
+    @staticmethod
+    def _write_partition(df: pl.DataFrame, pdir: Path):
+        """한 date= 파티션 저장 — auto report 와 동일한 data.parquet 파일명.
+        구 파일명(part-000)이 남아있으면 제거 (중복 로드 방지)."""
+        pdir.mkdir(parents=True, exist_ok=True)
+        (pdir / "part-000.parquet").unlink(missing_ok=True)
+        df.write_parquet(pdir / "data.parquet", compression="zstd", compression_level=3)
+
+    def _write_raw_partitions(self, vehicle: str, source: str, df: pl.DataFrame, fallback_date):
+        """raw 를 auto report daily DB 와 같은 hive partitioning 으로 저장 —
+        데이터의 시간 컬럼 날짜별로 date={YYYY-MM-DD}/data.parquet.
+        (raw 유닛의 쿼리 구간이 서로 겹치지 않아 유닛 간 같은 파티션을 쓰지 않는다.)
+        시간 컬럼이 없거나 비어있으면 쿼리 시작일(fallback_date) 파티션 하나로 저장."""
+        root = self.raw_dir(vehicle, source)
+        tc = self._time_col(source)
+        if df.height and tc and tc in df.columns:
+            dated = df.with_columns(
+                pl.col(tc).cast(pl.Utf8).str.slice(0, 10).alias("_pdate"))
+            for key, part in dated.partition_by("_pdate", as_dict=True).items():
+                d = key[0] if isinstance(key, tuple) else key
+                if not d:
+                    d = str(fallback_date)
+                self._write_partition(part.drop("_pdate"), root / f"date={d}")
+        else:
+            self._write_partition(df, root / f"date={fallback_date}")
 
     def run_raw_query(self, vehicle: str) -> dict:
         """전 (source, 날짜) 유닛을 순차 실행 (병렬은 pipeline_runner 가 담당)."""
@@ -763,6 +876,10 @@ class FeaturePipeline:
 
         results = {}
         for source in self.sources_cfg():
+            if not self.event_enabled(source):
+                # raw 전용 소스(ET) — 과거에 만들어진 event DB 가 있으면 정리
+                shutil.rmtree(self.event_dir(vehicle, source), ignore_errors=True)
+                continue
             match = self.source_match(source)
             item_ids = set()
             if match["kind"] == "item" and match["rules"]:
@@ -785,11 +902,12 @@ class FeaturePipeline:
 
             rows_in = rows_out = parts = 0
             for date_dir in sorted(self.raw_dir(vehicle, source).glob("date=*")):
-                raw_path = date_dir / "part-000.parquet"
-                out_path = edir / date_dir.name / "part-000.parquet"
-                if not raw_path.exists() or (out_path.exists() and not rebuild):
+                raw_files = sorted(date_dir.glob("*.parquet"))  # data.parquet (구 part-000 호환)
+                out_dir = edir / date_dir.name
+                done = bool(list(out_dir.glob("*.parquet"))) if out_dir.exists() else False
+                if not raw_files or (done and not rebuild):
                     continue
-                raw = pl.read_parquet(raw_path)
+                raw = pl.concat([pl.read_parquet(f) for f in raw_files])
                 rows_in += raw.height
                 event = raw.filter(pl.col("root_lot_id").cast(pl.Utf8).str.starts_with(prefix))
                 if match["kind"] == "item" and match["id_col"] in event.columns:
@@ -801,8 +919,7 @@ class FeaturePipeline:
                 if source == "FAB":
                     keep = [c for c in EVENT_KEEP_COLS if c in event.columns]
                     event = event.select(keep).select(pl.all().cast(pl.String))
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                event.write_parquet(out_path)
+                self._write_partition(event, out_dir)
                 rows_out += event.height
                 parts += 1
 
@@ -817,22 +934,27 @@ class FeaturePipeline:
                                "partitions": parts, "rebuilt": rebuild}
         return results
 
+    @staticmethod
+    def _partition_files(root: Path) -> list[Path]:
+        """hive 파티션(date=*) 아래 parquet 전부 — data.parquet (구 part-000 호환)."""
+        return sorted(root.glob("date=*/*.parquet"))
+
     def _load_event(self, vehicle: str, source: str = "FAB") -> pl.DataFrame | None:
-        files = sorted(self.event_dir(vehicle, source).glob("date=*/part-000.parquet"))
+        files = self._partition_files(self.event_dir(vehicle, source))
         if not files:
             return None
         return pl.concat([pl.read_parquet(f) for f in files])
 
     def _load_raw(self, vehicle: str, source: str) -> pl.DataFrame | None:
-        files = sorted(self.raw_dir(vehicle, source).glob("date=*/part-000.parquet"))
+        files = self._partition_files(self.raw_dir(vehicle, source))
         if not files:
             return None
         return pl.concat([pl.read_parquet(f) for f in files])
 
     def event_date_count(self, vehicle: str) -> int:
-        """event DB 에 쌓인 전체 날짜 파티션 수 (소스 통합). feature 는 이 전체를 대상으로 산출."""
+        """event DB 에 쌓인 전체 날짜 파티션 수 (event 소스 통합). feature 는 이 전체 대상."""
         dates = set()
-        for source in self.sources_cfg():
+        for source in self.event_sources():
             for p in self.event_dir(vehicle, source).glob("date=*"):
                 dates.add(p.name[5:])
         return len(dates)
@@ -858,10 +980,18 @@ class FeaturePipeline:
         value_rules = {**FEATURE_RULES, **custom_vals}
 
         # FAB — Ref_feature 그대로: step_desc × feature_name × agg
+        #   단, FORCED_AGG 에 있는 feature(ecuall)는 룰북 agg 를 무시하고 고정 규칙 —
+        #   step 별로 다르게 뽑지 않는다. 무엇이 바뀌었는지는 agg_overrides 로 노출.
+        agg_overrides: list[dict] = []
         rules = self.rules_csv("fab")
         if rules is not None:
             for r in rules.iter_rows(named=True):
                 step, fname, agg = r["step_desc"], r["feature_name"], r["agg"]
+                forced = FORCED_AGG.get(fname)
+                if forced and agg != forced:
+                    agg_overrides.append({"feature": f"FAB_{step}_{fname}",
+                                          "csv_agg": agg, "applied": forced})
+                    agg = forced
                 df = event.filter(pl.col("step_desc") == step)
                 if df.height == 0:
                     continue
@@ -1008,6 +1138,7 @@ class FeaturePipeline:
             "knob_miss": knob_miss_rows,
             "knob_skip": knob_skip_rows,
             "skipped": skipped,
+            "agg_overrides": agg_overrides,   # 룰북 agg 대신 고정 규칙을 쓴 feature
             "event_dates": self.event_date_count(vehicle),  # feature 가 커버한 전체 event 날짜 수
         }
 
@@ -1317,10 +1448,12 @@ class FeaturePipeline:
 
         raw, event = {}, {}
         for source in self.sources_cfg():
-            raw[source] = [p.parent.name[5:] for p in
-                           sorted(self.raw_dir(vehicle, source).glob("date=*/part-000.parquet"))]
+            raw[source] = sorted({p.parent.name[5:] for p in
+                                  self._partition_files(self.raw_dir(vehicle, source))})
+            if not self.event_enabled(source):
+                continue  # raw 전용 소스(ET) — event 현황 없음 (UI 는 raw 전용으로 표시)
             edir = self.event_dir(vehicle, source)
-            dates = [p.parent.name[5:] for p in sorted(edir.glob("date=*/part-000.parquet"))]
+            dates = sorted({p.parent.name[5:] for p in self._partition_files(edir)})
             meta = {}
             meta_path = edir / "_meta.json"
             if meta_path.exists():

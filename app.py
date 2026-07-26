@@ -37,6 +37,7 @@ from backend.routers import ops as ops_router
 from backend.routers import agent as agent_router
 from backend.routers import pipeline as pipeline_router
 from backend.routers import scanner as scanner_router
+from backend.routers import s3_jobs as s3_jobs_router
 
 
 # 테스트/임베디드 실행을 위해 VALVE_ROOT 환경변수로 ROOT 재지정 가능.
@@ -165,12 +166,21 @@ scanner_router.deps(ROOT, SETTINGS, s3, pipeline_router._pipe, api)
 # csv_sync(다운로드 상태) · s3(연동 여부) · s3_queue(업로드 대기) 를 근거로 판정.
 from backend.core import s3_link  # noqa: E402
 
+# 알람 업로드 폴더 — 이 폴더 하나를 s3://{bucket}/{alerts.s3_prefix} 로 sync 하면
+# flow 매칭알람이 갱신된다. 탐색기 root 는 sync 단위(= prefix 루트)로 노출.
+_OUTBOX_SYNC_DIR = pipeline_router.alerts.outbox_sync_dir()
+_OUTBOX_PREFIX = pipeline_router.alerts.prefix
+if _OUTBOX_SYNC_DIR:
+    _OUTBOX_SYNC_DIR.mkdir(parents=True, exist_ok=True)
+
 browser_router.deps(
     STAGING_DIR, S3_LOCAL_DIR,
-    extra_roots={"config": CONFIG_DIR, "db": ROOT / "db"},
+    extra_roots={"config": CONFIG_DIR, "db": ROOT / "db",
+                 **({"outbox": _OUTBOX_SYNC_DIR} if _OUTBOX_SYNC_DIR else {})},
     annotator=s3_link.build_annotator(pipeline_router.csv_sync, s3, _s3queue),
     s3=s3, csv_sync=pipeline_router.csv_sync,
     config_prefix=(SETTINGS.get("alerts", {}).get("config_prefix") or "valve-config"),
+    outbox_prefix=_OUTBOX_PREFIX,
 )
 
 app.include_router(jobs_router.router)
@@ -183,6 +193,25 @@ app.include_router(ops_router.router)
 app.include_router(agent_router.router)
 app.include_router(pipeline_router.router)
 app.include_router(scanner_router.router)
+
+# ─── S3 업/다운로드 항목 엔진 (탐색기 ⚙) ───────────────────────
+# 로컬 경로 ↔ S3 key 를 짝지은 항목 단위로 수동 실행/중지·주기 실행.
+# 기존 csv_sync.yaml(다운로드) · s3_transfer.yaml(업로드) 은 최초 1회 항목으로 이관.
+from backend.core.s3_jobs import S3Jobs  # noqa: E402
+
+s3jobs = S3Jobs(
+    root=ROOT,
+    uploader_for=browser_router._uploader_for,
+    roots={"config": CONFIG_DIR, "staging": STAGING_DIR, "db": ROOT / "db",
+           **({"outbox": _OUTBOX_SYNC_DIR} if _OUTBOX_SYNC_DIR else {})},
+    # 매칭 csv 를 새로 받으면 event/feature 재생성 — csv_sync 와 같은 훅
+    on_downloaded=lambda paths: pipeline_router.on_config_downloaded(paths),
+)
+_migrated = s3jobs.migrate_if_empty(pipeline_router.csv_sync, browser_router.transfer_rules())
+if _migrated:
+    print(f"[valve] s3_jobs: 기존 설정에서 {_migrated}개 항목 이관 → config/s3_jobs.yaml")
+s3_jobs_router.deps(s3jobs)
+app.include_router(s3_jobs_router.router)
 
 # aipd 브리지 (선택) — aipd 패키지가 함께 배포된 경우 순환 데모/검토큐 연동 활성화
 try:
@@ -206,8 +235,11 @@ async def _on_startup():
     await ops_router.flush_pending_alerts()
     if (SETTINGS.get("s3") or {}).get("upload_mode") == "interval":
         _s3queue.start_background()
-    # csv 설정파일 S3 주기 다운로드 (flow → Valve)
-    if pipeline_router.csv_sync.load_config().get("enabled"):
+    # S3 항목 주기 실행 (업/다운로드) — 탐색기 ⚙ 에서 항목별 주기 설정
+    s3jobs.start_background()
+    # csv 설정파일 S3 주기 다운로드 (flow → Valve) — s3_jobs 로 이관됐으면 중복 실행 방지
+    if (pipeline_router.csv_sync.load_config().get("enabled")
+            and not any(i["direction"] == "download" for i in s3jobs.items())):
         pipeline_router.csv_sync.start_background()
     # 알람 S3 주기 발행 (Valve → flow) — 항상 루프 기동, 내부에서
     # alerts.s3_interval_min / s3_enabled 를 폴링해 실제 발행 여부 결정.
@@ -220,6 +252,7 @@ async def _on_startup():
 @app.on_event("shutdown")
 async def _on_shutdown():
     _s3queue.stop_background()
+    s3jobs.stop_background()
     pipeline_router.csv_sync.stop_background()
     pipeline_router.alerts.stop_background()
     pipeline_router.runner.stop_background()

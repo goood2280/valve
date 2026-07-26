@@ -1174,18 +1174,43 @@ textarea { resize: vertical; min-height: 60px; font-family: 'JetBrains Mono',mon
 .cfg-name:hover { color: var(--accent-dim); text-decoration: underline; }
 .btn.ghost.xsmall { padding: 1px 6px; font-size: 10px; }
 
-/* S3 연동 신호등 — 색점 + 방향 화살표 (↓다운로드 / ↑업로드) */
-.s3sig { display: inline-flex; align-items: center; gap: 1px; margin-right: 4px; flex: 0 0 auto; }
+/* S3 연동 신호등 — 상태 색점 + 방향 배지.
+   방향은 색·배경으로 확실히 갈라 놓는다 (받는 파일 / 올리는 파일을 한눈에):
+     ↓ 파랑 = S3→Valve 다운로드 (flow 가 관리하는 매칭 csv)
+     ↑ 초록 = Valve→S3 업로드 (staging · 알람 outbox)
+     ↕ 보라 = 양방향 (settings/products/source_types)
+     화살표 없음 = 로컬 전용 */
+.s3sig { display: inline-flex; align-items: center; gap: 2px; margin-right: 4px; flex: 0 0 auto; }
 .s3sig .dot { width: 8px; height: 8px; border-radius: 50%; background: #a3a3a3; box-shadow: 0 0 0 1px rgba(0,0,0,0.08); }
-.s3sig .arw { font-size: 10px; font-weight: 700; line-height: 1; color: var(--text-muted); }
+.s3sig .arw {
+  font-size: 10px; font-weight: 800; line-height: 1; color: var(--text-muted);
+  min-width: 13px; text-align: center; padding: 1px 0; border-radius: 3px;
+}
 .s3-ok .dot      { background: #22c55e; }
 .s3-pending .dot { background: #f59e0b; }
 .s3-error .dot   { background: #ef4444; }
 .s3-idle .dot    { background: #cbd5e1; }
 .s3-cloud .dot   { background: #3b82f6; }
-.s3-ok .arw      { color: #16a34a; }
-.s3-pending .arw { color: #d97706; }
-.s3-error .arw   { color: #dc2626; }
+.s3-local .dot   { background: transparent; box-shadow: 0 0 0 1px #cbd5e1; }
+/* 방향이 상태보다 우선 — 화살표 색은 dir 로만 결정한다 */
+.s3dir-down .arw { color: #1d4ed8; background: rgba(59,130,246,0.14); }
+.s3dir-up   .arw { color: #15803d; background: rgba(34,197,94,0.14); }
+.s3dir-both .arw { color: #6d28d9; background: rgba(139,92,246,0.14); }
+/* S3 업/다운로드 모달 (탐색기 ⚙) */
+.gear-btn { font-size: 16px; line-height: 1; padding: 5px 9px; }
+.s3-modal-back {
+  position: fixed; inset: 0; background: rgba(15,23,42,0.45); z-index: 200;
+  display: flex; align-items: flex-start; justify-content: center; padding: 40px 16px;
+  overflow: auto;
+}
+.s3-modal {
+  background: var(--bg, #fff); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.25); padding: 16px; width: min(1040px, 96vw);
+}
+.s3-modal .tbl { width: 100%; }
+.s3-modal .clickable { cursor: pointer; padding: 1px 2px; border-radius: 3px; }
+.s3-modal .clickable:hover { background: rgba(59,130,246,0.12); }
+
 .tree-item .ic { font-size: 11px; opacity: 0.6; }
 .tree-item .sz { margin-left: auto; font-family: 'JetBrains Mono',monospace; color: var(--text-muted); font-size: 11px; }
 

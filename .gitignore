@@ -8,12 +8,15 @@ __pycache__/
 /staging/
 /logs/
 /s3_local/
+/s3_outbox/
 /data/
 /db/
 
 # probe/state caches
 /config/probe_cache.json
 /config/settings.local.json
+# S3 전송 항목 — 사이트마다 최초 기동 때 csv_sync/s3_transfer 에서 자동 생성
+/config/s3_jobs.yaml
 
 # python envs
 .venv/

@@ -8,8 +8,14 @@ runtime:
   feature_workers: auto
   mem_per_worker_gb: 4
   cpu_cores: auto
-  interval_hours: 0
-  schedule_enabled: false
+  # 주기 실행 — raw→event→feature→wide 전 단계가 제품별 주기로 자동 실행
+  # (feature 는 event DB 전체 대상).
+  #   interval_hours   : vehicles.yaml 에 runs_per_day 가 없는 제품의 기본 주기
+  #   schedule_enabled : 자동 실행 마스터 스위치 (끄면 제품 설정과 무관하게 전부 정지)
+  #   sched_tick_sec   : "돌 때가 된 제품" 을 확인하는 간격 — 주기 자체가 아니다
+  interval_hours: 6
+  schedule_enabled: true
+  sched_tick_sec: 60
   loop_enabled: false
 sources:
   FAB:
@@ -52,6 +58,7 @@ sources:
   # ET — auto report 와 동일한 reformatter 인식:
   #   config/reformatter/{vehicle}_reformatter.csv 의 CATEGORY=REAL 행 ITEMID 만
   #   raw 쿼리/저장 대상 (파일 없는 vehicle 은 ET 스킵). ADDP 는 파생식이라 raw 제외.
+  #   event: false = raw 전용 소스 — event DB 를 만들지 않는다 (FAB/INLINE/VM 만 raw+event).
   ET:
     table: f_et_test
     columns:
@@ -65,8 +72,7 @@ sources:
     - step_seq
     - tkout_time
     reformatter: config/reformatter
-    match:
-      kind: none
+    event: false
 step_matching: config/step_matching/vehicle_matching.csv
 feature_rules:
   fab: config/feature_rules/fab.csv

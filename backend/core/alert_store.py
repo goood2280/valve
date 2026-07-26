@@ -5,6 +5,8 @@ Valve · alert_store
 
 순환 구조:
   1. Valve 파이프라인 실행 → 알람 생성(전체 스캔) → S3 `{alerts_prefix}/pipeline/{vehicle}.json` 발행
+     + 같은 내용을 **업로드 폴더**(alerts.outbox_dir, 기본 `s3_outbox/`)에 S3 key 와
+       똑같은 트리로 미러링 — 이 폴더 하나만 `aws s3 sync` 하면 flow 매칭알람이 완성된다
      + 발행 스냅샷을 로컬 메타(db/REPORTS/{vehicle}/alerts_published.json)로 저장
        (first_seen 계승 + delta new/resolved — event DB 갱신/재알람 판단 근거)
   2. flow 가 S3 에서 읽어 룰북/매칭테이블(버전관리)에 반영·조치:
@@ -18,6 +20,8 @@ Valve · alert_store
 
 ack.json: { "<id>": {"status": "미확인예정"|"반영불필요", "note": str, "by": str, "ts": float} }
 status 를 지우면(또는 "active") 다시 활성. S3 미가용 시 로컬 캐시(logs/alerts_ack.json) 사용.
+ack.json 은 flow 도 쓰는 양방향 파일이라 업로드 폴더에 두지 않는다 — 폴더 sync 로
+덮으면 flow 의 판정이 유실된다. (업로드 폴더 = Valve 단독 소유 파일만)
 """
 from __future__ import annotations
 
@@ -50,6 +54,73 @@ class AlertStore:
 
     def _ack_cache(self) -> Path:
         return self.root / "logs" / "alerts_ack.json"
+
+    # ── 업로드 폴더 (S3 key 트리를 그대로 미러 — 외부 `aws s3 sync` 대상) ──
+    @property
+    def outbox_dir(self) -> str:
+        """alerts.outbox_dir — ROOT 기준 상대(또는 절대) 경로. 빈 값이면 미러링 안 함."""
+        return str((self.settings.get("alerts") or {}).get("outbox_dir", "s3_outbox")).strip()
+
+    def outbox_root(self) -> Path | None:
+        """업로드 폴더의 루트 = 버킷 루트에 대응. 없으면 None."""
+        d = self.outbox_dir
+        if not d:
+            return None
+        p = Path(d)
+        return p if p.is_absolute() else (self.root / p)
+
+    def outbox_sync_dir(self) -> Path | None:
+        """실제 sync 단위 — 이 폴더가 s3://{bucket}/{s3_prefix} 에 1:1 대응."""
+        root = self.outbox_root()
+        return (root / self.prefix) if root else None
+
+    def _outbox_path(self, key: str) -> Path | None:
+        root = self.outbox_root()
+        return (root / key) if root else None
+
+    def _outbox_write(self, key: str, text: str) -> bool:
+        """S3 key 와 같은 상대경로로 원자적 저장. 내용이 같으면 mtime 도 안 건드림
+        (aws s3 sync 가 불필요한 업로드를 하지 않도록).
+
+        바이트로 쓴다 — write_text 는 Windows 에서 \\n 을 \\r\\n 으로 바꿔
+        S3 직접 발행본(put_text=바이트)과 내용이 달라진다."""
+        fp = self._outbox_path(key)
+        if fp is None:
+            return False
+        data = text.encode("utf-8")
+        try:
+            if fp.exists() and fp.read_bytes() == data:
+                return True
+            fp.parent.mkdir(parents=True, exist_ok=True)
+            tmp = fp.with_suffix(fp.suffix + ".tmp")
+            tmp.write_bytes(data)
+            tmp.replace(fp)
+            return True
+        except Exception:
+            return False
+
+    def outbox_status(self) -> dict:
+        """업로드 폴더 현황 — UI/운영 점검용 (경로 · 파일 목록 · 발행 주기)."""
+        root = self.outbox_root()
+        key_prefix = f"{self.prefix}/pipeline"
+        info = {
+            "enabled": root is not None,
+            "root": str(root) if root else "",
+            "sync_dir": str(self.outbox_sync_dir() or ""),
+            "s3_prefix": self.prefix,
+            "key_prefix": key_prefix,
+            "interval_min": self.interval_min(),
+            "files": [],
+        }
+        if root is None:
+            return info
+        d = root / key_prefix
+        if d.is_dir():
+            for f in sorted(d.glob("*.json")):
+                st = f.stat()
+                info["files"].append({"key": f"{key_prefix}/{f.name}", "name": f.name,
+                                      "size": st.st_size, "mtime": st.st_mtime})
+        return info
 
     # ── 알람 생성 (vehicle 별 통합 행) ──
     def build(self, vehicle: str) -> list[dict]:
@@ -199,11 +270,17 @@ class AlertStore:
         except Exception:
             pass
 
-        # S3 발행 — flow 가 읽어가는 지점 (alerts.s3_enabled 로 on/off)
+        # 업로드 폴더 미러 — flow 가 읽어가는 지점의 1차 전송로.
+        # 외부 스케줄러가 이 폴더만 `aws s3 sync` 하면 flow 매칭알람이 갱신된다.
+        # s3_enabled 와 무관하게 항상 쓴다 (직접 S3 접근이 없는 환경의 유일한 경로).
+        key = f"{self.prefix}/pipeline/{vehicle}.json"
+        self._outbox_write(key, text)
+
+        # S3 직접 발행 — 자격증명이 있는 환경의 보조 경로 (alerts.s3_enabled 로 on/off)
         if not self._s3_enabled():
             return False
         try:
-            ok = self.s3.put_text(f"{self.prefix}/pipeline/{vehicle}.json", text)
+            ok = self.s3.put_text(key, text)
         except Exception:
             ok = False
         return payload if ok else False
@@ -220,12 +297,16 @@ class AlertStore:
         return hashlib.sha1("\n".join(parts).encode("utf-8")).hexdigest()[:16]
 
     def publish_if_changed(self, vehicle: str) -> dict:
-        """직전 발행 이후 알람 구성(id/ack 상태)이 바뀐 경우에만 S3 발행."""
+        """직전 발행 이후 알람 구성(id/ack 상태)이 바뀐 경우에만 S3 발행.
+
+        업로드 폴더에 파일이 아직 없으면 지문이 같아도 발행한다 — 폴더를 지웠거나
+        outbox 도입 전 스냅샷만 있는 경우에도 첫 사이클에 채워지도록."""
         ack = self.load_ack()
         cur = self.build(vehicle)
         fp = self._fingerprint(cur, ack)
         prev_fp = self.load_pub_meta(vehicle).get("fp")
-        if prev_fp == fp:
+        out = self._outbox_path(f"{self.prefix}/pipeline/{vehicle}.json")
+        if prev_fp == fp and (out is None or out.exists()):
             return {"vehicle": vehicle, "skipped": True, "fp": fp}
         r = self.publish(vehicle)
         return {"vehicle": vehicle, "skipped": False, "published": bool(r), "fp": fp}
@@ -268,7 +349,8 @@ class AlertStore:
                 await asyncio.sleep(max(60.0, interval * 60) if interval > 0 else 60.0)
             except asyncio.CancelledError:
                 return
-            if self.interval_min() <= 0 or not self._s3_enabled():
+            # 발행처가 하나도 없으면(직접 S3 off + 업로드 폴더 off) 돌 이유가 없다.
+            if self.interval_min() <= 0 or not (self._s3_enabled() or self.outbox_dir):
                 continue
             try:
                 await asyncio.to_thread(self.publish_all_if_changed)

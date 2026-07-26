@@ -21,7 +21,7 @@ from fastapi import APIRouter, Body, HTTPException
 from backend.core.alert_store import AlertStore
 from backend.core.csv_sync import CsvSync
 from backend.core.feature_pipeline import DEFAULT_SOURCES, FeaturePipeline
-from backend.core.pipeline_runner import PipelineRunner
+from backend.core.pipeline_runner import PipelineBusy, PipelineRunner
 from backend.core.runtime_env import plan_dict
 
 router = APIRouter()
@@ -41,24 +41,30 @@ def deps(root, settings, s3_uploader):
     runner = PipelineRunner(_pipe)
     runner.on_vehicle_done = lambda v, _r: _alerts.publish(v)  # 실행 후 알람 S3 발행
     csv_sync = CsvSync(root, s3_uploader)
-    csv_sync.on_updated = _refresh_after_sync
+    csv_sync.on_updated = _refresh_after_sync   # legacy 경로 (s3_jobs 미이관 환경)
+
+
+def on_config_downloaded(paths: list) -> None:
+    """S3 에서 매칭 csv 를 새로 받았을 때 호출 (s3_jobs · csv_sync 공용 훅).
+    config/feature_rules · step_matching 밑이 바뀐 경우에만 재생성한다 —
+    settings.json 같은 건 event/feature 와 무관하다."""
+    hit = [p for p in paths
+           if any(k in str(p).replace("\\", "/")
+                  for k in ("feature_rules", "step_matching", "fab_scan", "reformatter"))]
+    if hit:
+        _refresh_after_sync(hit)
 
 
 def _refresh_after_sync(_dests: list):
     """csv 동기화로 매칭 파일이 갱신되면 전 vehicle event/feature/wide 재생성.
-    (run_event 가 설정 버전(event_version) 비교로 필요한 소스만 전체 rebuild) + 알람 재발행."""
-    for v in _pipe.vehicles():
-        try:
-            _pipe.run_event(v)
-            _pipe.run_feature(v)
-            _pipe.run_wide(v)
-            _alerts.publish(v)
-        except Exception:
-            continue  # raw 미실행 vehicle 등은 skip
-    try:
-        _pipe.run_send_form()
-    except Exception:
-        pass  # wide 산출물 없으면 skip
+    (run_event 가 설정 버전(event_version) 비교로 필요한 소스만 전체 rebuild) + 알람 재발행.
+
+    runner 의 실행 락을 공유한다 — 스케줄/수동 실행과 겹치면 같은 event 디렉터리를
+    동시에 rmtree/write 해서 파티션이 유실되거나 잘린 parquet 이 남는다.
+    결과는 runner.last_rebuild + /api/pipeline/progress 로 노출."""
+    result = runner.rebuild_after_config_change()
+    if not result.get("ok"):
+        print(f"[valve] 매칭 갱신 재생성 일부 실패: {result.get('errors') or result.get('error')}")
 
 
 def _p() -> FeaturePipeline:
@@ -93,12 +99,51 @@ def put_runtime(body: dict = Body(...)):
     rt = cfg.get("runtime") or {}
     for k in ("raw_days", "split_days", "raw_api_max", "max_workers", "vehicle_workers",
               "feature_workers", "mem_per_worker_gb", "cpu_cores", "interval_hours",
-              "schedule_enabled", "loop_enabled", "loop_gap_sec"):
+              "schedule_enabled", "loop_enabled", "loop_gap_sec", "sched_tick_sec"):
         if k in body:
             rt[k] = body[k]
     cfg["runtime"] = rt
     _p().save_global_cfg(cfg)
     return {"ok": True, "config": rt, "plan": plan_dict(rt)}
+
+
+@router.get("/api/pipeline/schedule")
+def pipeline_schedule():
+    """제품별 실행 주기 현황 — runs_per_day · 다음 실행 예정 · 최근 실행 요약."""
+    return {"master_enabled": bool((_p().global_cfg().get("runtime") or {}).get("schedule_enabled")),
+            "default_runs_per_day": runner.default_runs_per_day(),
+            "vehicles": runner.schedule_plan(),
+            "summary": runner.runs.vehicle_summary()}
+
+
+@router.put("/api/pipeline/schedule/{vehicle}")
+def put_pipeline_schedule(vehicle: str, body: dict = Body(...)):
+    """제품 주기 저장 — {runs_per_day: 3} = 하루 3회(8시간 간격).
+    0 이면 자동 실행 제외, null 이면 전역 interval_hours 를 따른다."""
+    cfg = _p().vehicles()
+    if vehicle not in cfg:
+        raise HTTPException(404, f"{vehicle} not found in vehicles.yaml")
+    rpd = body.get("runs_per_day")
+    if rpd is None or str(rpd).strip() == "":
+        cfg[vehicle].pop("runs_per_day", None)      # 전역 주기를 따름
+    else:
+        try:
+            rpd = float(rpd)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "runs_per_day 는 숫자")
+        if rpd < 0 or rpd > 48:
+            raise HTTPException(400, "runs_per_day 는 0~48 (0=자동 실행 안 함)")
+        cfg[vehicle]["runs_per_day"] = int(rpd) if rpd == int(rpd) else rpd
+    _p().save_vehicles(cfg)
+    return {"ok": True, "vehicle": vehicle, "schedule": runner.schedule_plan().get(vehicle)}
+
+
+@router.get("/api/pipeline/runs")
+def pipeline_runs(vehicle: str = "", limit: int = 50, failed_only: bool = False):
+    """제품별 실행 로그 — 단계(raw/event/feature/wide)별 소요·산출·실패 사유."""
+    return {"runs": runner.runs.tail(limit=limit, vehicle=vehicle or None,
+                                     failed_only=failed_only),
+            "summary": runner.runs.vehicle_summary()}
 
 
 @router.get("/api/pipeline/progress")
@@ -159,8 +204,8 @@ def put_exclude(body: dict = Body(...)):
 def wide(vehicle: str):
     """vehicle 의 feature 전부를 ML_TABLE 로 병합 → 4.WIDE_FORM."""
     try:
-        return _p().run_wide(vehicle)
-    except RuntimeError as e:
+        return runner.run_wide_once(vehicle)
+    except RuntimeError as e:     # PipelineBusy 포함 — 둘 다 409
         raise HTTPException(409, str(e))
     except ValueError as e:
         raise HTTPException(404, str(e))
@@ -170,15 +215,19 @@ def wide(vehicle: str):
 def send_form():
     """전 vehicle ML_TABLE 병합 → prefix 그룹(0.KNOB/1.FAB(+MASK)/2.VM/3.INLINE) 분리 저장."""
     try:
-        return _p().run_send_form()
+        return runner.run_send_form_once()
     except RuntimeError as e:
         raise HTTPException(409, str(e))
 
 
 @router.post("/api/pipeline/run/{vehicle}")
 def run(vehicle: str):
+    """단건 실행 — 스케줄/재생성과 실행 락을 공유한다 (동시 쓰기로 event 파티션이
+    유실되지 않도록). 다른 실행이 진행 중이면 409."""
     try:
-        result = _p().run_all(vehicle)
+        result = runner.run_vehicle_once(vehicle)
+    except PipelineBusy as e:
+        raise HTTPException(409, str(e))
     except ValueError as e:
         raise HTTPException(404, str(e))
     result["published"] = _alerts.publish(vehicle)  # 활성 알람 S3 발행 → flow 가 소비
@@ -189,6 +238,13 @@ def run(vehicle: str):
 @router.get("/api/pipeline/alerts")
 def alerts():
     return _alerts.list_alerts()
+
+
+@router.get("/api/pipeline/alerts/outbox")
+def alerts_outbox():
+    """S3 업로드 폴더 현황 — 이 폴더 하나만 sync 하면 flow 매칭알람이 갱신된다.
+    (트리가 S3 key 와 1:1 — sync_dir → s3://{bucket}/{s3_prefix})"""
+    return _alerts.outbox_status()
 
 
 @router.put("/api/pipeline/alerts/ack")

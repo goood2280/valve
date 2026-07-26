@@ -22,6 +22,10 @@ from typing import Callable, Optional
 
 import yaml
 
+# 기동 시 S3(valve-config) 에서 pull 하는 설정파일 — app.py 가 이 목록대로 sync 한다.
+# 탐색기에서 S3 로 올릴 수도 있어(seed) 방향은 양방향(↕)으로 표시된다. s3_link 가 참조.
+BOOT_PULL_FILES = ("settings.json", "products.yaml", "source_types.yaml")
+
 
 class ConfigSync:
     """S3 에서 Valve config 를 끌어오고 로컬 파일을 동기화.

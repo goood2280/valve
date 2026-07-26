@@ -111,7 +111,7 @@ class S3Uploader:
         full = self._full_key(key)
         if self._is_fake():
             path = Path(self.fake_local).resolve() / self.bucket / full
-            if not path.exists():
+            if not path.is_file():
                 return None
             try:
                 return path.read_text(encoding="utf-8")
@@ -124,6 +124,28 @@ class S3Uploader:
             return resp["Body"].read().decode("utf-8", errors="replace")
         except Exception:
             return None
+
+    def get_file(self, key: str, local_path) -> bool:
+        """S3 object → 로컬 파일 (바이너리 포함). 원자적 저장. 성공 True."""
+        full = self._full_key(key)
+        dst = Path(local_path)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dst.with_suffix(dst.suffix + ".part")
+        try:
+            if self._is_fake():
+                src = Path(self.fake_local).resolve() / self.bucket / full
+                if not src.is_file():
+                    return False
+                shutil.copy2(src, tmp)
+            elif self._s3_client is None:
+                return False
+            else:
+                self._s3_client.download_file(self.bucket, full, str(tmp))
+            tmp.replace(dst)
+            return True
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            return False
 
     def put_file(self, key: str, local_path) -> bool:
         """파일(parquet 등 바이너리 포함) 동기 업로드 — 탐색기 S3 전송용. 성공 True."""
@@ -150,7 +172,9 @@ class S3Uploader:
         full = self._full_key(key)
         if self._is_fake():
             path = Path(self.fake_local).resolve() / self.bucket / full
-            if not path.exists():
+            # is_file() 로 확인해야 한다 — fake 버킷에서 prefix 는 실제 디렉터리라
+            # exists() 만 보면 prefix 가 object 로 잡힌다 (sync 비교·단일키 판정이 깨짐)
+            if not path.is_file():
                 return None
             return {"size": path.stat().st_size}
         if self._s3_client is None:

@@ -57,7 +57,7 @@ def test_et_raw_recognizes_reformatter(pipe):
     ref = stats["reformatter"]["ET"]
     assert ref["found"] and ref["items"] == 5
 
-    raw = pl.read_parquet(next(pipe.raw_dir("VH_PRODA", "ET").glob("date=*/part-000.parquet")))
+    raw = pl.read_parquet(next(pipe.raw_dir("VH_PRODA", "ET").glob("date=*/data.parquet")))
     assert set(raw["item_id"].unique().to_list()) == {
         "ET_VTH_N", "ET_VTH_P", "ET_IDSAT_N", "ET_IDSAT_P", "ET_PCHK_CONT"}
     assert "et_value" in raw.columns
@@ -69,7 +69,7 @@ def test_et_reformatter_is_per_vehicle(pipe):
     """vehicle 별 reformatter 를 각각 인식 — PRODB 는 자기 파일의 REAL 항목만."""
     import polars as pl
     pipe.run_raw_query("VH_PRODB")
-    raw = pl.read_parquet(next(pipe.raw_dir("VH_PRODB", "ET").glob("date=*/part-000.parquet")))
+    raw = pl.read_parquet(next(pipe.raw_dir("VH_PRODB", "ET").glob("date=*/data.parquet")))
     assert set(raw["item_id"].unique().to_list()) == {"ET_VTH_N", "ET_IDSAT_N", "ET_PCHK_LKG"}
 
 
@@ -91,7 +91,7 @@ def test_et_reformatter_edit_reflected_next_run(pipe):
     fp.write_text("\n".join(lines[:3]) + "\n", encoding="utf-8")  # 헤더 + REAL 2건만
 
     pipe.run_raw_query("VH_PRODA")
-    raw = pl.read_parquet(next(pipe.raw_dir("VH_PRODA", "ET").glob("date=*/part-000.parquet")))
+    raw = pl.read_parquet(next(pipe.raw_dir("VH_PRODA", "ET").glob("date=*/data.parquet")))
     assert set(raw["item_id"].unique().to_list()) == {"ET_VTH_N", "ET_VTH_P"}
 
 
@@ -106,7 +106,7 @@ def test_source_columns_config_is_applied(pipe):
 
     stats = pipe.run_raw_query("VH_PRODA")
     assert stats["tables"]["FAB"] == "MY_FAB_TABLE"
-    raw = pl.read_parquet(next(pipe.raw_dir("VH_PRODA", "FAB").glob("date=*/part-000.parquet")))
+    raw = pl.read_parquet(next(pipe.raw_dir("VH_PRODA", "FAB").glob("date=*/data.parquet")))
     assert "ppid" not in raw.columns
     assert set(fab_cols) <= set(raw.columns)
 
@@ -214,7 +214,7 @@ def test_inline_matching_change_rebuilds_inline_event(pipe):
     pipe.run_raw_query("VH_PRODA")
     pipe.run_event("VH_PRODA")
     before = pl.concat([pl.read_parquet(f) for f in
-                        pipe.event_dir("VH_PRODA", "INLINE").glob("date=*/part-000.parquet")])
+                        pipe.event_dir("VH_PRODA", "INLINE").glob("date=*/data.parquet")])
     assert set(before["item_id"].unique()) == {"ITEM_CD_001", "ITEM_THK_002"}
 
     # inline matching 에 item 추가 → INLINE 만 stale → 전체 재생성 후 item 반영
@@ -226,7 +226,7 @@ def test_inline_matching_change_rebuilds_inline_event(pipe):
     r = pipe.run_event("VH_PRODA")
     assert r["INLINE"]["rebuilt"]
     after = pl.concat([pl.read_parquet(f) for f in
-                       pipe.event_dir("VH_PRODA", "INLINE").glob("date=*/part-000.parquet")])
+                       pipe.event_dir("VH_PRODA", "INLINE").glob("date=*/data.parquet")])
     assert "ITEM_OVL_003" in set(after["item_id"].unique())
 
 
@@ -345,7 +345,7 @@ def test_new_source_extends_via_config(pipe):
 
     pipe.run_raw_query("VH_PRODA")
     # 신규 소스가 raw 로 생성됨 (SOURCE/vehicle/date 구조)
-    et_raw = list(pipe.raw_dir("VH_PRODA", "ET").glob("date=*/part-000.parquet"))
+    et_raw = list(pipe.raw_dir("VH_PRODA", "ET").glob("date=*/data.parquet"))
     assert et_raw
     cols = pl.read_parquet(et_raw[0]).columns
     assert "test_item" in cols
@@ -609,3 +609,462 @@ def test_knob_skip_block_unresolved_step_guarded(pipe):
     # 블록 미적용 + auto 도 개입 안 함 (명시 블록이 있는 feature 는 사용자 정의 우선)
     assert not [s for s in r["knob_skip"] if s["feature"] == "KNOB_GATE_ETCH_ppid"]
     assert any("NO_SUCH_STEP" in s["reason"] for s in r["skipped"])
+
+
+def test_raw_hive_partition_matches_auto_report_format(pipe):
+    """raw 는 auto report daily DB 와 동일한 hive partitioning —
+    파티션 키 = 데이터의 시간 컬럼 날짜, 파일명 = data.parquet."""
+    import polars as pl
+    pipe.run_raw_query("VH_PRODA")
+    checked = 0
+    for source in pipe.sources_cfg():
+        tc = pipe._time_col(source)
+        assert tc, f"{source} 시간 컬럼 없음"
+        for pdir in pipe.raw_dir("VH_PRODA", source).glob("date=*"):
+            files = list(pdir.glob("*.parquet"))
+            assert [f.name for f in files] == ["data.parquet"], f"{pdir} 파일명 불일치"
+            df = pl.read_parquet(files[0])
+            dates = set(df[tc].cast(pl.Utf8).str.slice(0, 10).unique().to_list())
+            assert dates == {pdir.name[5:]}, f"{pdir} 파티션 날짜 ≠ 데이터 날짜 {dates}"
+            checked += 1
+    assert checked > 0
+
+
+def test_et_is_raw_only_no_event_db(pipe):
+    """repo 기본 설정: FAB/INLINE/VM 은 raw+event, ET 는 raw 전용(event: false).
+    과거에 만들어진 ET event DB 는 run_event 가 정리한다."""
+    pipe.run_raw_query("VH_PRODA")
+    # 과거 잔재 모사 — ET event 파티션이 이미 있던 상황
+    stale_et = pipe.event_dir("VH_PRODA", "ET") / "date=2026-01-01"
+    stale_et.mkdir(parents=True)
+    (stale_et / "data.parquet").write_bytes(b"")
+
+    r = pipe.run_event("VH_PRODA")
+    assert set(r) == {"FAB", "INLINE", "VM"}          # ET 는 event 대상 아님
+    assert not pipe.event_dir("VH_PRODA", "ET").exists()  # 잔재 정리됨
+    assert list(pipe.raw_dir("VH_PRODA", "ET").glob("date=*/data.parquet"))  # raw 는 존재
+    # status 도 event 는 3소스만, raw 는 ET 포함 4소스
+    st = pipe.status("VH_PRODA")
+    assert set(st["event"]) == {"FAB", "INLINE", "VM"}
+    assert set(st["raw"]) == {"FAB", "INLINE", "VM", "ET"}
+
+
+def test_legacy_part000_files_still_readable(pipe):
+    """구 파일명(part-000.parquet) 파티션도 로드 호환 —
+    같은 파티션을 다시 쓰면 data.parquet 로 교체되고 구 파일은 제거된다."""
+    import polars as pl
+    pipe.run_raw_query("VH_PRODA")
+    # 구 레이아웃 모사: 어떤 파티션 하나를 part-000 파일명으로 되돌림
+    pdir = next(pipe.raw_dir("VH_PRODA", "FAB").glob("date=*"))
+    (pdir / "data.parquet").rename(pdir / "part-000.parquet")
+
+    total = pipe._load_raw("VH_PRODA", "FAB")
+    assert total is not None and total.height > 0     # 구 파일명 포함 로드
+
+    ev = pipe.run_event("VH_PRODA")                   # 구 파일명 raw 도 event 처리
+    assert ev["FAB"]["event_rows"] > 0
+
+    pipe.run_raw_query("VH_PRODA")                    # 재추출 → data.parquet 로 교체
+    assert not (pdir / "part-000.parquet").exists()
+    assert (pdir / "data.parquet").exists()
+
+
+# ── 알람 업로드 폴더 (Valve → S3 → flow 매칭알람) ──
+def _outbox_store(pipe, fake_s3, **alerts):
+    cfg = {"alerts": {"s3_prefix": "valve-alerts", "outbox_dir": "s3_outbox", **alerts}}
+    return AlertStore(pipe, fake_s3, cfg, pipe.root)
+
+
+def test_outbox_mirrors_published_alerts_byte_for_byte(pipe, fake_s3):
+    """업로드 폴더의 트리/내용이 S3 발행본과 1:1 — 이 폴더만 sync 하면 flow 가 읽는다."""
+    pipe.run_all("VH_PRODA")
+    store = _outbox_store(pipe, fake_s3)
+    assert store.publish("VH_PRODA")
+
+    fp = pipe.root / "s3_outbox" / "valve-alerts" / "pipeline" / "VH_PRODA.json"
+    assert fp.exists()
+    # write_text 의 개행 변환(Windows \r\n)에 오염되지 않아야 S3 본과 같다
+    assert fp.read_bytes() == fake_s3.get_text(
+        "valve-alerts/pipeline/VH_PRODA.json").encode("utf-8")
+    assert store.outbox_sync_dir() == pipe.root / "s3_outbox" / "valve-alerts"
+
+    status = store.outbox_status()
+    assert status["enabled"] and status["s3_prefix"] == "valve-alerts"
+    assert [f["key"] for f in status["files"]] == ["valve-alerts/pipeline/VH_PRODA.json"]
+
+
+def test_outbox_written_even_when_direct_s3_disabled(pipe, fake_s3):
+    """직접 S3 접근이 없는 환경 — 폴더 미러가 유일한 전송로라 항상 써야 한다."""
+    pipe.run_all("VH_PRODA")
+    store = _outbox_store(pipe, fake_s3, s3_enabled=False)
+    assert store.publish("VH_PRODA") is False          # S3 직접 발행은 안 함
+    assert (pipe.root / "s3_outbox" / "valve-alerts" / "pipeline" / "VH_PRODA.json").exists()
+    assert fake_s3.get_text("valve-alerts/pipeline/VH_PRODA.json") is None
+
+
+def test_outbox_missing_file_forces_republish(pipe, fake_s3):
+    """지문이 같아도 폴더에 파일이 없으면 다시 발행 — 폴더를 지워도 다음 사이클에 복구."""
+    pipe.run_all("VH_PRODA")
+    store = _outbox_store(pipe, fake_s3)
+    store.publish("VH_PRODA")
+    assert store.publish_if_changed("VH_PRODA")["skipped"] is True
+
+    fp = pipe.root / "s3_outbox" / "valve-alerts" / "pipeline" / "VH_PRODA.json"
+    fp.unlink()
+    assert store.publish_if_changed("VH_PRODA")["skipped"] is False
+    assert fp.exists()
+
+
+def test_outbox_disabled_by_empty_dir(pipe, fake_s3):
+    pipe.run_all("VH_PRODA")
+    store = _outbox_store(pipe, fake_s3, outbox_dir="")
+    assert store.publish("VH_PRODA")
+    assert store.outbox_root() is None
+    assert store.outbox_status()["enabled"] is False
+    assert not (pipe.root / "s3_outbox").exists()
+
+
+# ── ecuall 유효 장비값 + sleuth_order 채움 ──
+def _fab_event(pipe, rows):
+    """FAB event DB 를 직접 만들어 feature 규칙만 검증 (raw/매칭 경로 우회)."""
+    import polars as pl
+    edir = pipe.event_dir("VH_PRODA", "FAB") / "date=2026-07-01"
+    edir.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(rows).write_parquet(edir / "data.parquet")
+
+
+def _run_fab_only(pipe, fab_csv: str):
+    (pipe.root / "config" / "feature_rules" / "fab.csv").write_text(fab_csv, encoding="utf-8")
+    for name in ("inline", "vm", "mask"):
+        (pipe.root / "config" / "feature_rules" / f"{name}.csv").unlink(missing_ok=True)
+    return pipe.run_feature("VH_PRODA")
+
+
+def test_valid_or_last_prefers_numeric_last_segment(pipe):
+    """마지막 '_' 뒤에 숫자가 있는 값을 쓰고, 그런 값이 없으면 tkout_time last."""
+    import polars as pl
+    base = {"step_desc": "GATE_ETCH", "step_id": "CC942300", "ppid": "P", "split": "s",
+            "part_id": "X", "reticle_id": "-", "eqp_model": "M", "sleuth_order": "1"}
+    _fab_event(pipe, [
+        # W1 — 무효(EQP_01_CH_A) 가 마지막이지만 유효값(EQP_01_CH_2)이 있으니 그걸 쓴다
+        {**base, "root_lot_id": "R1", "wafer_id": "1", "tkout_time": "2026-07-01 01:00:00",
+         "eqp_id": "EQP_01", "chamber_id": "CH", "unit_id": "2"},
+        {**base, "root_lot_id": "R1", "wafer_id": "1", "tkout_time": "2026-07-01 02:00:00",
+         "eqp_id": "EQP_01", "chamber_id": "CH", "unit_id": "A"},
+        # W2 — 유효값이 둘이면 늦은 쪽(_9)
+        {**base, "root_lot_id": "R1", "wafer_id": "2", "tkout_time": "2026-07-01 01:00:00",
+         "eqp_id": "EQP_02", "chamber_id": "CH", "unit_id": "3"},
+        {**base, "root_lot_id": "R1", "wafer_id": "2", "tkout_time": "2026-07-01 03:00:00",
+         "eqp_id": "EQP_02", "chamber_id": "CH", "unit_id": "9"},
+        # W3 — 유효값이 하나도 없음 → tkout_time last 로 대체 (행이 사라지지 않는다)
+        {**base, "root_lot_id": "R1", "wafer_id": "3", "tkout_time": "2026-07-01 01:00:00",
+         "eqp_id": "AUX", "chamber_id": "-", "unit_id": "-"},
+        {**base, "root_lot_id": "R1", "wafer_id": "3", "tkout_time": "2026-07-01 02:00:00",
+         "eqp_id": "AUX", "chamber_id": "CH", "unit_id": "B"},
+    ])
+    _run_fab_only(pipe, "step_desc,feature_name,agg\nGATE_ETCH,ecuall,valid_or_last\n")
+
+    got = pl.read_parquet(pipe.feature_dir("VH_PRODA") / "FAB_GATE_ETCH_ecuall.parquet")
+    val = dict(zip(got["wafer_id"], got["FAB_GATE_ETCH_ecuall"]))
+    assert val["1"] == "EQP_01_CH_2"     # 무효가 더 늦어도 유효값 우선
+    assert val["2"] == "EQP_02_CH_9"     # 유효값 중에서는 늦은 쪽
+    assert val["3"] == "AUX_CH_B"        # 유효값 없음 → last 로 대체
+    assert set(val) == {"1", "2", "3"}   # valid_eqp 와 달리 wafer 가 빠지지 않는다
+
+
+def test_valid_eqp_leaves_null_when_no_valid_value(pipe):
+    """대조군 — valid_eqp 는 유효값이 없으면 값을 못 채운다 (valid_or_last 와의 차이).
+
+    번들 config/feature_funcs.py 가 같은 이름의 agg_valid_eqp 를 정의하고 있어
+    커스텀이 내장보다 우선한다 — 커스텀은 그룹 안 filter 라 wafer 는 남고 값만 null,
+    내장은 group_by 전 filter 라 wafer 행 자체가 사라진다.
+    """
+    import polars as pl
+    base = {"step_desc": "GATE_ETCH", "step_id": "CC942300", "ppid": "P", "split": "s",
+            "part_id": "X", "reticle_id": "-", "eqp_model": "M", "sleuth_order": "1",
+            "root_lot_id": "R1", "tkout_time": "2026-07-01 01:00:00"}
+    _fab_event(pipe, [
+        {**base, "wafer_id": "1", "eqp_id": "EQP_01", "chamber_id": "-", "unit_id": "-"},
+        {**base, "wafer_id": "9", "eqp_id": "AUX", "chamber_id": "-", "unit_id": "-"},
+    ])
+    # ecuall 은 고정 규칙이 걸리므로, 대조는 강제 대상이 아닌 eqp_id 로 한다
+    _run_fab_only(pipe, "step_desc,feature_name,agg\nGATE_ETCH,eqp_id,valid_eqp\n")
+    got = pl.read_parquet(pipe.feature_dir("VH_PRODA") / "FAB_GATE_ETCH_eqp_id.parquet")
+    val = dict(zip(got["wafer_id"], got["FAB_GATE_ETCH_eqp_id"]))
+    assert val["1"] == "EQP_01"
+    assert val["9"] is None      # valid_or_last 였다면 "AUX" 가 채워진다
+
+
+def test_sleuth_order_fills_blanks_by_wafer_id_within_step_lot(pipe):
+    """빈 sleuth_order → (step_id, root_lot_id) 안에서 wafer_id 오름차순 순번."""
+    import polars as pl
+    base = {"step_desc": "GATE_ETCH", "ppid": "P", "split": "s", "part_id": "X",
+            "reticle_id": "-", "eqp_id": "E", "eqp_model": "M",
+            "chamber_id": "-", "unit_id": "-", "tkout_time": "2026-07-01 01:00:00"}
+    _fab_event(pipe, [
+        # R1 — 전부 빈값. "10" 이 "2" 보다 뒤여야 한다 (문자열 정렬이면 반대로 나온다)
+        {**base, "step_id": "CC942300", "root_lot_id": "R1", "wafer_id": "2",
+         "sleuth_order": None},
+        {**base, "step_id": "CC942300", "root_lot_id": "R1", "wafer_id": "10",
+         "sleuth_order": ""},
+        {**base, "step_id": "CC942300", "root_lot_id": "R1", "wafer_id": "1",
+         "sleuth_order": "-"},
+        # R2 — 값이 있는 행은 그대로 둔다
+        {**base, "step_id": "CC942300", "root_lot_id": "R2", "wafer_id": "3",
+         "sleuth_order": "77"},
+        {**base, "step_id": "CC942300", "root_lot_id": "R2", "wafer_id": "1",
+         "sleuth_order": None},
+    ])
+    _run_fab_only(pipe, "step_desc,feature_name,agg\nGATE_ETCH,sleuth_order,last\n")
+
+    got = pl.read_parquet(pipe.feature_dir("VH_PRODA") / "FAB_GATE_ETCH_sleuth_order.parquet")
+    val = {(r["root_lot_id"], r["wafer_id"]): r["FAB_GATE_ETCH_sleuth_order"]
+           for r in got.iter_rows(named=True)}
+    assert val[("R1", "1")] == "1"
+    assert val[("R1", "2")] == "2"
+    assert val[("R1", "10")] == "3"     # 숫자 기준 정렬 — 문자열이면 "10" 이 2번이 된다
+    assert val[("R2", "3")] == "77"     # 기존 값 보존
+    assert val[("R2", "1")] == "1"      # lot 별로 다시 1번부터
+
+
+def test_sleuth_order_numbers_per_step_id_not_globally(pipe):
+    """순번은 step_id 별로 독립 — 같은 lot 이라도 step 이 다르면 1번부터."""
+    import polars as pl
+    base = {"step_desc": "GATE_ETCH", "ppid": "P", "split": "s", "part_id": "X",
+            "reticle_id": "-", "eqp_id": "E", "eqp_model": "M", "chamber_id": "-",
+            "unit_id": "-", "root_lot_id": "R1", "sleuth_order": None}
+    _fab_event(pipe, [
+        {**base, "step_id": "CC942300", "wafer_id": "5", "tkout_time": "2026-07-01 01:00:00"},
+        {**base, "step_id": "CC942300", "wafer_id": "7", "tkout_time": "2026-07-01 01:00:00"},
+        {**base, "step_id": "CC942301", "wafer_id": "7", "tkout_time": "2026-07-01 05:00:00"},
+    ])
+    _run_fab_only(pipe, "step_desc,feature_name,agg\nGATE_ETCH,sleuth_order,last\n")
+    got = pl.read_parquet(pipe.feature_dir("VH_PRODA") / "FAB_GATE_ETCH_sleuth_order.parquet")
+    val = dict(zip(got["wafer_id"], got["FAB_GATE_ETCH_sleuth_order"]))
+    assert val["5"] == "1"
+    assert val["7"] == "1"   # CC942301 에서 1번 (agg last · tkout_time 이 더 늦음)
+
+
+# ── 실행 락 공유 — 잘린/구멍난 event DB 방지 ──
+def test_manual_run_blocked_while_pipeline_busy(pipe):
+    """수동 단건 실행이 스케줄러와 락을 공유 — 겹치면 PipelineBusy."""
+    import pytest as _pytest
+    from backend.core.pipeline_runner import PipelineBusy
+    runner = PipelineRunner(pipe)
+    assert runner._run_lock.acquire(blocking=False)   # 스케줄러가 잡고 있는 상황
+    try:
+        with _pytest.raises(PipelineBusy):
+            runner.run_vehicle_once("VH_PRODA")
+        with _pytest.raises(PipelineBusy):
+            runner.run_wide_once("VH_PRODA")
+        with _pytest.raises(PipelineBusy):
+            runner.run_send_form_once()
+    finally:
+        runner._run_lock.release()
+    # 락이 풀리면 정상 실행
+    assert runner.run_vehicle_once("VH_PRODA")["vehicle"] == "VH_PRODA"
+
+
+def test_rebuild_waits_instead_of_skipping(pipe):
+    """매칭 갱신 재생성은 skip 하지 않고 기다린다 — 건너뛰면 옛 매칭 산출물이 남는다."""
+    import threading
+    import time as _time
+    runner = PipelineRunner(pipe)
+    published: list[str] = []
+    runner.on_vehicle_done = lambda v, _r: published.append(v)
+    pipe.run_all("VH_PRODA")
+
+    runner._run_lock.acquire()                  # 스케줄러가 실행 중인 상황
+
+    def release_after():
+        _time.sleep(0.5)
+        runner._run_lock.release()
+
+    t = threading.Thread(target=release_after, daemon=True)
+    t.start()
+    t0 = _time.time()
+    result = runner.rebuild_after_config_change(timeout=30)
+    elapsed = _time.time() - t0
+    t.join(5)
+
+    assert elapsed >= 0.4                       # 포기하지 않고 기다렸다
+    assert result["waited_sec"] >= 0.4
+    assert "VH_PRODA" in result["vehicles"]     # 락이 풀린 뒤 재생성 수행
+    assert "VH_PRODA" in published              # 알람 재발행 훅도 그대로 탄다
+    assert runner.last_rebuild == result        # 결과가 남아야 조용한 실패가 안 된다
+
+
+def test_rebuild_reports_errors_instead_of_swallowing(pipe):
+    """raw 미실행 vehicle 등의 실패를 삼키지 않고 errors 로 돌려준다."""
+    runner = PipelineRunner(pipe)               # event DB 없음 → run_feature 가 RuntimeError
+    result = runner.rebuild_after_config_change(timeout=5)
+    assert result["ok"] is False
+    assert set(result["errors"]) >= set(pipe.vehicles())
+    assert runner.snapshot()["last_rebuild"]["ok"] is False
+
+
+def test_rebuild_times_out_rather_than_racing(pipe):
+    """락을 못 잡으면 그냥 포기하고 사유를 남긴다 (동시 쓰기로 진입하지 않는다)."""
+    runner = PipelineRunner(pipe)
+    assert runner._run_lock.acquire(blocking=False)
+    try:
+        result = runner.rebuild_after_config_change(timeout=0.2)
+    finally:
+        runner._run_lock.release()
+    assert result["ok"] is False and "시간 초과" in result["error"]
+
+
+# ── 제품별 주기 + 실행 로그 ──
+def _set_rpd(pipe, **rpd):
+    cfg = pipe.vehicles()
+    for v, n in rpd.items():
+        if n is None:
+            cfg[v].pop("runs_per_day", None)
+        else:
+            cfg[v]["runs_per_day"] = n
+    pipe.save_vehicles(cfg)
+
+
+def test_runs_per_day_is_per_vehicle(pipe):
+    """제품마다 주기를 다르게 — 일 6회는 4시간, 일 3회는 8시간 간격."""
+    runner = PipelineRunner(pipe)
+    _set_rpd(pipe, VH_PRODA=6, VH_PRODB=3)
+    plan = runner.schedule_plan()
+    assert plan["VH_PRODA"]["interval_hours"] == 4.0
+    assert plan["VH_PRODB"]["interval_hours"] == 8.0
+    assert {p["source"] for p in plan.values()} == {"vehicle"}
+
+
+def test_runs_per_day_falls_back_to_global_interval(pipe):
+    """값이 없는 제품은 전역 interval_hours 를 따른다 (기존 동작 유지)."""
+    runner = PipelineRunner(pipe)
+    _set_rpd(pipe, VH_PRODA=None, VH_PRODB=None)
+    cfg = pipe.global_cfg()
+    cfg["runtime"]["interval_hours"] = 8      # 하루 3회
+    pipe.save_global_cfg(cfg)
+    plan = runner.schedule_plan()
+    assert plan["VH_PRODA"]["runs_per_day"] == 3
+    assert plan["VH_PRODA"]["source"] == "global"
+    assert plan["VH_PRODA"]["interval_hours"] == 8.0
+
+
+def test_runs_per_day_zero_excludes_from_schedule(pipe):
+    """0 = 자동 실행 대상에서 제외 (수동 실행은 여전히 가능)."""
+    runner = PipelineRunner(pipe)
+    _set_rpd(pipe, VH_PRODA=6, VH_PRODB=0)
+    plan = runner.schedule_plan()
+    assert plan["VH_PRODB"]["interval_sec"] == 0 and plan["VH_PRODB"]["enabled"] is False
+    assert runner.due_vehicles() == ["VH_PRODA"]
+
+
+def test_due_only_returns_vehicles_past_their_interval(pipe):
+    """제품별로 독립 판정 — 자주 도는 제품만 다시 due 가 된다."""
+    import time as _time
+    runner = PipelineRunner(pipe)
+    _set_rpd(pipe, VH_PRODA=24, VH_PRODB=1)      # 1시간 간격 vs 24시간 간격
+    now = _time.time()
+    runner.runs.append({"ts": now - 2 * 3600, "vehicle": "VH_PRODA", "mode": "schedule", "ok": True})
+    runner.runs.append({"ts": now - 2 * 3600, "vehicle": "VH_PRODB", "mode": "schedule", "ok": True})
+    assert runner.due_vehicles(now) == ["VH_PRODA"]      # PRODB 는 아직 22시간 남음
+    plan = runner.schedule_plan(now)
+    assert plan["VH_PRODB"]["next_ts"] == plan["VH_PRODB"]["last_ts"] + 24 * 3600
+
+
+def test_last_run_survives_restart(pipe):
+    """마지막 실행 시각은 로그에서 복원 — 재기동마다 전량 재실행되면 안 된다."""
+    import time as _time
+    now = _time.time()
+    r1 = PipelineRunner(pipe)
+    _set_rpd(pipe, VH_PRODA=24, VH_PRODB=24)      # 1시간 간격
+    r1.runs.append({"ts": now - 60, "vehicle": "VH_PRODA", "mode": "schedule", "ok": True})
+    r1.runs.append({"ts": now - 60, "vehicle": "VH_PRODB", "mode": "schedule", "ok": True})
+
+    r2 = PipelineRunner(pipe)                     # 재기동 상당 — 메모리 상태 없음
+    assert r2.due_vehicles(now) == []
+    assert r2.due_vehicles(now + 3600) == ["VH_PRODA", "VH_PRODB"]
+
+
+def test_run_all_accepts_vehicle_subset(pipe):
+    """스케줄러는 due 인 제품만 돌린다 — 나머지는 건드리지 않는다."""
+    runner = PipelineRunner(pipe)
+    r = runner.run_all(mode="schedule", vehicles=["VH_PRODA"])
+    assert set(r["vehicles"]) == {"VH_PRODA"}
+    assert [x["vehicle"] for x in runner.runs.tail()] == ["VH_PRODA"]
+    assert runner.run_all(mode="schedule", vehicles=["없는제품"])["skipped"] == "대상 제품 없음"
+
+
+def test_run_log_records_every_stage(pipe):
+    """raw/event/feature/wide 단계별 소요·산출이 로그에 남는다 (화면 로그의 원본)."""
+    runner = PipelineRunner(pipe)
+    runner.run_all(mode="schedule", vehicles=["VH_PRODA"])
+    rec = runner.runs.tail(limit=1)[0]
+
+    assert rec["vehicle"] == "VH_PRODA" and rec["ok"] and rec["mode"] == "schedule"
+    assert set(rec["stages"]) == {"raw", "event", "feature", "wide"}
+    assert rec["stages"]["raw"]["units"] > 0
+    assert rec["stages"]["raw"]["rows"]["FAB"] > 0
+    assert rec["stages"]["event"]["sources"]["FAB"]["event_rows"] > 0
+    assert rec["stages"]["feature"]["counts"]["fab"] > 0
+    assert rec["stages"]["feature"]["event_dates"] > 0
+    assert rec["stages"]["wide"]["rows"] > 0
+    assert all("sec" in rec["stages"][s] for s in ("raw", "event", "feature", "wide"))
+
+
+def test_run_log_records_failure_with_reason(pipe):
+    """실패도 남는다 — 어느 단계까지 갔고 왜 멈췄는지."""
+    import pytest as _pytest
+    runner = PipelineRunner(pipe)
+    (pipe.root / "config" / "step_matching" / "vehicle_matching.csv").unlink()
+    with _pytest.raises(Exception):
+        runner.run_vehicle("VH_PRODA", mode="manual")
+    rec = runner.runs.tail(limit=1)[0]
+    assert rec["ok"] is False and rec["error"]
+    assert "raw" in rec["stages"]        # raw 까지는 돌았다는 게 남아야 진단이 된다
+
+
+def test_manual_run_is_logged_too(pipe):
+    """수동 실행도 같은 경로 → 같은 로그. 화면에서 트리거를 구분해 볼 수 있다."""
+    runner = PipelineRunner(pipe)
+    runner.run_vehicle_once("VH_PRODA")
+    rec = runner.runs.tail(limit=1)[0]
+    assert rec["mode"] == "manual" and rec["vehicle"] == "VH_PRODA"
+    assert runner.runs.vehicle_summary()["VH_PRODA"]["runs"] == 1
+
+
+def test_run_log_tail_filters_and_summary(pipe):
+    runner = PipelineRunner(pipe)
+    for i, (v, ok) in enumerate([("VH_PRODA", True), ("VH_PRODB", False), ("VH_PRODA", True)]):
+        runner.runs.append({"ts": 1000 + i, "vehicle": v, "mode": "schedule",
+                            "ok": ok, "elapsed_sec": 1.0})
+    assert [r["vehicle"] for r in runner.runs.tail()] == ["VH_PRODA", "VH_PRODB", "VH_PRODA"]
+    assert len(runner.runs.tail(vehicle="VH_PRODA")) == 2
+    assert len(runner.runs.tail(failed_only=True)) == 1
+    s = runner.runs.vehicle_summary()
+    assert s["VH_PRODA"]["ok"] == 2 and s["VH_PRODB"]["failed"] == 1
+
+
+def test_run_log_trims_when_oversized(tmp_path):
+    """로그가 커지면 최신 절반만 남긴다 — 무한히 자라지 않는다."""
+    from backend.core.run_log import RunLog
+    log = RunLog(tmp_path / "runs.jsonl", max_bytes=2048)
+    for i in range(400):
+        log.append({"ts": i, "vehicle": "V", "mode": "schedule", "ok": True, "pad": "x" * 60})
+    assert log.path.stat().st_size <= 2048 * 2
+    recs = log.tail(limit=10_000)
+    assert recs and recs[0]["ts"] == 399          # 최신은 반드시 남는다
+
+
+def test_yaml_save_preserves_header_comments(pipe):
+    """웹에서 주기를 바꿔도 설정 파일의 설명 주석이 남아야 한다."""
+    fp = pipe.root / "config" / "vehicles.yaml"
+    fp.write_text("# 설명 1\n# 설명 2\n\nVH_X:\n  vehicle: VH_X\n  product: X\n", encoding="utf-8")
+    cfg = pipe.vehicles()
+    cfg["VH_X"]["runs_per_day"] = 6
+    pipe.save_vehicles(cfg)
+
+    text = fp.read_text(encoding="utf-8")
+    assert text.startswith("# 설명 1\n# 설명 2\n")
+    assert pipe.vehicles()["VH_X"]["runs_per_day"] == 6
+
+    pipe.save_vehicles(pipe.vehicles())          # 반복 저장에도 주석이 늘거나 사라지지 않는다
+    assert fp.read_text(encoding="utf-8").count("# 설명 1") == 1

@@ -18,13 +18,16 @@ _annotate = None       # s3 연동 신호등 어노테이터 (app.py 가 주입)
 _s3 = None             # S3Uploader — s3 전송(put)
 _csv_sync = None       # CsvSync — dest↔key 매핑으로 flow round-trip key 계산
 _config_prefix = "valve-config"
+_outbox_prefix = "valve-alerts"
 
 
 def deps(staging_root: Path, s3_local_root: Path | None, extra_roots: dict[str, Path] | None = None,
-         annotator=None, s3=None, csv_sync=None, config_prefix: str = "valve-config"):
-    """extra_roots — 항상 노출할 추가 루트 (config: 설정파일, db: 파이프라인 산출물).
-    annotator — 파일별 다운로드/업로드 신호등. s3/csv_sync — 파일별 S3 전송(업로드)용."""
-    global _roots, _annotate, _s3, _csv_sync, _config_prefix
+         annotator=None, s3=None, csv_sync=None, config_prefix: str = "valve-config",
+         outbox_prefix: str = "valve-alerts"):
+    """extra_roots — 항상 노출할 추가 루트 (config: 설정파일, db: 파이프라인 산출물,
+    outbox: 알람 업로드 폴더). annotator — 파일별 다운로드/업로드 신호등.
+    s3/csv_sync — 파일별 S3 전송(업로드)용."""
+    global _roots, _annotate, _s3, _csv_sync, _config_prefix, _outbox_prefix
     _roots = {"staging": Path(staging_root)}
     if s3_local_root:
         _roots["s3_local"] = Path(s3_local_root)
@@ -34,6 +37,7 @@ def deps(staging_root: Path, s3_local_root: Path | None, extra_roots: dict[str, 
     _s3 = s3
     _csv_sync = csv_sync
     _config_prefix = (config_prefix or "valve-config").strip("/")
+    _outbox_prefix = (outbox_prefix or "valve-alerts").strip("/")
 
 
 # ── S3 전송 규칙 (config/s3_transfer.yaml) ──
@@ -53,6 +57,8 @@ def _default_rules() -> dict:
         "config": {"mode": "cp", "targets": [{"dest": "default", "prefix": _config_prefix}]},
         "db": {"mode": "sync", "targets": [{"dest": "default", "prefix": "valve-export/db"}]},
         "staging": {"mode": "sync", "targets": [{"dest": "default", "prefix": "valve-export/staging"}]},
+        # 알람 업로드 폴더 — 루트가 곧 {alerts.s3_prefix} 이라 rel 이 그대로 key 뒤쪽이 된다.
+        "outbox": {"mode": "sync", "targets": [{"dest": "default", "prefix": _outbox_prefix}]},
     }
 
 
@@ -225,7 +231,7 @@ def resolve(root: str, rel: str) -> Path:
 def list_roots():
     return {"roots": [{"name": n, "path": str(p), **s3_link.root_role(n)}
                       for n, p in _roots.items()
-                      if n in ("staging", "config") or p.exists()]}
+                      if n in ("staging", "config", "outbox") or p.exists()]}
 
 
 @router.get("/list")

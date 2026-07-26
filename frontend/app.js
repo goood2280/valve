@@ -335,20 +335,25 @@ async function loadDbHeatmap() {
             el('span', { class: 'prod-head-count' },
               `matching ${fmtTs(st.event.FAB?.applied_ts)} · ${st.matching.steps} step · feature ${featTotal}`)))));
       Object.keys(st.raw).forEach((src) => {
+        const rawOnly = !(src in (st.event || {}));   // ET 등 raw 전용 소스 — event 없음
         const ev = st.event[src] || {};
         const evDates = new Set(ev.dates || []);
         const featN = (FEATURE_CATS[src] || []).reduce((a, c) => a + (st.features?.[c] || 0), 0);
         const tr = el('tr', { class: 'src-row' },
           el('td', { class: 'row-label src-label',
-            title: `매칭 파일: ${ev.matching_file || '-'}\n적용: ${fmtTs(ev.applied_ts)} · sha ${ev.matching_sha || '-'}` },
+            title: rawOnly ? 'raw 전용 소스 — event DB 를 만들지 않음'
+              : `매칭 파일: ${ev.matching_file || '-'}\n적용: ${fmtTs(ev.applied_ts)} · sha ${ev.matching_sha || '-'}` },
             el('span', { class: 'src-bullet' }, '●'), src,
+            rawOnly ? el('span', { class: 'hint' }, 'raw 전용') : null,
             featN ? el('span', { class: 'feat-badge', title: 'feature store 산출물 수' }, `feat ${featN}`) : null,
             ev.stale ? el('span', { class: 'hint stale-tag' }, '재처리 필요') : null));
         buckets.forEach((b) => {
           // 이 버킷 [start,end] 안에 든 raw 날짜들의 단계 집계 (긴급도: 재처리>대기>완료)
           const inBucket = (st.raw[src] || []).filter((d) => d >= b.start && d <= b.end);
           let cls = 's-off', label = 'raw 없음';
-          if (inBucket.length) {
+          if (inBucket.length && rawOnly) {
+            cls = 's-success'; label = `raw 완료 ${inBucket.length}일 (raw 전용)`;
+          } else if (inBucket.length) {
             let nRaw = 0, nStale = 0, nDone = 0;
             inBucket.forEach((d) => { if (!evDates.has(d)) nRaw++; else if (ev.stale) nStale++; else nDone++; });
             if (nStale) { cls = 's-partial'; label = `event 재처리 필요 ${nStale}일`; }
@@ -454,7 +459,8 @@ async function onRunAll() {
 // ── 실시간 진행상황 폴링 (raw/event/feature 단계 표시) ──
 let DBHM_PROG_TIMER = null;
 let DBHM_LAST_RUNNING = false;
-const PROG_STAGE = { queued: '대기', raw: 'raw 쿼리', event: 'event DB화', feature: 'feature(전체 event)', done: '완료', error: '오류' };
+const PROG_STAGE = { queued: '대기', raw: 'raw 쿼리', event: 'event DB화', feature: 'feature(전체 event)',
+  wide: 'wide 병합', manual: '수동 실행', rebuild: '매칭 갱신 재생성', done: '완료', error: '오류' };
 
 function stopProgPoll() { if (DBHM_PROG_TIMER) { clearInterval(DBHM_PROG_TIMER); DBHM_PROG_TIMER = null; } }
 
@@ -1454,6 +1460,7 @@ async function renderSettings() {
       ['alerts.s3_enabled', 'bool', null, 'S3 에 알람 JSON 업로드 사용 여부'],
       ['alerts.s3_prefix', 'text', null, '알람 JSON 을 S3 에 누적할 prefix. 기본 valve-alerts'],
       ['alerts.s3_interval_min', 'number', null, '알람 S3 주기 발행 간격(분). 변경 있을 때만 업로드. 0 이면 파이프라인 실행 시에만 발행'],
+      ['alerts.outbox_dir', 'text', null, '알람 업로드 폴더 (ROOT 기준). 이 폴더의 {s3_prefix} 하위만 S3 로 sync 하면 flow 매칭알람이 갱신된다. 비우면 미러링 안 함'],
       ['alerts.flow_enabled', 'bool', null, 'flow 앱에 알림 푸시 사용 여부'],
       ['alerts.flow_notify_url', 'text', null, 'flow 알림 엔드포인트 (예: http://flow/api/valve/alert)'],
       ['alerts.webhook_enabled', 'bool', null, '일반 webhook POST 사용 여부'],
@@ -1678,8 +1685,15 @@ async function renderBrowser() {
   main.innerHTML = '';
   main.append(
     el('div', {},
-      el('div', { class: 'section-title' }, '파일 탐색기'),
-      el('div', { class: 'section-desc' }, 'staging · s3_local · config(설정파일 csv/yaml/json) · db(파이프라인 산출물) 탐색. parquet/csv 는 SQL 필터, yaml/json 은 텍스트로 열람.'),
+      el('div', { class: 'row', style: { alignItems: 'flex-start', gap: '10px' } },
+        el('div', {},
+          el('div', { class: 'section-title' }, '파일 탐색기'),
+          el('div', { class: 'section-desc' }, 'staging · s3_local · config(설정파일 csv/yaml/json) · db(파이프라인 산출물) 탐색. parquet/csv 는 SQL 필터, yaml/json 은 텍스트로 열람.'),
+        ),
+        el('div', { class: 'spacer' }),
+        el('button', { class: 'btn gear-btn', title: 'S3 업/다운로드 설정 — 항목별 key 지정 · 수동 실행/중지 · 주기',
+          onclick: openS3Modal }, '⚙'),
+      ),
     ),
     renderSqlGuide(),
     el('div', { class: 'split' },
@@ -1688,6 +1702,7 @@ async function renderBrowser() {
         el('div', { id: 'brS3Rules' }),
         el('div', { id: 'brConfigFiles' }),
         el('div', { id: 'brTree' }, 'loading...'),
+        el('div', { id: 'brLegend' }),
       ),
       el('div', { class: 'pane', style: { display: 'flex', flexDirection: 'column' } },
         el('div', { class: 'sql-bar' },
@@ -1751,14 +1766,244 @@ function renderSqlGuide() {
   );
 }
 
-// S3 연동 신호등 — 색점(state) + 화살표(dir: ↓다운로드/↑업로드)
+// S3 연동 신호등 — 방향 배지(dir) + 상태 색점(state).
+// 방향은 색·모양으로 확실히 갈라 놓는다: ↓받기(파랑) · ↑올리기(초록) · ↕양방향(보라) · 로컬(무표시)
+const S3_DIR = {
+  down: { arrow: '↓', label: 'S3 → Valve 다운로드' },
+  up: { arrow: '↑', label: 'Valve → S3 업로드' },
+  both: { arrow: '↕', label: 'S3 ↔ Valve 양방향' },
+};
+
 function syncBadge(sync) {
   if (!sync) return null;
-  const arrow = sync.dir === 'down' ? '↓' : sync.dir === 'up' ? '↑' : '';
-  const dirTxt = sync.dir === 'down' ? 'S3 다운로드' : sync.dir === 'up' ? 'S3 업로드' : 'S3';
-  return el('span', { class: `s3sig s3-${sync.state}`, title: `${dirTxt} · ${sync.state}\n${sync.detail || ''}` },
+  const d = S3_DIR[sync.dir];
+  const dirTxt = d ? d.label : (sync.state === 'local' ? '로컬 전용 (S3 연동 없음)' : 'S3');
+  return el('span', {
+    class: `s3sig s3-${sync.state} s3dir-${sync.dir || 'none'}`,
+    title: `${dirTxt}\n${sync.detail || ''}`,
+  },
     el('span', { class: 'dot' }),
-    arrow ? el('span', { class: 'arw' }, arrow) : null,
+    d ? el('span', { class: 'arw' }, d.arrow) : null,
+  );
+}
+
+// ─────────────────────────────────────
+// S3 업/다운로드 항목 모달 (탐색기 ⚙)
+//   항목 = 로컬 경로 ↔ S3 key 한 쌍. 방향/명령/주기를 각각 준다.
+//   수동 ▶ 실행 · ■ 중지 (파일 경계에서 취소) · 5초 폴링으로 진행률
+// ─────────────────────────────────────
+const S3M = { open: false, tab: 'items', form: null, hist: [], timer: null, keyBrowse: null };
+
+function openS3Modal() {
+  S3M.open = true; S3M.tab = 'items'; S3M.form = null;
+  renderS3Modal();
+  if (S3M.timer) clearInterval(S3M.timer);
+  // 항목/이력 탭만 자동 갱신 — 추가/수정 폼을 다시 그리면 입력 중인 값이 날아간다
+  S3M.timer = setInterval(() => {
+    if (!S3M.open) return closeS3Modal();
+    if (S3M.tab !== 'add') renderS3Modal(true);
+  }, 5000);
+}
+
+function closeS3Modal() {
+  S3M.open = false;
+  if (S3M.timer) { clearInterval(S3M.timer); S3M.timer = null; }
+  document.getElementById('s3modal')?.remove();
+  loadBrowserRoots();
+}
+
+async function renderS3Modal(quiet) {
+  let data, dests;
+  try {
+    [data, dests] = await Promise.all([
+      api.get('/api/s3/items'),
+      api.get('/api/s3/destinations').catch(() => ({ destinations: { default: {} } })),
+    ]);
+  } catch (e) { if (!quiet) alert(e.message); return; }
+  if (S3M.tab === 'history') {
+    try { S3M.hist = (await api.get('/api/s3/history?limit=100')).history; } catch { S3M.hist = []; }
+  }
+
+  document.getElementById('s3modal')?.remove();
+  const tabBtn = (id, label) => el('button', {
+    class: 'seg' + (S3M.tab === id ? ' on' : ''),
+    onclick: () => { S3M.tab = id; renderS3Modal(); },
+  }, label);
+
+  const body = S3M.tab === 'add' ? s3FormView(data, dests)
+    : S3M.tab === 'history' ? s3HistoryView()
+      : s3ItemsView(data);
+
+  const modal = el('div', { id: 's3modal', class: 's3-modal-back',
+    onclick: (e) => { if (e.target.id === 's3modal') closeS3Modal(); } },
+    el('div', { class: 's3-modal' },
+      el('div', { class: 'row', style: { gap: '8px', alignItems: 'center', marginBottom: '10px' } },
+        el('span', { style: { fontWeight: 800 } }, '⚙ S3 업/다운로드'),
+        tabBtn('items', `항목 ${data.items.length}`), tabBtn('add', '+ 추가'), tabBtn('history', '이력'),
+        el('div', { class: 'spacer' }),
+        el('button', { class: 'btn', onclick: closeS3Modal }, '닫기'),
+      ),
+      body,
+    ));
+  document.body.append(modal);
+}
+
+async function s3Post(path, body) {
+  try { return await api.post(path, body); } catch (e) { alert(e.message); return null; }
+}
+
+function s3ItemsView(data) {
+  const pill = (on, label, patch) => el('button', {
+    class: 'seg' + (on ? ' on' : ''),
+    title: '자동(주기) 실행 마스터 스위치 — 끄면 수동 실행만 된다',
+    onclick: async () => { await s3Post('/api/s3/auto-sync', patch); renderS3Modal(); },
+  }, `${label} ${on ? 'ON' : 'OFF'}`);
+
+  const rows = data.items.map((it) => {
+    const busy = it.is_running || it.is_queued;
+    const p = it.progress;
+    const st = it.status || {};
+    const stateTxt = it.is_running ? (p ? `실행 중 ${p.done}/${p.total}` : '실행 중')
+      : it.is_queued ? '대기'
+        : ({ ok: '성공', error: '실패', cancelled: '중지됨', running: '중단?' }[st.last_status] || '—');
+    const stateColor = it.is_running ? '#3b82f6' : it.is_queued ? '#f59e0b'
+      : st.last_status === 'ok' ? '#30a46c' : st.last_status === 'error' ? '#e5484d' : 'var(--text-muted)';
+    return el('tr', {},
+      el('td', { class: 'mono', style: { color: it.direction === 'download' ? '#1d4ed8' : '#15803d', fontWeight: 700 } },
+        it.direction === 'download' ? '↓ 받기' : '↑ 올리기'),
+      el('td', { class: 'mono' }, it.id),
+      el('td', { class: 'mono', style: { fontSize: '11px' } }, `${it.root}/${it.target || ''}`),
+      el('td', { class: 'mono', style: { fontSize: '11px' } }, it.key),
+      el('td', {}, it.mode),
+      el('td', { class: 'mono' }, it.interval_min ? `${it.interval_min}분` : '수동'),
+      el('td', { style: { color: stateColor, whiteSpace: 'nowrap' },
+        title: p?.current ? `현재: ${p.current}` : (st.error || '') },
+        stateTxt,
+        st.last_status === 'ok' && !busy && st.moved !== undefined
+          ? el('span', { class: 'hint' }, ` ${st.moved}건`) : null),
+      el('td', { style: { display: 'flex', gap: '4px' } },
+        busy
+          ? el('button', { class: 'btn small', style: { color: '#e5484d' },
+              onclick: async () => { await s3Post('/api/s3/stop', { id: it.id }); renderS3Modal(); } }, '■ 중지')
+          : el('button', { class: 'btn small primary',
+              onclick: async () => { await s3Post('/api/s3/run', { id: it.id }); renderS3Modal(); } }, '▶ 실행'),
+        el('button', { class: 'btn small', onclick: () => { S3M.form = { ...it }; S3M.tab = 'add'; renderS3Modal(); } }, '수정'),
+        el('button', { class: 'btn small', onclick: async () => {
+          if (!confirm(`${it.id} 삭제?`)) return;
+          await s3Post('/api/s3/delete', { id: it.id }); renderS3Modal();
+        } }, '✕'),
+      ),
+    );
+  });
+
+  return el('div', {},
+    el('div', { class: 'row', style: { gap: '8px', marginBottom: '8px', fontSize: '11px' } },
+      pill(data.auto_download_enabled, '⬇ 자동 다운로드', { auto_download_enabled: !data.auto_download_enabled }),
+      pill(data.auto_upload_enabled, '⬆ 자동 업로드', { auto_upload_enabled: !data.auto_upload_enabled }),
+      el('span', { class: 'hint' }, '주기가 0(수동)이면 마스터가 켜져 있어도 자동 실행되지 않는다'),
+    ),
+    el('div', { style: { maxHeight: '52vh', overflow: 'auto' } },
+      alTable(['방향', 'id', '로컬', 'S3 key', '명령', '주기', '상태', '동작'], rows)),
+  );
+}
+
+function s3FormView(data, dests) {
+  const f = S3M.form || { id: '', direction: 'download', root: 'config', target: '',
+    dest: 'default', key: '', mode: 'sync', interval_min: 0, enabled: true, note: '' };
+  const set = (k, v) => { f[k] = v; S3M.form = f; };
+  const inp = (k, ph, w) => el('input', { type: 'text', class: 'mono', value: f[k] ?? '',
+    placeholder: ph, style: { width: w || '260px', fontSize: '11px' },
+    oninput: (e) => set(k, e.target.value) });
+  const row = (label, ...kids) => el('div', { class: 'cfg-row', style: { gap: '8px', alignItems: 'center' } },
+    el('span', { style: { flex: '0 0 92px', fontSize: '11px', color: 'var(--text-muted)' } }, label), ...kids);
+  const seg = (k, vals) => el('span', { class: 'cfg-mode' }, ...vals.map(([v, lab]) =>
+    el('button', { class: 'seg' + (f[k] === v ? ' on' : ''),
+      onclick: () => { set(k, v); renderS3Modal(); } }, lab)));
+
+  // S3 key 고르기 — prefix 를 훑어 실제 존재하는 key 를 눌러서 선택
+  const keyBox = el('div', { class: 'mono', style: { fontSize: '11px', maxHeight: '150px',
+    overflow: 'auto', border: '1px solid var(--border)', borderRadius: '4px', padding: '4px',
+    display: S3M.keyBrowse ? 'block' : 'none' } });
+  const renderKeys = (b) => {
+    keyBox.innerHTML = '';
+    keyBox.style.display = 'block';
+    keyBox.append(el('div', { class: 'hint' }, `prefix: ${b.prefix || '(루트)'} · ${b.keys.length}개`));
+    if (b.prefix) keyBox.append(el('div', { class: 'clickable', style: { color: 'var(--text-muted)' },
+      onclick: () => browseKeys(b.prefix.replace(/\/?[^/]+\/?$/, '')) }, '⬆ 상위'));
+    b.folders.forEach((d) => keyBox.append(el('div', { class: 'clickable', style: { color: '#3b82f6' },
+      onclick: () => browseKeys(d) }, `📁 ${d}/`)));
+    b.keys.filter((k) => !b.folders.some((d) => k.startsWith(d + '/'))).forEach((k) =>
+      keyBox.append(el('div', { class: 'clickable',
+        onclick: () => { set('key', k); renderS3Modal(); } }, `📄 ${k}`)));
+  };
+  const browseKeys = async (prefix) => {
+    try {
+      const b = await api.get(`/api/s3/browse-keys?dest=${encodeURIComponent(f.dest)}&prefix=${encodeURIComponent(prefix || '')}`);
+      S3M.keyBrowse = b; renderKeys(b);
+    } catch (e) { alert(e.message); }
+  };
+  // key 를 골라 폼이 다시 그려진 뒤에도 탐색 목록이 그대로 남아야 한다
+  if (S3M.keyBrowse) renderKeys(S3M.keyBrowse);
+
+  return el('div', {},
+    row('방향', seg('direction', [['download', '⬇ 받기 (S3→Valve)'], ['upload', '⬆ 올리기 (Valve→S3)']])),
+    row('id', inp('id', '영문/숫자/_/- 64자', '200px'),
+      el('span', { class: 'hint' }, '항목 식별자 — 중복 불가')),
+    row('로컬 root', seg('root', (data.roots || ['config']).map((r) => [r, r]))),
+    row('로컬 경로', inp('target', 'root 기준 상대경로 (비우면 root 전체)', '320px'),
+      el('span', { class: 'hint' }, '파일 또는 폴더')),
+    row('S3 연결', el('select', { style: { fontSize: '11px' }, onchange: (e) => set('dest', e.target.value) },
+      ...Object.keys(dests.destinations || { default: {} }).map((n) =>
+        el('option', n === f.dest ? { value: n, selected: '' } : { value: n }, n)))),
+    row('S3 key', inp('key', 'prefix/파일.csv', '320px'),
+      el('button', { class: 'btn small', onclick: () => browseKeys(f.key.split('/').slice(0, -1).join('/')) }, '🔍 S3 에서 고르기')),
+    el('div', { style: { paddingLeft: '100px' } }, keyBox),
+    row('명령', seg('mode', [['sync', 'sync (변경분만)'], ['cp', 'cp (항상 덮어쓰기)']])),
+    row('주기(분)', el('input', { type: 'number', min: '0', value: String(f.interval_min ?? 0),
+      style: { width: '70px', fontSize: '11px' }, onchange: (e) => set('interval_min', Number(e.target.value)) }),
+      el('span', { class: 'hint' }, '0 = 수동 전용')),
+    row('활성화', el('input', Object.assign({ type: 'checkbox', onchange: (e) => set('enabled', e.target.checked) },
+      f.enabled ? { checked: '' } : {}))),
+    row('메모', inp('note', '(선택)', '320px')),
+    el('div', { class: 'mono', style: { fontSize: '11px', color: 'var(--text-muted)', margin: '8px 0 0 100px' } },
+      f.direction === 'download'
+        ? `s3://<${f.dest}>/${f.key}  →  ${f.root}/${f.target || ''}`
+        : `${f.root}/${f.target || ''}  →  s3://<${f.dest}>/${f.key}`),
+    el('div', { class: 'row', style: { gap: '6px', marginTop: '10px', paddingLeft: '100px' } },
+      el('button', { class: 'btn primary', onclick: async () => {
+        const r = await s3Post('/api/s3/save', f);
+        if (r) { S3M.form = null; S3M.keyBrowse = null; S3M.tab = 'items'; renderS3Modal(); }
+      } }, '💾 저장'),
+      el('button', { class: 'btn', onclick: () => { S3M.form = null; S3M.keyBrowse = null; S3M.tab = 'items'; renderS3Modal(); } }, '취소')),
+  );
+}
+
+function s3HistoryView() {
+  const rows = (S3M.hist || []).map((h) => el('tr', {},
+    el('td', { class: 'mono' }, fmtRunTs(h.ts)),
+    el('td', { class: 'mono' }, h.id),
+    el('td', { style: { color: h.status === 'ok' ? '#30a46c' : h.status === 'cancelled' ? '#f5a524' : '#e5484d' } },
+      ({ ok: '성공', error: '실패', cancelled: '중지됨' }[h.status] || h.status)),
+    el('td', { class: 'mono' }, `${h.duration_sec ?? '-'}s`),
+    el('td', { class: 'mono' }, h.direction || '-'),
+    el('td', { class: 'mono' }, `옮김 ${h.moved ?? 0} · 생략 ${h.skipped ?? 0} · 실패 ${h.failed ?? 0}`),
+    el('td', { style: { color: '#e5484d', fontSize: '11px' } }, h.error || ''),
+  ));
+  return el('div', { style: { maxHeight: '56vh', overflow: 'auto' } },
+    alTable(['시각', 'id', '결과', '소요', '방향', '건수', '오류'], rows));
+}
+
+// 탐색기 하단 범례 — 화살표가 무슨 뜻인지 화면에서 바로 읽히게
+function syncLegend() {
+  const item = (dir, state, text) => el('span', { class: 'row', style: { gap: '4px', alignItems: 'center' } },
+    syncBadge({ dir, state, detail: '' }), text);
+  return el('div', { class: 'row', style: { marginTop: '10px', gap: '14px', fontSize: '11px',
+    color: 'var(--text-muted)', flexWrap: 'wrap' } },
+    item('down', 'ok', '받기 — flow 가 관리 (Vehicle_matching · ppid_knob · inline_matching …)'),
+    item('up', 'ok', '올리기 — Valve 산출물 (staging · 알람 outbox)'),
+    item('both', 'ok', '양방향 — settings · products · source_types'),
+    item(null, 'local', '로컬 전용 — S3 자동 동기화 없음'),
+    el('span', { class: 'hint' }, '점 색 = 상태 (초록 정상 · 주황 대기/미수신 · 빨강 실패)'),
   );
 }
 
@@ -1778,6 +2023,8 @@ async function loadBrowserRoots() {
     }
     loadBrowserDir(BR.root, BR.path);
   } catch (e) { $('#brTree').textContent = String(e); }
+  const lg = $('#brLegend');
+  if (lg) { lg.innerHTML = ''; lg.append(syncLegend()); }
   loadS3RulesSection();
   loadConfigFilesSection();
 }
@@ -2060,17 +2307,27 @@ async function loadAlerts() {
   const wrap = $('#alWrap');
   if (!wrap) return;
   try {
-    const [status, alerts, cfg, csvInfo] = await Promise.all([
+    const [status, alerts, cfg, csvInfo, outbox, sched, runs] = await Promise.all([
       api.get('/api/pipeline/status'),
       api.get('/api/pipeline/alerts'),
       api.get('/api/pipeline/config'),
       api.get('/api/pipeline/csv-sync'),
+      api.get('/api/pipeline/alerts/outbox').catch(() => null),
+      api.get('/api/pipeline/schedule').catch(() => null),
+      api.get('/api/pipeline/runs?limit=60').catch(() => null),
     ]);
     wrap.innerHTML = '';
 
-    // ── 처리 현황 (vehicle 별 한 줄)
-    wrap.append(alSub('파이프라인 처리 현황', 'raw → event → feature · vehicle_matching 변경 시 재처리 필요 표시'));
-    Object.keys(status).forEach((v) => wrap.append(alStatusLine(v, status[v])));
+    // ── 처리 현황 (vehicle 별 한 줄 — 주기 조절 포함)
+    wrap.append(alSub('파이프라인 처리 현황',
+      'raw → event → feature · vehicle_matching 변경 시 재처리 필요 표시 · 제품별 실행 주기 조절'));
+    if (sched && !sched.master_enabled) {
+      wrap.append(el('div', { class: 'alert warn', style: { fontSize: '11px', margin: '4px 0' } },
+        '자동 실행 마스터 스위치가 꺼져 있습니다 — 제품 주기와 무관하게 스케줄이 돌지 않습니다 (모니터 탭 ⏱).'));
+    }
+    Object.keys(status).forEach((v) => wrap.append(
+      alStatusLine(v, status[v], sched?.vehicles?.[v], sched?.summary?.[v])));
+    if (runs) wrap.append(alRunLog(runs));
 
     // ── 통합 알람 리스트
     const toggle = el('label', { style: { fontSize: '12px', color: 'var(--text-muted)', display: 'flex', gap: '5px', alignItems: 'center', marginLeft: 'auto' } },
@@ -2085,6 +2342,7 @@ async function loadAlerts() {
     ));
     wrap.append(alAlertTable(alerts));
 
+    if (outbox) wrap.append(alOutbox(outbox));
     wrap.append(alExcludeEditor(cfg));
     wrap.append(alCsvSync(csvInfo));
   } catch (e) {
@@ -2094,7 +2352,7 @@ async function loadAlerts() {
 }
 
 // vehicle 처리 현황 한 줄 (raw → event → feature · stale 감지 · 실행 버튼)
-function alStatusLine(v, st) {
+function alStatusLine(v, st, sc, sum) {
   const line = el('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', padding: '5px 0', borderBottom: '1px solid var(--border-weak, rgba(128,128,128,.15))', fontSize: '12px' } });
   line.append(
     el('span', { style: { fontWeight: 800, minWidth: '90px' } }, v),
@@ -2103,26 +2361,67 @@ function alStatusLine(v, st) {
   if (st) {
     const ev = st.event;
     const srcs = Object.keys(st.raw);
-    const evTxt = srcs.map((s) => `${s} ${(ev[s]?.dates || []).length}/${(st.raw[s] || []).length}`).join(' · ');
-    const staleSrcs = srcs.filter((s) => ev[s]?.stale);
-    const pendingSrcs = srcs.filter((s) => (ev[s]?.pending || []).length);
+    const evSrcs = srcs.filter((s) => s in (ev || {}));      // raw 전용 소스(ET)는 event 현황 제외
+    const rawOnlySrcs = srcs.filter((s) => !(s in (ev || {})));
+    const evTxt = evSrcs.map((s) => `${s} ${(ev[s]?.dates || []).length}/${(st.raw[s] || []).length}`).join(' · ');
+    const staleSrcs = evSrcs.filter((s) => ev[s]?.stale);
+    const pendingSrcs = evSrcs.filter((s) => (ev[s]?.pending || []).length);
     line.append(el('span', {}, `event ${evTxt}`));
+    if (rawOnlySrcs.length) line.append(el('span', { style: { color: 'var(--text-muted)' } },
+      rawOnlySrcs.map((s) => `${s} raw ${(st.raw[s] || []).length}일 (raw 전용)`).join(' · ')));
     if (pendingSrcs.length) line.append(el('span', { style: { color: '#e5484d' } }, `미처리 ${pendingSrcs.join(', ')}`));
     if (staleSrcs.length) line.append(el('span', { style: { color: '#e5484d' } }, `매칭 변경 — 재처리 필요 (${staleSrcs.join(', ')})`));
-    if (!pendingSrcs.length && !staleSrcs.length && srcs.some((s) => (ev[s]?.dates || []).length)) {
+    if (!pendingSrcs.length && !staleSrcs.length && evSrcs.some((s) => (ev[s]?.dates || []).length)) {
       line.append(el('span', { style: { color: '#30a46c' } }, '최신'));
     }
     line.append(el('span', { style: { color: 'var(--text-muted)' } }, '|'));
     line.append(el('span', { style: { color: 'var(--text-secondary)' } },
       `feature ${Object.entries(st.features).map(([k, n]) => `${k} ${n}`).join(' · ')}`));
   }
-  line.append(el('button', { class: 'btn', style: { marginLeft: 'auto' }, onclick: async (ev) => {
+  line.append(el('span', { style: { marginLeft: 'auto' } }), alSchedCell(v, sc, sum));
+  line.append(el('button', { class: 'btn', onclick: async (ev) => {
     const b = ev.target; b.disabled = true; b.textContent = '실행 중…';
     try { await api.post(`/api/pipeline/run/${encodeURIComponent(v)}`); }
     catch (e) { alert(e.message); }
     loadAlerts();
   } }, '▶ 실행'));
   return line;
+}
+
+// 제품별 실행 주기 — 하루 N회. 비우면 전역 interval_hours 를 따르고 0 이면 자동 실행 제외.
+function alSchedCell(v, sc, sum) {
+  if (!sc) return el('span', {});
+  const inp = el('input', {
+    type: 'number', min: '0', max: '48', step: '1',
+    value: sc.source === 'vehicle' ? String(sc.runs_per_day) : '',
+    placeholder: String(sc.runs_per_day || 0),
+    style: { width: '46px', fontSize: '11px' },
+    title: '하루 실행 횟수 (3=8시간 간격 · 6=4시간 간격 · 0=자동 실행 안 함)\n'
+         + '비우면 전역 interval_hours 를 따른다',
+    onchange: async (e) => {
+      try {
+        await api.put(`/api/pipeline/schedule/${encodeURIComponent(v)}`,
+          { runs_per_day: e.target.value === '' ? null : Number(e.target.value) });
+      } catch (err) { alert(err.message); }
+      loadAlerts();
+    },
+  });
+  const period = sc.interval_sec > 0 ? `${sc.interval_hours}h 간격` : '자동 실행 안 함';
+  const next = !sc.enabled ? '—'
+    : (sc.due ? '곧 실행' : new Date(sc.next_ts * 1000).toLocaleString('ko-KR',
+        { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }));
+  const bits = [el('span', { style: { color: 'var(--text-muted)' } }, '일'), inp,
+    el('span', { style: { color: 'var(--text-muted)' } }, `회 · ${period}`),
+    el('span', { title: '다음 자동 실행 예정', style: { color: sc.due ? '#f5a524' : 'var(--text-muted)' } },
+      `→ ${next}`)];
+  if (sc.source === 'global') {
+    bits.push(el('span', { class: 'hint', title: '제품 개별 설정 없음 — 전역 주기를 따름' }, '전역'));
+  }
+  if (sum && sum.failed) {
+    bits.push(el('span', { style: { color: '#e5484d' }, title: sum.last_error || '' },
+      `최근 ${sum.runs}회 중 실패 ${sum.failed}`));
+  }
+  return el('span', { style: { display: 'flex', gap: '5px', alignItems: 'center', fontSize: '11px' } }, ...bits);
 }
 
 // 통합 알람 테이블 — 한 행 = 한 알람. 유형은 색으로 구분 (미매칭 step 빨강 · RO ppid 주황)
@@ -2161,6 +2460,128 @@ function alAlertTable(data) {
     ['유형', 'vehicle', 'product', 'step_id', 'step_desc', 'ppid', 'split', 'eqp_id', 'eqp_model', 'lots', 'rows', '상태'],
     rows,
   );
+}
+
+// ── 실행 로그 — 제품별 1회 실행 = 1행, 펼치면 단계(raw/event/feature/wide)별 상세
+let AL_RUN_FILTER = '';       // vehicle 필터 ('' = 전체)
+let AL_RUN_FAILED = false;
+
+const RUN_STAGE_LABEL = { raw: 'raw', event: 'event', feature: 'feature', wide: 'wide' };
+const fmtRunTs = (ts) => ts ? new Date(ts * 1000).toLocaleString('ko-KR',
+  { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '-';
+const RUN_MODE = { schedule: '자동', manual: '수동', loop: '루프', rebuild: '매칭갱신' };
+
+function alRunLog(data) {
+  const runs = (data.runs || [])
+    .filter((r) => (!AL_RUN_FILTER || r.vehicle === AL_RUN_FILTER))
+    .filter((r) => (!AL_RUN_FAILED || !r.ok));
+  const vehicles = [...new Set((data.runs || []).map((r) => r.vehicle))];
+
+  const sel = el('select', { style: { fontSize: '11px' },
+    onchange: (e) => { AL_RUN_FILTER = e.target.value; loadAlerts(); } },
+    el('option', AL_RUN_FILTER === '' ? { value: '', selected: '' } : { value: '' }, '전체 제품'),
+    ...vehicles.map((v) => el('option', v === AL_RUN_FILTER ? { value: v, selected: '' } : { value: v }, v)));
+  const failChk = el('label', { style: { display: 'flex', gap: '4px', alignItems: 'center', fontSize: '11px' } },
+    el('input', Object.assign({ type: 'checkbox', onchange: (e) => { AL_RUN_FAILED = e.target.checked; loadAlerts(); } },
+      AL_RUN_FAILED ? { checked: '' } : {})), '실패만');
+
+  const rows = runs.map((r) => {
+    const st = r.stages || {};
+    const bar = ['raw', 'event', 'feature', 'wide'].map((k) => {
+      const s = st[k];
+      if (!s) return el('span', { class: 'hint', title: `${k} 미도달` }, `${RUN_STAGE_LABEL[k]} –`);
+      return el('span', { class: 'mono', title: runStageTip(k, s) },
+        `${RUN_STAGE_LABEL[k]} ${s.sec}s`);
+    });
+    const detail = el('div', { class: 'mono', style: { display: 'none', fontSize: '11px',
+      whiteSpace: 'pre-wrap', color: 'var(--text-secondary)', padding: '6px 0 8px 12px',
+      borderLeft: '2px solid var(--border)' } }, runDetailText(r));
+    const head = el('tr', { style: { cursor: 'pointer' },
+      onclick: () => { detail.style.display = detail.style.display === 'none' ? 'block' : 'none'; } },
+      el('td', { class: 'mono' }, fmtRunTs(r.ts)),
+      el('td', { class: 'mono', style: { fontWeight: 700 } }, r.vehicle || '-'),
+      el('td', {}, RUN_MODE[r.mode] || r.mode || '-'),
+      el('td', { style: { color: r.ok ? '#30a46c' : '#e5484d', fontWeight: 700 } }, r.ok ? '성공' : '실패'),
+      el('td', { class: 'mono' }, `${r.elapsed_sec ?? '-'}s`),
+      el('td', { style: { display: 'flex', gap: '10px', flexWrap: 'wrap' } }, ...bar),
+    );
+    const detailRow = el('tr', {}, el('td', { colspan: '6', style: { padding: 0 } }, detail));
+    return [head, detailRow];
+  }).flat();
+
+  return el('div', { style: { borderTop: AL_HAIR, marginTop: '20px', paddingTop: '12px' } },
+    alSub('실행 로그', '제품 × 1회 실행 = 1행 — 행을 클릭하면 단계별 상세 (logs/pipeline_runs.jsonl)'),
+    el('div', { style: { display: 'flex', gap: '10px', alignItems: 'center', margin: '6px 0' } },
+      sel, failChk,
+      el('span', { class: 'hint' }, `${runs.length}건 표시`)),
+    alTable(['시각', 'vehicle', '트리거', '결과', '소요', '단계별 (클릭 → 상세)'], rows),
+  );
+}
+
+function runStageTip(k, s) {
+  if (k === 'raw') return `유닛 ${s.units} · rows ${JSON.stringify(s.rows || {})}`
+    + (s.errors?.length ? `\n실패 ${s.errors.length}건` : '');
+  if (k === 'event') return Object.entries(s.sources || {})
+    .map(([src, e]) => `${src}: raw ${e.raw_rows} → event ${e.event_rows} (${e.partitions} 파티션)${e.rebuilt ? ' [전체 재생성]' : ''}`)
+    .join('\n') || '변경 없음';
+  if (k === 'feature') return `${Object.entries(s.counts || {}).map(([c, n]) => `${c} ${n}`).join(' · ')}`
+    + `\nevent ${s.event_dates}일 대상 · skip ${s.skipped?.length || 0} · knob miss ${s.knob_miss || 0}`;
+  if (k === 'wide') return `rows ${s.rows} · feature ${s.features} → ${s.path || ''}`;
+  return '';
+}
+
+function runDetailText(r) {
+  const st = r.stages || {};
+  const L = [];
+  if (r.error) L.push(`✗ 실행 중단: ${r.error}`);
+  if (st.raw) {
+    L.push(`[raw] ${st.raw.sec}s · 유닛 ${st.raw.units}`);
+    Object.entries(st.raw.rows || {}).forEach(([s, n]) => L.push(`    ${s}: ${n} rows`));
+    (st.raw.errors || []).forEach((e) => L.push(`    ✗ ${e.source} ${e.date}: ${e.error}`));
+  }
+  if (st.event) {
+    L.push(`[event] ${st.event.sec}s${st.event.rebuilt?.length ? ` · 전체 재생성: ${st.event.rebuilt.join(', ')}` : ''}`);
+    Object.entries(st.event.sources || {}).forEach(([s, e]) =>
+      L.push(`    ${s}: raw ${e.raw_rows} → event ${e.event_rows} · ${e.partitions} 파티션${e.rebuilt ? ' (재생성)' : ''}`));
+  }
+  if (st.feature) {
+    L.push(`[feature] ${st.feature.sec}s · event ${st.feature.event_dates}일 전체 대상`);
+    L.push(`    ${Object.entries(st.feature.counts || {}).map(([c, n]) => `${c} ${n}`).join(' · ')}`);
+    if (st.feature.knob_miss) L.push(`    knob 미변환(RO) ${st.feature.knob_miss}건 · skip 판정 ${st.feature.knob_skip}건`);
+    (st.feature.agg_overrides || []).forEach((o) =>
+      L.push(`    ⓘ ${o.feature}: 룰북 agg '${o.csv_agg}' 무시 → 고정 규칙 '${o.applied}'`));
+    (st.feature.skipped || []).forEach((s) => L.push(`    ⚠ ${s.feature}: ${s.reason}`));
+  }
+  if (st.wide) L.push(`[wide] ${st.wide.sec}s · rows ${st.wide.rows} · feature ${st.wide.features} → ${st.wide.path || ''}`);
+  return L.join('\n') || '기록된 단계 없음';
+}
+
+// 알람 업로드 폴더 (Valve → S3 → flow 매칭알람). 이 폴더 하나만 sync 하면 된다.
+function alOutbox(ob) {
+  const box = el('div', { style: { borderTop: AL_HAIR, marginTop: '20px', paddingTop: '12px' } },
+    alSub('S3 업로드 폴더', 'flow 매칭알람이 읽는 파일 — 이 폴더만 S3 로 sync 하면 된다 (트리 = S3 key)'));
+  if (!ob.enabled) {
+    box.append(el('div', { class: 'alert warn', style: { fontSize: '12px' } },
+      '미설정 — 설정 탭 alerts.outbox_dir 을 채우면 발행 시 이 폴더로 미러링된다.'));
+    return box;
+  }
+  const cmd = `aws s3 sync "${ob.sync_dir}" s3://<bucket>/${ob.s3_prefix} --exclude "*.tmp"`;
+  box.append(el('div', { style: { fontSize: '12px', display: 'flex', gap: '14px', flexWrap: 'wrap', alignItems: 'center', margin: '6px 0' } },
+    el('span', { style: { color: 'var(--text-muted)' } }, '폴더'),
+    el('span', { class: 'mono' }, ob.sync_dir),
+    el('span', { style: { color: 'var(--text-muted)' } }, '→ s3 prefix'),
+    el('span', { class: 'mono' }, ob.s3_prefix),
+    el('span', { style: { color: 'var(--text-muted)' } }, `발행 주기 ${ob.interval_min || 0}분`),
+  ));
+  box.append(el('div', { class: 'mono', style: { fontSize: '11px', color: 'var(--text-muted)', margin: '2px 0 8px', wordBreak: 'break-all' } }, cmd));
+  box.append(alTable(['key', '크기', '갱신'], (ob.files || []).map((f) => el('tr', {},
+    el('td', { class: 'mono' }, f.key),
+    el('td', { class: 'mono' }, `${f.size} B`),
+    el('td', { class: 'mono', style: { color: 'var(--text-muted)' } }, new Date(f.mtime * 1000).toLocaleString()),
+  ))));
+  box.append(el('div', { style: { fontSize: '11px', color: 'var(--text-muted)', marginTop: '6px' } },
+    'ack.json 은 flow 도 쓰는 양방향 파일이라 이 폴더에 없다 — 폴더 sync 로 덮으면 판정이 유실된다.'));
+  return box;
 }
 
 // csv 설정파일 S3 동기화 관리 (flow → Valve)

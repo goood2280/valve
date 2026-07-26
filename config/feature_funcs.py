@@ -12,7 +12,12 @@
 # ② 집계 함수:    def agg_<이름>(): return <pl.col("val") 기반 표현식>
 #    → fab/mask/knob_ppid/inline/vm csv 의 agg 컬럼에서 <이름> 으로 사용.
 #      tkout_time(수치는 time) 정렬 후 wafer 단위 그룹 안에서 평가된다.
-#      내장 agg: first / last / last_valid / concat / valid_eqp / agg(유니크 join)
+#      내장 agg: first / last / last_valid / concat / valid_eqp / valid_or_last /
+#                agg(유니크 join)
+#      valid_eqp     — 마지막 '_' 뒤에 숫자가 있는 값만 남기고 first.
+#                      유효값이 없는 wafer 는 결과에서 빠진다.
+#      valid_or_last — 같은 유효 판정이되 last, 유효값이 없으면 tkout_time last 로 대체.
+#                      ecuall 처럼 "값은 반드시 하나 남아야" 하는 feature 용.
 #      knob 특이 케이스(여러 ppid 중 last 가 아닌 선택)에 특히 유용.
 #
 # 헬퍼: pl(polars) · clean_str(col) — 문자열 컬럼 정리(strip, 빈값→null)
@@ -33,3 +38,8 @@ def ecuall():
 def agg_valid_eqp():
     v = pl.col("val").cast(pl.Utf8).str.strip_chars()
     return v.filter(v.str.contains(r"_[A-Za-z0-9]*[0-9]")).first()
+
+
+# ※ ecuall 은 fab.csv 의 agg 와 무관하게 항상 valid_or_last 로 뽑힌다
+#    (feature_pipeline.FORCED_AGG). 마지막 '_' 뒤에 숫자가 있는 값 중 tkout_time 이
+#    가장 늦은 것, 없으면 tkout_time last. step 별 예외는 두지 않는다.

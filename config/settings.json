@@ -57,6 +57,7 @@
     "s3_prefix": "valve-alerts",
     "s3_enabled": true,
     "s3_interval_min": 10,
+    "outbox_dir": "s3_outbox",
     "config_prefix": "valve-config",
     "max_per_hour": 60,
     "dedupe_window_sec": 60

@@ -1,12 +1,31 @@
 {
   "name": "Valve",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "codename": "valve",
   "pairs_with": "flow",
   "purpose": "DataLake 수도꼭지 — 사내 API 에서 데이터를 뽑아 S3 로 흘려 flow 에 공급",
   "tagline": "turn the valve · feed the flow",
   "created": "2026-04-24",
   "changelog": [
+    {
+      "version": "0.3.0",
+      "date": "2026-07-26",
+      "tag": "feat",
+      "title": "S3 전송 항목 엔진(⚙) + 제품별 실행 주기 + 실행 로그 + 알람 업로드 폴더 + 파이프라인 실행 락",
+      "changes": [
+        "core/s3_jobs.py: 로컬↔S3 key 항목 단위 전송 — 방향/명령/주기 개별 설정, 단일 워커 큐, 파일 경계 중지(cancelled), 진행률 폴링, 이력 500건. csv_sync.yaml·s3_transfer.yaml 최초 1회 자동 이관",
+        "routers/s3_jobs.py + 탐색기 ⚙ 모달: 항목 CRUD · ▶실행/■중지 · S3 key 계단식 탐색으로 key 선택 · 이력 탭",
+        "탐색기 신호등: 파일별 방향 판정 — ↓받기(csv_sync 대상) · ↕양방향(settings/products/source_types) · 로컬 전용. 예전엔 config 전부가 ↓ 로 보였다",
+        "core/run_log.py + 알람 탭 실행 로그: 제품×1회 실행=1행, raw/event/feature/wide 단계별 소요·산출·실패 사유",
+        "제품별 실행 주기 — vehicles.yaml runs_per_day (일 N회). 스케줄러가 due 인 제품만 실행, 마지막 실행 시각은 로그에서 복원",
+        "alert_store: 알람 발행을 S3 key 트리와 1:1 인 로컬 폴더(s3_outbox/valve-alerts)로 미러 — 이 폴더만 sync 하면 flow 매칭알람이 갱신",
+        "pipeline_runner: 산출물을 쓰는 모든 진입점(스케줄·수동·wide·send·매칭갱신 재생성)이 실행 락 공유 — event 파티션 유실/잘린 parquet/meta 역전 방지",
+        "feature: ecuall 고정 규칙(마지막 '_' 뒤 숫자 있는 값 중 tkout_time last, 없으면 last) · sleuth_order 공백을 (step_id,root_lot_id) 내 wafer_id 순번으로 채움",
+        "fix: fake S3 의 head()/get_text() 가 디렉터리를 object 로 오인 → prefix 판정·sync 비교 오동작",
+        "fix: 알람 미러 파일이 Windows 개행 변환으로 S3 발행본과 달라지던 문제 (바이트 저장)",
+        "fix: yaml 저장 시 설정 파일 헤더 주석 유실 (vehicles/pipeline)"
+      ]
+    },
     {
       "version": "0.1.0",
       "date": "2026-04-24",

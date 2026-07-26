@@ -14,11 +14,27 @@ Valve · pipeline_runner
   진행 중에는 self.progress 가 vehicle 별 현재 단계(raw/event/feature)를 담아
   /api/pipeline/progress 로 노출 → 백필이 지금 어느 DB 단계인지 실시간 확인.
 
-스케줄:
-  · schedule_enabled + interval_hours>0 : interval_hours 간격 자동 실행
-  · loop_enabled                        : 쉬지 않고 계속 반복 실행 (루프 실행)
-  둘 다 백그라운드 asyncio 루프가 to_thread 로 run_all 을 돌린다.
-  _run_lock 으로 수동/스케줄/루프 실행이 겹치지 않게 직렬화.
+스케줄 (제품별 독립):
+  · vehicles.yaml 의 `runs_per_day` 로 제품마다 하루 실행 횟수를 따로 준다.
+    (일 3회 = 8시간 간격 · 일 6회 = 4시간 간격 · 0 이면 자동 실행 안 함)
+    값이 없는 제품은 전역 runtime.interval_hours 를 쓴다 (24/interval_hours 회).
+  · 백그라운드 루프가 sched_tick_sec(기본 60초)마다 "지금 돌 때가 된 제품"만
+    골라 run_all(vehicles=due) 한다. 마지막 실행 시각의 근거는 run_log —
+    메모리에 두면 재기동마다 전 제품이 due 로 잡혀 매번 전량 재실행된다.
+  · loop_enabled : 위 주기를 무시하고 전 제품을 쉬지 않고 반복 (개발/백필용)
+
+실행 락 (_run_lock) — 산출물을 건드리는 **모든** 진입점이 공유한다:
+  · 스케줄/루프/수동 전체 실행 (run_all)
+  · 수동 단건 실행            (run_vehicle_once  ← POST /api/pipeline/run/{vehicle})
+  · 매칭 csv 갱신 후 재생성   (rebuild_after_config_change ← csv_sync on_updated)
+  · wide / send_form 단독 실행 (run_wide_once · run_send_form_once)
+  락을 공유하지 않으면 두 스레드가 같은 2.EVENT_DB/{vehicle}/{source}/ 를 동시에
+  rmtree + write 한다. 그때 생기는 손상 세 가지:
+    (a) 한쪽이 rebuild 로 파티션을 지우는 사이 다른 쪽이 "이미 있음"으로 판정해
+        건너뛴다 → event DB 에 날짜 구멍. 예외 없이 조용히 틀린 feature 가 나간다.
+    (b) 같은 data.parquet 에 동시 write → 잘린 parquet → 다음 _load_event 가 실패.
+    (c) _meta.json 을 나중에 쓴 쪽이 이긴다 → 옛 매칭 기준 event 에 새 ver 이
+        찍히면 stale 로 안 잡혀 영영 재생성되지 않는다.
 """
 from __future__ import annotations
 
@@ -29,17 +45,27 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from backend.core.feature_pipeline import FeaturePipeline
+from backend.core.run_log import RunLog
 from backend.core.runtime_env import WorkerPlan, plan_workers
+
+DAY_SEC = 86400.0
+
+
+class PipelineBusy(RuntimeError):
+    """다른 실행(스케줄/수동/재생성)이 산출물을 쓰고 있어 지금은 진입 불가."""
 
 
 class PipelineRunner:
-    def __init__(self, pipe: FeaturePipeline):
+    def __init__(self, pipe: FeaturePipeline, run_log: RunLog | None = None):
         self.pipe = pipe
+        self.runs = run_log or RunLog(pipe.root / "logs" / "pipeline_runs.jsonl")
         self._bg_task: asyncio.Task | None = None
         self.last_run: dict | None = None
+        self.last_rebuild: dict | None = None   # 매칭 갱신 재생성 결과 (조용한 실패 방지)
         self.on_vehicle_done = None  # Callable[[str, dict], None] — 알람 발행 훅
         self._lock = threading.Lock()       # progress 보호
-        self._run_lock = threading.Lock()   # run_all 중복 실행 방지
+        # 산출물(event/feature/wide/send)을 쓰는 모든 진입점의 공용 락 — 모듈 docstring 참조
+        self._run_lock = threading.Lock()
         self._raw_sem = threading.BoundedSemaphore(3)  # 전역 raw 동시 상한 (run_all 시 재설정)
         self._loop_count = 0
         self.progress: dict = {"running": False, "mode": None, "loop": False,
@@ -53,11 +79,56 @@ class PipelineRunner:
         return plan_workers(self.runtime_cfg())
 
     def schedule_enabled(self) -> bool:
-        rt = self.runtime_cfg()
-        return bool(rt.get("schedule_enabled")) and float(rt.get("interval_hours") or 0) > 0
+        """자동 실행 마스터 스위치 — 켜져 있고 실제 주기를 가진 제품이 하나라도 있으면 True."""
+        if not self.runtime_cfg().get("schedule_enabled"):
+            return False
+        return any(p["interval_sec"] > 0 for p in self.schedule_plan().values())
 
     def loop_enabled(self) -> bool:
         return bool(self.runtime_cfg().get("loop_enabled"))
+
+    # ── 제품별 주기 ──────────────────────────────────────────
+    def default_runs_per_day(self) -> float:
+        """runs_per_day 가 없는 제품의 기본값 — 전역 interval_hours 에서 환산."""
+        ih = float(self.runtime_cfg().get("interval_hours") or 0)
+        return round(DAY_SEC / (ih * 3600), 4) if ih > 0 else 0.0
+
+    def runs_per_day(self, vehicle_cfg: dict) -> tuple[float, str]:
+        """(하루 실행 횟수, 출처). 0 이면 자동 실행 안 함."""
+        rpd = vehicle_cfg.get("runs_per_day")
+        if rpd is None or str(rpd).strip() == "":
+            return self.default_runs_per_day(), "global"
+        try:
+            return max(0.0, float(rpd)), "vehicle"
+        except (TypeError, ValueError):
+            return self.default_runs_per_day(), "global"
+
+    def schedule_plan(self, now: float | None = None) -> dict[str, dict]:
+        """제품별 주기 현황 — 화면/스케줄러 공용.
+        {vehicle: {runs_per_day, source, interval_sec, last_ts, next_ts, due, enabled}}"""
+        now = now or time.time()
+        last = self.runs.last_started()
+        master = bool(self.runtime_cfg().get("schedule_enabled"))
+        out = {}
+        for v, cfg in self.pipe.vehicles().items():
+            rpd, src = self.runs_per_day(cfg or {})
+            interval = DAY_SEC / rpd if rpd > 0 else 0.0
+            t = last.get(v)
+            next_ts = (t + interval) if (t and interval > 0) else (now if interval > 0 else None)
+            out[v] = {
+                "vehicle": v, "product": (cfg or {}).get("product"),
+                "runs_per_day": rpd, "source": src,
+                "interval_sec": interval,
+                "interval_hours": round(interval / 3600, 2) if interval else 0,
+                "last_ts": t, "next_ts": next_ts,
+                "due": bool(interval > 0 and (t is None or now - t >= interval)),
+                "enabled": bool(master and interval > 0),
+            }
+        return out
+
+    def due_vehicles(self, now: float | None = None) -> list[str]:
+        """지금 돌 때가 된 제품. 이력이 없으면(최초 기동) 즉시 due."""
+        return [v for v, p in self.schedule_plan(now).items() if p["enabled"] and p["due"]]
 
     # ── progress ──
     def _prog(self, vehicle: str, **kw):
@@ -67,74 +138,122 @@ class PipelineRunner:
 
     def snapshot(self) -> dict:
         with self._lock:
-            return copy.deepcopy(self.progress)
+            snap = copy.deepcopy(self.progress)
+        if self.last_rebuild is not None:
+            snap["last_rebuild"] = self.last_rebuild
+        return snap
 
     def _raw_guarded(self, cfg, source, start, end, split) -> int:
         """전역 raw 세마포어를 잡고 raw 유닛 실행 — 전 vehicle 합쳐 동시 raw ≤ raw_api_max."""
         with self._raw_sem:
             return self.pipe._run_raw_unit(cfg, source, start, end, split)
 
-    # ── 단일 vehicle: 병렬 raw → event → feature (단계별 progress 갱신) ──
-    def run_vehicle(self, vehicle: str, plan: WorkerPlan | None = None) -> dict:
+    # ── 단일 vehicle: 병렬 raw → event → feature (단계별 progress + 실행 로그) ──
+    def run_vehicle(self, vehicle: str, plan: WorkerPlan | None = None,
+                    mode: str = "manual") -> dict:
         plan = plan or self.plan()
         t0 = time.time()
-        cfg = self.pipe.vehicle_cfg(vehicle)
-        units = self.pipe._raw_units(cfg)
+        # 단계별 소요/산출을 여기 모아 run_log 에 그대로 남긴다 (화면 로그의 원본)
+        stages: dict[str, dict] = {}
+        rec = {"ts": t0, "vehicle": vehicle, "mode": mode, "ok": False, "stages": stages}
+        try:
+            cfg = self.pipe.vehicle_cfg(vehicle)
+            rec["product"] = cfg.get("product")
+            units = self.pipe._raw_units(cfg)
 
-        # 1) RAW — (source × 날짜) 병렬. 실제 동시 실행은 전역 raw 세마포어가 제한(≤ raw_api_max).
-        self._prog(vehicle, stage="raw", raw_done=0, raw_total=len(units), source=None)
-        rows: dict[str, int] = {}
-        errors: list[dict] = []
-        done = 0
-        with ThreadPoolExecutor(max_workers=max(1, plan.raw_workers),
-                                thread_name_prefix=f"raw-{vehicle}") as ex:
-            futs = {ex.submit(self._raw_guarded, cfg, *u): u for u in units}
-            for f in as_completed(futs):
-                src, start, *_ = futs[f]
-                done += 1
+            # 1) RAW — (source × 날짜) 병렬. 동시 실행은 전역 raw 세마포어가 제한(≤ raw_api_max).
+            ts = time.time()
+            self._prog(vehicle, stage="raw", raw_done=0, raw_total=len(units), source=None)
+            rows: dict[str, int] = {}
+            errors: list[dict] = []
+            done = 0
+            with ThreadPoolExecutor(max_workers=max(1, plan.raw_workers),
+                                    thread_name_prefix=f"raw-{vehicle}") as ex:
+                futs = {ex.submit(self._raw_guarded, cfg, *u): u for u in units}
+                for f in as_completed(futs):
+                    src, start, *_ = futs[f]
+                    done += 1
+                    try:
+                        rows[src] = rows.get(src, 0) + f.result()
+                    except Exception as e:
+                        errors.append({"source": src, "date": str(start), "error": str(e)[:300]})
+                    self._prog(vehicle, raw_done=done, source=src)
+            stages["raw"] = {"sec": round(time.time() - ts, 2), "units": len(units),
+                             "rows": rows, "errors": errors}
+
+            # 2) EVENT
+            ts = time.time()
+            self._prog(vehicle, stage="event", source=None)
+            event = self.pipe.run_event(vehicle)
+            stages["event"] = {
+                "sec": round(time.time() - ts, 2),
+                "sources": {s: {k: e.get(k) for k in
+                                ("raw_rows", "event_rows", "partitions", "rebuilt")}
+                            for s, e in event.items()},
+                "rebuilt": [s for s, e in event.items() if e.get("rebuilt")],
+            }
+
+            # 3) FEATURE — event DB 전체 대상
+            ts = time.time()
+            ev_dates = self.pipe.event_date_count(vehicle)
+            self._prog(vehicle, stage="feature", event_dates=ev_dates)
+            feature = self.pipe.run_feature(vehicle)
+            stages["feature"] = {
+                "sec": round(time.time() - ts, 2), "counts": feature["features"],
+                "event_dates": ev_dates,
+                "skipped": feature.get("skipped") or [],
+                "agg_overrides": feature.get("agg_overrides") or [],
+                "knob_miss": len(feature.get("knob_miss") or []),
+                "knob_skip": len(feature.get("knob_skip") or []),
+            }
+
+            # 4) WIDE — feature 전부를 ML_TABLE 로 병합
+            ts = time.time()
+            self._prog(vehicle, stage="wide")
+            wide = self.pipe.run_wide(vehicle)
+            stages["wide"] = {"sec": round(time.time() - ts, 2),
+                              **{k: wide.get(k) for k in ("rows", "features", "path")
+                                 if k in wide}}
+
+            self._prog(vehicle, stage="done", elapsed=round(time.time() - t0, 2))
+            result = {
+                "vehicle": vehicle, "product": cfg["product"],
+                "raw_rows": rows, "raw_units": len(units), "errors": errors,
+                "event": {s: e["event_rows"] for s, e in event.items()},
+                "feature": feature["features"], "event_dates": ev_dates,
+                "wide": wide,
+                "elapsed_sec": round(time.time() - t0, 2),
+            }
+            rec["ok"] = not errors
+            return result
+        except Exception as e:
+            rec["error"] = str(e)[:500]
+            raise
+        finally:
+            rec["ended_ts"] = time.time()
+            rec["elapsed_sec"] = round(rec["ended_ts"] - t0, 2)
+            self.runs.append(rec)
+            # 알람 발행 훅 — raw 유닛 일부 실패(ok=False)는 feature 까지 정상이라 발행하지만,
+            # 중간에 터져 단계가 덜 돈 경우(error)는 옛 리포트를 발행하지 않는다.
+            if self.on_vehicle_done and not rec.get("error"):
                 try:
-                    rows[src] = rows.get(src, 0) + f.result()
-                except Exception as e:
-                    errors.append({"source": src, "date": str(start), "error": str(e)[:300]})
-                self._prog(vehicle, raw_done=done, source=src)
-
-        # 2) EVENT
-        self._prog(vehicle, stage="event", source=None)
-        event = self.pipe.run_event(vehicle)
-
-        # 3) FEATURE — event DB 전체 대상
-        ev_dates = self.pipe.event_date_count(vehicle)
-        self._prog(vehicle, stage="feature", event_dates=ev_dates)
-        feature = self.pipe.run_feature(vehicle)
-
-        # 4) WIDE — feature 전부를 ML_TABLE 로 병합
-        self._prog(vehicle, stage="wide")
-        wide = self.pipe.run_wide(vehicle)
-
-        self._prog(vehicle, stage="done", elapsed=round(time.time() - t0, 2))
-        result = {
-            "vehicle": vehicle, "product": cfg["product"],
-            "raw_rows": rows, "raw_units": len(units), "errors": errors,
-            "event": {s: e["event_rows"] for s, e in event.items()},
-            "feature": feature["features"], "event_dates": ev_dates,
-            "wide": wide,
-            "elapsed_sec": round(time.time() - t0, 2),
-        }
-        if self.on_vehicle_done:
-            try:
-                self.on_vehicle_done(vehicle, result)
-            except Exception:
-                pass
+                    self.on_vehicle_done(vehicle, rec)
+                except Exception:
+                    pass
         return result
 
-    # ── 전 vehicle 순회 (중복 실행 방지) ──
-    def run_all(self, plan: WorkerPlan | None = None, mode: str = "manual") -> dict:
+    # ── vehicle 순회 (중복 실행 방지). vehicles=None 이면 전 제품 ──
+    def run_all(self, plan: WorkerPlan | None = None, mode: str = "manual",
+                vehicles: list[str] | None = None) -> dict:
         if not self._run_lock.acquire(blocking=False):
             return {"ok": False, "skipped": "이미 실행 중", "progress": self.snapshot()}
         try:
             plan = plan or self.plan()
             t0 = time.time()
-            vehicles = list(self.pipe.vehicles().keys())
+            known = list(self.pipe.vehicles().keys())
+            vehicles = [v for v in (vehicles or known) if v in known]
+            if not vehicles:
+                return {"ok": True, "skipped": "대상 제품 없음", "mode": mode, "vehicles": {}}
             if mode == "loop":
                 self._loop_count += 1
             with self._lock:
@@ -147,7 +266,7 @@ class PipelineRunner:
             results: dict[str, dict] = {}
             with ThreadPoolExecutor(max_workers=plan.vehicle_workers,
                                     thread_name_prefix="vehicle") as ex:
-                futs = {ex.submit(self.run_vehicle, v, plan): v for v in vehicles}
+                futs = {ex.submit(self.run_vehicle, v, plan, mode): v for v in vehicles}
                 for f in as_completed(futs):
                     v = futs[f]
                     try:
@@ -181,27 +300,115 @@ class PipelineRunner:
                 self.progress["ts"] = time.time()
             self._run_lock.release()
 
-    # ── 백그라운드 루프 (schedule / loop) ──
+    # ── 락을 공유하는 단독 진입점들 ───────────────────────────────
+    def _enter(self, what: str):
+        """산출물 쓰기 구간 진입. 다른 실행 중이면 PipelineBusy."""
+        if not self._run_lock.acquire(blocking=False):
+            raise PipelineBusy(
+                f"{what}: 다른 파이프라인 실행이 진행 중입니다 "
+                f"(mode={self.snapshot().get('mode')}) — 끝난 뒤 다시 시도하세요")
+
+    def run_vehicle_once(self, vehicle: str) -> dict:
+        """수동 단건 실행 (raw→event→feature→wide→unmatched). 스케줄러와 락 공유.
+        스케줄 실행과 같은 경로를 타므로 실행 로그·진행상황이 똑같이 남는다."""
+        self.pipe.vehicle_cfg(vehicle)          # 없는 vehicle 이면 여기서 ValueError → 404
+        self._enter(f"{vehicle} 실행")
+        try:
+            plan = self.plan()
+            self._raw_sem = threading.BoundedSemaphore(max(1, plan.raw_workers))
+            with self._lock:
+                self.progress = {"running": True, "mode": "manual", "loop": False,
+                                 "loop_iter": self._loop_count, "started": time.time(),
+                                 "ts": time.time(), "vehicles": {vehicle: {"stage": "queued"}}}
+            result = self.run_vehicle(vehicle, plan, mode="manual")
+            try:
+                result["unmatched"] = self.pipe.scan_unmatched(vehicle)
+            except Exception as e:
+                result["unmatched"] = {"error": str(e)[:300]}
+            return result
+        finally:
+            with self._lock:
+                self.progress["running"] = False
+                self.progress["ts"] = time.time()
+            self._run_lock.release()
+
+    def run_wide_once(self, vehicle: str) -> dict:
+        self._enter(f"{vehicle} wide")
+        try:
+            return self.pipe.run_wide(vehicle)
+        finally:
+            self._run_lock.release()
+
+    def run_send_form_once(self) -> dict:
+        self._enter("send form")
+        try:
+            return self.pipe.run_send_form()
+        finally:
+            self._run_lock.release()
+
+    def rebuild_after_config_change(self, timeout: float = 1800) -> dict:
+        """매칭 csv 갱신 후 전 vehicle event/feature/wide 재생성 + 알람 재발행.
+
+        여기서는 skip 하지 않고 **기다린다** — 건너뛰면 옛 매칭 기준 산출물이
+        그대로 남아 flow 로 나간다. 실행 중인 run_all 이 끝나면 이어서 돈다.
+        결과는 last_rebuild 에 남긴다 (예전엔 예외를 조용히 삼켜 실패가 안 보였다).
+        """
+        t0 = time.time()
+        if not self._run_lock.acquire(timeout=timeout):
+            out = {"ok": False, "waited_sec": round(time.time() - t0, 1),
+                   "error": f"실행 락 대기 시간 초과({timeout}s) — 재생성 건너뜀"}
+            self.last_rebuild = out
+            return out
+        try:
+            done, errors = [], {}
+            for v in self.pipe.vehicles():
+                try:
+                    self._prog(v, stage="rebuild")
+                    self.pipe.run_event(v)
+                    self.pipe.run_feature(v)
+                    wide = self.pipe.run_wide(v)
+                    done.append(v)
+                    self._prog(v, stage="done")
+                    if self.on_vehicle_done:
+                        self.on_vehicle_done(v, wide)
+                except Exception as e:
+                    errors[v] = str(e)[:300]
+                    self._prog(v, stage="error", error=str(e)[:200])
+            try:
+                self.pipe.run_send_form()
+            except Exception as e:
+                errors["send_form"] = str(e)[:300]
+            out = {"ok": not errors, "vehicles": done, "errors": errors,
+                   "waited_sec": round(time.time() - t0, 1), "ts": t0}
+            self.last_rebuild = out
+            return out
+        finally:
+            self._run_lock.release()
+
+    # ── 백그라운드 루프 (제품별 주기 / loop) ──
     async def _loop(self):
+        """sched_tick_sec 마다 due 인 제품만 골라 돌린다.
+        제품마다 runs_per_day 가 달라도 한 루프가 전부 커버한다."""
         while True:
             rt = self.runtime_cfg()
-            loop_on = bool(rt.get("loop_enabled"))
-            interval = float(rt.get("interval_hours") or 0) * 3600
-            sched_on = bool(rt.get("schedule_enabled")) and interval > 0
-            if loop_on:
+            if rt.get("loop_enabled"):
                 try:
                     await asyncio.to_thread(self.run_all, None, "loop")
                 except Exception:
                     pass
                 await asyncio.sleep(max(2.0, float(rt.get("loop_gap_sec") or 3)))
-            elif sched_on:
-                try:
-                    await asyncio.to_thread(self.run_all, None, "schedule")
-                except Exception:
-                    pass
-                await asyncio.sleep(max(60.0, interval))
-            else:
-                await asyncio.sleep(5)    # 비활성 — 루프/스케줄 토글 빠르게 감지
+                continue
+            tick = max(10.0, float(rt.get("sched_tick_sec") or 60))
+            if not rt.get("schedule_enabled"):
+                await asyncio.sleep(5)    # 비활성 — 토글을 빠르게 감지
+                continue
+            try:
+                due = self.due_vehicles()
+                if due:
+                    await asyncio.to_thread(self.run_all, None, "schedule", due)
+            except Exception:
+                pass
+            await asyncio.sleep(tick)
 
     def start_background(self):
         if self._bg_task is None or self._bg_task.done():

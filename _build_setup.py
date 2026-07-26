@@ -29,10 +29,12 @@ CODE_FILES = ["app.py", "README.md", "VERSION.json", "requirements.txt", "pytest
 EXCLUDE_PARTS = {
     "__pycache__", ".git", "node_modules", "dist",
     # 런타임/보관 디렉토리 — 어떤 경로 아래에 있어도 제외 (defense in depth)
-    "db", "logs", "staging", "s3_local", "data",
+    "db", "logs", "staging", "s3_local", "s3_outbox", "data",
     "reference", "backup", "archive", "valve.egg-info", ".claude",
 }
-CONFIG_EXCLUDE_NAMES = {"probe_cache.json", "settings.local.json"}
+# s3_jobs.yaml 은 설치 사이트의 csv_sync.yaml/s3_transfer.yaml 에서 최초 기동 때
+# 자동 생성된다 — 개발 PC 의 key/dest 가 seed 로 새어나가지 않게 번들에서 제외.
+CONFIG_EXCLUDE_NAMES = {"probe_cache.json", "settings.local.json", "s3_jobs.yaml"}
 
 
 def _excluded(p: Path) -> bool:
