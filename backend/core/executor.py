@@ -129,9 +129,11 @@ class ChunkExecutor:
         params["dateFrom"] = t0.isoformat()
         params["dateTo"] = t1.isoformat()
 
-        # shard filter → 해당 컬럼명을 키로 그대로 IN 필터 주입 (기존 값 override)
+        # shard filter → 해당 컬럼명을 키로 그대로 IN 필터 주입 (기존 값 override).
+        # 빈 목록은 주입하지 않는다 — `in ()` 는 사내 API 가 SQL 에러를 낸다.
         for col, vals in (chunk.shard_filters or {}).items():
-            params[col] = {"op": "in", "value": list(vals)}
+            if vals:
+                params[col] = {"op": "in", "value": list(vals)}
         return params
 
     # ─── staging ───

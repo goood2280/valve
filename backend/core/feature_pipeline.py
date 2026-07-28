@@ -40,6 +40,7 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import json
+import os
 import random
 import re
 import shutil
@@ -51,6 +52,24 @@ import polars as pl
 import yaml
 
 KEY_COLS = ["root_lot_id", "wafer_id"]
+
+# 매칭알람(unmatched_step)에 실어 보낼 raw 열 기본값 — pipeline.yaml
+# unmatched_scan.alert_cols 로 override (알람 탭 ⚙). raw 에 없는 열은 조용히 빠진다.
+ALERT_COLS_DEFAULT = ["eqp_id", "eqp_model"]
+ALERT_EXAMPLE_LIMIT_DEFAULT = 3
+
+
+def alert_scan_cols(us_cfg: dict) -> list[str]:
+    """unmatched_scan 설정에서 알람 전송 열 목록 (미설정 시 코드 기본값)."""
+    cols = us_cfg.get("alert_cols")
+    if not isinstance(cols, list):
+        cols = ALERT_COLS_DEFAULT
+    out: list[str] = []
+    for c in cols:
+        c = str(c).strip()
+        if c and c not in out:
+            out.append(c)
+    return out
 
 # 추출 소스 기본값 — config/pipeline.yaml 의 sources 로 override (테이블명/컬럼 조절)
 DEFAULT_SOURCES = {
@@ -540,7 +559,16 @@ class FeaturePipeline:
 
     # ── db 경로 ──
     def db_root(self) -> Path:
-        return self.root / self.global_cfg().get("db_root", "db")
+        """파이프라인 DB 루트 — 우선순위: VALVE_DB_ROOT 환경변수 > pipeline.yaml
+        db_root (절대경로 허용, 예: D:/Valve_DB) > ROOT/db.
+        설치본과 다른 드라이브에 DB 를 둘 수 있다 (사내: 앱은 C:, DB 는 D:)."""
+        try:
+            cfg_val = self.global_cfg().get("db_root")
+        except Exception:      # pipeline.yaml 미생성(첫 기동/테스트) — 기본값
+            cfg_val = None
+        raw = os.environ.get("VALVE_DB_ROOT") or str(cfg_val or "db")
+        p = Path(raw).expanduser()
+        return p if p.is_absolute() else (self.root / p)
 
     def raw_dir(self, vehicle: str, source: str) -> Path:
         # raw 는 소스 > vehicle > date=hive 파티션 (FAB/{vehicle}/date=…).
@@ -1399,7 +1427,8 @@ class FeaturePipeline:
         if raw is None:
             raise RuntimeError("FAB raw 없음 — raw 단계를 먼저 실행하세요")
         matched = set(self.step_map(vehicle)["step_id"].to_list())
-        excl = ((self.global_cfg().get("unmatched_scan") or {}).get("exclude") or {})
+        us_cfg = self.global_cfg().get("unmatched_scan") or {}
+        excl = us_cfg.get("exclude") or {}
         eqp_pats = [str(p) for p in (excl.get("eqp_id") or [])]
         model_pats = [str(p) for p in (excl.get("eqp_model") or [])]
 
@@ -1436,14 +1465,76 @@ class FeaturePipeline:
             else:
                 unmatched.append(row)
 
+        step_extras, present_cols = self._alert_step_extras(
+            raw, {x["step_id"] for x in unmatched}, us_cfg)
         report = {"product": cfg["product"], "vehicle": vehicle,
                   "unmatched": unmatched, "excluded": excluded,
-                  "exclude_config": {"eqp_id": eqp_pats, "eqp_model": model_pats}}
+                  "exclude_config": {"eqp_id": eqp_pats, "eqp_model": model_pats},
+                  "alert_cols": present_cols, "step_extras": step_extras}
         rdir = self.report_dir(vehicle)
         rdir.mkdir(parents=True, exist_ok=True)
         (rdir / "unmatched.json").write_text(
             json.dumps(report, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
         return report
+
+    def _alert_step_extras(self, raw: pl.DataFrame, steps: set,
+                           us_cfg: dict) -> tuple[dict, list[str]]:
+        """미매칭 step 별 알람 부가정보 — flow 매칭알람 화면과 function step
+        추천(LLM)의 입력이 된다.
+
+        반환: ({step_id: {examples: [{root_lot_id, wafer_id}, …],
+                          cols: {열: "값1, 값2"}}}, 실제 존재한 전송 열 목록)
+        examples 는 (root_lot_id, wafer_id) 쌍 최대 example_limit 개,
+        cols 는 unmatched_scan.alert_cols 중 raw 에 있는 열의 대표값(unique 최대 5개).
+        """
+        try:
+            limit = max(1, min(20, int(us_cfg.get("example_limit")
+                                       or ALERT_EXAMPLE_LIMIT_DEFAULT)))
+        except (TypeError, ValueError):
+            limit = ALERT_EXAMPLE_LIMIT_DEFAULT
+        use_cols = [c for c in alert_scan_cols(us_cfg)
+                    if c in raw.columns and c not in ("step_id", "step_desc")]
+        if not steps:
+            return {}, use_cols
+        sub = raw.filter(pl.col("step_id").is_in(list(steps)))
+        pair_cols = [c for c in KEY_COLS if c in sub.columns]
+        aggs = []
+        if pair_cols:
+            # limit 보다 넉넉히 뽑아 두고 아래에서 lot 다양성 우선으로 추린다
+            aggs.append(pl.struct(pair_cols).unique(maintain_order=True)
+                        .head(max(50, limit * 10)).alias("_examples"))
+        for c in use_cols:
+            aggs.append(pl.col(c).cast(pl.Utf8).drop_nulls()
+                        .unique(maintain_order=True).head(5).alias(f"_col_{c}"))
+        if not aggs:
+            return {}, use_cols
+        out: dict[str, dict] = {}
+        for r in sub.group_by("step_id").agg(aggs).iter_rows(named=True):
+            entry: dict = {"examples": [], "cols": {}}
+            pairs = [{k: ("" if v is None else str(v)) for k, v in (e or {}).items()}
+                     for e in (r.get("_examples") or [])]
+            # 서로 다른 lot 을 우선(lot 당 첫 wafer), 모자라면 나머지 쌍으로 채움
+            seen_lots: set = set()
+            picked: list[dict] = []
+            for p in pairs:
+                lot = p.get("root_lot_id")
+                if lot in seen_lots:
+                    continue
+                seen_lots.add(lot)
+                picked.append(p)
+                if len(picked) >= limit:
+                    break
+            for p in pairs:
+                if len(picked) >= limit:
+                    break
+                if p not in picked:
+                    picked.append(p)
+            entry["examples"] = picked
+            for c in use_cols:
+                vals = [str(v) for v in (r.get(f"_col_{c}") or []) if str(v or "")]
+                entry["cols"][c] = ", ".join(vals)
+            out[str(r["step_id"])] = entry
+        return out, use_cols
 
     # ─────────────────────────────────────────
     # 전체 실행

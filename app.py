@@ -183,9 +183,13 @@ _OUTBOX_PREFIX = pipeline_router.alerts.prefix
 if _OUTBOX_SYNC_DIR:
     _OUTBOX_SYNC_DIR.mkdir(parents=True, exist_ok=True)
 
+# 파이프라인 DB 루트 — pipeline.yaml db_root (절대경로면 다른 드라이브도 가능,
+# 사내: 앱은 C: 바탕화면, DB 는 D:/Valve_DB)
+_DB_ROOT = pipeline_router._pipe.db_root()
+
 browser_router.deps(
     STAGING_DIR, S3_LOCAL_DIR,
-    extra_roots={"config": CONFIG_DIR, "db": ROOT / "db",
+    extra_roots={"config": CONFIG_DIR, "db": _DB_ROOT,
                  **({"outbox": _OUTBOX_SYNC_DIR} if _OUTBOX_SYNC_DIR else {})},
     annotator=s3_link.build_annotator(pipeline_router.csv_sync, s3, _s3queue),
     s3=s3, csv_sync=pipeline_router.csv_sync,
@@ -212,7 +216,7 @@ from backend.core.s3_jobs import S3Jobs  # noqa: E402
 s3jobs = S3Jobs(
     root=ROOT,
     uploader_for=browser_router._uploader_for,
-    roots={"config": CONFIG_DIR, "staging": STAGING_DIR, "db": ROOT / "db",
+    roots={"config": CONFIG_DIR, "staging": STAGING_DIR, "db": _DB_ROOT,
            **({"outbox": _OUTBOX_SYNC_DIR} if _OUTBOX_SYNC_DIR else {})},
     # 매칭 csv 를 새로 받으면 event/feature 재생성 — csv_sync 와 같은 훅
     on_downloaded=lambda paths: pipeline_router.on_config_downloaded(paths),
@@ -220,6 +224,10 @@ s3jobs = S3Jobs(
 _migrated = s3jobs.migrate_if_empty(pipeline_router.csv_sync, browser_router.transfer_rules())
 if _migrated:
     print(f"[valve] s3_jobs: 기존 설정에서 {_migrated}개 항목 이관 → config/s3_jobs.yaml")
+# 매칭알람 폴더는 항상 폴더 단위 업로드 항목으로 — flow 가 읽는 valve-alerts/… 를
+# db 폴더와 같은 전송 엔진(탐색기 ⚙)이 주기 sync 한다.
+if s3jobs.ensure_outbox_item(_OUTBOX_PREFIX):
+    print("[valve] s3_jobs: 매칭알람 outbox 업로드 항목 시드 (up_valve_alerts)")
 s3_jobs_router.deps(s3jobs)
 app.include_router(s3_jobs_router.router)
 
@@ -292,6 +300,16 @@ def version():
 
 # ─── frontend static (v0.2 에서 index.html 추가 예정) ───
 if FRONTEND_DIR.exists() and any(FRONTEND_DIR.iterdir()):
+    # no-cache = 매 요청 재검증(304) — 업데이트 후 브라우저가 구버전 app.js 를
+    # 계속 쓰는 문제 방지 (내용이 같으면 304 라 비용은 거의 없다)
+    @app.middleware("http")
+    async def _revalidate_static(request, call_next):
+        resp = await call_next(request)
+        p = request.url.path
+        if p == "/" or p.endswith((".js", ".css", ".html")):
+            resp.headers["Cache-Control"] = "no-cache"
+        return resp
+
     app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
 else:
     @app.get("/")

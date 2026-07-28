@@ -170,7 +170,8 @@ class Planner:
             est = int(n_sample * (24.0 / max(hours, 1e-6)))
             shards: list = []
             if first_shard and first_shard in df.columns:
-                shards = [str(s) for s in df[first_shard].unique().to_list()]
+                # 해당 날짜에 lot 이 하나도 없으면 그대로 빈 목록 — 단일 chunk 로 진행
+                shards = [str(s) for s in df[first_shard].drop_nulls().unique().to_list()]
             return {
                 "strategy": "sample_window",
                 "sample_hours": hours,
@@ -208,7 +209,7 @@ class Planner:
             first = shard_keys[0] if shard_keys else None
             shards = []
             if first and first in df.columns:
-                shards = [str(s) for s in df[first].unique().to_list()]
+                shards = [str(s) for s in df[first].drop_nulls().unique().to_list()]
             return {
                 "strategy": "projection",
                 "estimated_rows": len(df),

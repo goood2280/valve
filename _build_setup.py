@@ -298,6 +298,37 @@ def list_snapshots(argv: list = None) -> int:
 
 
 # ── 명령 ───────────────────────────────────────────────────────────────
+def _ensure_db_root() -> None:
+    """사내 배치 표준 — 설치본이 C: 드라이브(바탕화면 등)에 있고 D: 드라이브가
+    있으면 파이프라인 DB 는 D:/Valve_DB 에 둔다. config/pipeline.yaml 의 db_root 가
+    기본값 'db' 그대로일 때만 바꾸고(운영자가 지정한 값은 존중), 해당 줄만 교체해
+    파일의 다른 내용/주석은 건드리지 않는다. 앱 쪽 우선순위:
+    VALVE_DB_ROOT 환경변수 > pipeline.yaml db_root > ROOT/db."""
+    if os.name != 'nt':
+        return
+    try:
+        if str(ROOT.drive).upper() != 'C:' or not Path('D:/').exists():
+            return
+        cfgp = ROOT / 'config' / 'pipeline.yaml'
+        if not cfgp.exists():
+            return
+        lines = cfgp.read_text(encoding='utf-8').splitlines(keepends=True)
+        for i, ln in enumerate(lines):
+            if not ln.startswith('db_root:'):
+                continue
+            val = ln.split(':', 1)[1].strip().strip('\\'"')
+            if val != 'db':
+                return                       # 운영자가 이미 지정 — 존중
+            nl = '\\r\\n' if ln.endswith('\\r\\n') else '\\n'
+            lines[i] = 'db_root: D:/Valve_DB' + nl
+            cfgp.write_text(''.join(lines), encoding='utf-8')
+            Path('D:/Valve_DB').mkdir(parents=True, exist_ok=True)
+            print('[extract] db_root -> D:/Valve_DB (설치본이 C: — DB 는 D: 드라이브)')
+            return
+    except Exception as e:
+        print(f'[extract] db_root 자동 설정 실패(무시): {e}')
+
+
 def extract() -> int:
     print(f'[extract] valve {_version_time_label()} starting')
     snap = None
@@ -323,6 +354,7 @@ def extract() -> int:
         _verify_and_restore(snap)
     except Exception as e:
         print(f'[verify] WARN failed: {e}')
+    _ensure_db_root()
     print(f'[extract] code {n_code} written · config seed {seeded} written / '
           f'{preserved} preserved -> {ROOT}')
     print('[extract] manual restore: python setup.py restore [latest|<timestamp>]')

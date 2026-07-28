@@ -29,6 +29,8 @@ import json
 import time
 from pathlib import Path
 
+from backend.core.feature_pipeline import alert_scan_cols
+
 SUPPRESS_STATUSES = ("미확인예정", "반영불필요")
 
 
@@ -48,6 +50,13 @@ class AlertStore:
     def _s3_enabled(self) -> bool:
         """alerts.s3_enabled — 알람 JSON/ack 의 S3 업로드·다운로드 사용 여부."""
         return bool((self.settings.get("alerts") or {}).get("s3_enabled", True))
+
+    def alert_cols(self) -> list[str]:
+        """⚙ 로 설정한 알람 전송 열 (pipeline.yaml unmatched_scan.alert_cols)."""
+        try:
+            return alert_scan_cols(self.pipe.global_cfg().get("unmatched_scan") or {})
+        except Exception:
+            return []
 
     def _ack_key(self) -> str:
         return f"{self.prefix}/pipeline/ack.json"
@@ -130,6 +139,7 @@ class AlertStore:
         except RuntimeError:
             unm = None
         if unm:
+            extras = unm.get("step_extras") or {}
             by_step: dict[str, dict] = {}
             for x in unm["unmatched"]:
                 g = by_step.setdefault(x["step_id"], {
@@ -145,9 +155,16 @@ class AlertStore:
                 g["eqp_model"].add(x.get("eqp_model", ""))
                 g["rows"] += x["rows"]
                 g["n_lots"] = max(g["n_lots"], x.get("n_lots", 0))
-            for g in by_step.values():
+            for sid, g in by_step.items():
                 g["eqp_id"] = ", ".join(sorted(filter(None, g["eqp_id"])))
                 g["eqp_model"] = ", ".join(sorted(filter(None, g["eqp_model"])))
+                # 알람 부가정보 — 예시 lot/wafer 쌍 + ⚙ 로 설정한 전송 열.
+                # 기존 키(eqp 합산값 등)와 겹치는 열은 덮지 않는다.
+                ext = extras.get(str(sid)) or {}
+                g["examples"] = ext.get("examples") or []
+                for c, val in (ext.get("cols") or {}).items():
+                    if c not in g:
+                        g[c] = val
                 rows.append(g)
 
         by_ppid: dict[str, dict] = {}
@@ -213,7 +230,8 @@ class AlertStore:
         alerts.sort(key=lambda a: (a["status"] != "active", a["type"], a["vehicle"], a["step_id"]))
         active = sum(1 for a in alerts if a["status"] == "active")
         return {"alerts": alerts, "active": active,
-                "suppressed": len(alerts) - active, "ack_key": self._ack_key()}
+                "suppressed": len(alerts) - active, "ack_key": self._ack_key(),
+                "alert_cols": self.alert_cols()}
 
     # ── 발행 스냅샷 메타 (직전 발행 = 상태. event DB 갱신/재알람 판단 근거) ──
     def _pub_meta_path(self, vehicle: str) -> Path:
@@ -255,6 +273,7 @@ class AlertStore:
         payload = {
             "vehicle": vehicle, "ts": now, "count": len(active_ids),
             "suppressed": len(cur) - len(active_ids),
+            "alert_cols": self.alert_cols(),   # flow 가 동적 열 렌더링에 사용
             "fp": self._fingerprint(cur, ack),
             "delta": {"new": sorted(active_ids - prev_active),
                       "resolved": sorted(prev_active - active_ids)},

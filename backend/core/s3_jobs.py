@@ -344,8 +344,10 @@ class S3Jobs:
         if base.is_file():
             files = [("", base)]
         else:
+            # .tmp 는 원자적 저장의 중간 파일 — 올리면 S3 에 쓰레기가 남는다
             files = [(str(p.relative_to(base)).replace("\\", "/"), p)
-                     for p in sorted(base.rglob("*")) if p.is_file()]
+                     for p in sorted(base.rglob("*"))
+                     if p.is_file() and p.suffix != ".tmp"]
         moved = skipped = failed = 0
         cancelled = False
         self._progress(item_id, total=len(files), done=0)
@@ -428,6 +430,37 @@ class S3Jobs:
         if self._sched_task and not self._sched_task.done():
             self._sched_task.cancel()
         self._sched_task = None
+
+    # ── 매칭알람 outbox 폴더 업로드 항목 보장 ────────────────
+    def ensure_outbox_item(self, key_prefix: str) -> bool:
+        """알람 outbox 폴더(= flow 매칭알람이 읽는 valve-alerts/…)를 폴더 단위
+        업로드 항목으로 보장한다 — 탐색기 db 폴더 항목과 같은 전송 엔진을 탄다.
+
+        사용자가 만졌을 수 있는 항목은 존중한다. 승격 대상은 migrate_if_empty 가
+        만든 '수동 전용' 이관 시드(비활성 · 주기 0 · 이관 note 그대로)뿐 —
+        그 외 outbox 업로드 항목이 있으면 그대로 두고, 없으면 새로 시드."""
+        if "outbox" not in self.roots or not str(key_prefix or "").strip():
+            return False
+        cfg = self.load()
+        note = "매칭알람 폴더 → flow (pipeline/{vehicle}.json · 자동 시드)"
+        for it in cfg.get("items") or []:
+            if it.get("direction") != "upload" or it.get("root") != "outbox":
+                continue
+            untouched_seed = (not it.get("enabled")
+                              and not it.get("interval_min")
+                              and str(it.get("note") or "").startswith("s3_transfer.yaml 에서 이관"))
+            if untouched_seed:
+                it.update({"enabled": True, "interval_min": 10,
+                           "key": str(key_prefix).strip("/"), "note": note})
+                self.save(cfg)
+                return True
+            return False
+        cfg["items"].append(self.validate({
+            "id": "up_valve_alerts", "direction": "upload", "root": "outbox",
+            "target": "", "dest": "default", "key": str(key_prefix).strip("/"),
+            "mode": "sync", "interval_min": 10, "enabled": True, "note": note}))
+        self.save(cfg)
+        return True
 
     # ── csv_sync.yaml / s3_transfer.yaml → 항목 1회 이관 ────
     def migrate_if_empty(self, csv_sync=None, transfer_rules: dict | None = None) -> int:

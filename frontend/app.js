@@ -2498,7 +2498,7 @@ async function loadAlerts() {
   const wrap = $('#alWrap');
   if (!wrap) return;
   try {
-    const [status, alerts, cfg, csvInfo, outbox, sched, runs] = await Promise.all([
+    const [status, alerts, cfg, csvInfo, outbox, sched, runs, s3items] = await Promise.all([
       api.get('/api/pipeline/status'),
       api.get('/api/pipeline/alerts'),
       api.get('/api/pipeline/config'),
@@ -2506,6 +2506,7 @@ async function loadAlerts() {
       api.get('/api/pipeline/alerts/outbox').catch(() => null),
       api.get('/api/pipeline/schedule').catch(() => null),
       api.get('/api/pipeline/runs?limit=60').catch(() => null),
+      api.get('/api/s3/items').catch(() => null),
     ]);
     wrap.innerHTML = '';
 
@@ -2540,7 +2541,8 @@ async function loadAlerts() {
     ));
     wrap.append(alAlertTable(alerts));
 
-    if (outbox) wrap.append(alOutbox(outbox));
+    if (outbox) wrap.append(alOutbox(outbox, s3items));
+    wrap.append(alAlertColsEditor(cfg, alerts));
     wrap.append(alExcludeEditor(cfg));
     wrap.append(alCsvSync(csvInfo));
   } catch (e) {
@@ -2619,6 +2621,10 @@ const AL_TYPE = {
 let AL_SHOW_SUPPRESSED = false;
 
 function alAlertTable(data) {
+  // 전송 열은 ⚙ 설정(unmatched_scan.alert_cols)을 그대로 따른다 — flow 화면과 동일 구성
+  const extraCols = (data.alert_cols && data.alert_cols.length) ? data.alert_cols : ['eqp_id', 'eqp_model'];
+  const exText = (a) => (a.examples || [])
+    .map((e) => [e.root_lot_id, e.wafer_id].filter(Boolean).join('·')).join(', ');
   const rows = data.alerts
     .filter((a) => AL_SHOW_SUPPRESSED || a.status === 'active')
     .map((a) => {
@@ -2636,15 +2642,16 @@ function alAlertTable(data) {
         el('td', {}, a.step_desc || ''),
         el('td', { class: 'mono', style: a.ppid ? { color: t.color, fontWeight: 700 } : {} }, a.ppid || '-'),
         el('td', { class: 'mono', style: { fontSize: '11px', color: 'var(--text-muted)' } }, a.split || '-'),
-        el('td', { class: 'mono' }, a.eqp_id || '-'),
-        el('td', { class: 'mono' }, a.eqp_model || '-'),
+        ...extraCols.map((c) => el('td', { class: 'mono' }, a[c] || '-')),
+        el('td', { class: 'mono', style: { fontSize: '11px' }, title: exText(a) }, exText(a) || '-'),
         el('td', { class: 'mono' }, String(a.n_lots || '')),
         el('td', { class: 'mono' }, String(a.rows || '')),
         el('td', {}, sel),
       );
     });
   return alTable(
-    ['유형', 'vehicle', 'product', 'step_id', 'step_desc', 'ppid', 'split', 'eqp_id', 'eqp_model', 'lots', 'rows', '상태'],
+    ['유형', 'vehicle', 'product', 'step_id', 'step_desc', 'ppid', 'split',
+      ...extraCols, '예시 lot·wafer', 'lots', 'rows', '상태'],
     rows,
   );
 }
@@ -2743,16 +2750,15 @@ function runDetailText(r) {
   return L.join('\n') || '기록된 단계 없음';
 }
 
-// 알람 업로드 폴더 (Valve → S3 → flow 매칭알람). 이 폴더 하나만 sync 하면 된다.
-function alOutbox(ob) {
+// 알람 업로드 폴더 (Valve → S3 → flow 매칭알람). 이 폴더 하나가 폴더 단위로 전송된다.
+function alOutbox(ob, s3items) {
   const box = el('div', { style: { borderTop: AL_HAIR, marginTop: '20px', paddingTop: '12px' } },
-    alSub('S3 업로드 폴더', 'flow 매칭알람이 읽는 파일 — 이 폴더만 S3 로 sync 하면 된다 (트리 = S3 key)'));
+    alSub('S3 업로드 폴더', 'flow 매칭알람이 읽는 파일 — 이 폴더가 통째로 전송 항목을 타고 올라간다 (트리 = S3 key)'));
   if (!ob.enabled) {
     box.append(el('div', { class: 'alert warn', style: { fontSize: '12px' } },
       '미설정 — 설정 탭 alerts.outbox_dir 을 채우면 발행 시 이 폴더로 미러링된다.'));
     return box;
   }
-  const cmd = `aws s3 sync "${ob.sync_dir}" s3://<bucket>/${ob.s3_prefix} --exclude "*.tmp"`;
   box.append(el('div', { style: { fontSize: '12px', display: 'flex', gap: '14px', flexWrap: 'wrap', alignItems: 'center', margin: '6px 0' } },
     el('span', { style: { color: 'var(--text-muted)' } }, '폴더'),
     el('span', { class: 'mono' }, ob.sync_dir),
@@ -2760,7 +2766,28 @@ function alOutbox(ob) {
     el('span', { class: 'mono' }, ob.s3_prefix),
     el('span', { style: { color: 'var(--text-muted)' } }, `발행 주기 ${ob.interval_min || 0}분`),
   ));
-  box.append(el('div', { class: 'mono', style: { fontSize: '11px', color: 'var(--text-muted)', margin: '2px 0 8px', wordBreak: 'break-all' } }, cmd));
+  // 이 폴더를 올리는 전송 항목 (탐색기 ⚙ 과 같은 엔진 — db 폴더 전송과 동일)
+  const item = ((s3items || {}).items || []).find((i) => i.direction === 'upload' && i.root === 'outbox');
+  if (item) {
+    const st = item.status || {};
+    const stTxt = item.is_running ? '전송 중…'
+      : st.last_status ? `최근 ${st.last_status}${st.last_end ? ' · ' + new Date(st.last_end * 1000).toLocaleString() : ''}` : '실행 이력 없음';
+    box.append(el('div', { style: { fontSize: '12px', display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'center', margin: '2px 0 8px' } },
+      el('span', { style: { color: 'var(--text-muted)' } }, '전송 항목'),
+      el('span', { class: 'mono' }, item.id),
+      el('span', {}, item.enabled && item.interval_min > 0 ? `자동 · ${item.interval_min}분 주기` : '수동 전용'),
+      el('span', { style: { color: 'var(--text-muted)' } }, stTxt),
+      el('button', { class: 'btn', disabled: item.is_running ? '' : undefined, onclick: async (ev) => {
+        ev.target.disabled = true; ev.target.textContent = '전송 중…';
+        try { await api.post('/api/s3/run', { id: item.id }); } catch (e) { alert(e.message); }
+        setTimeout(loadAlerts, 1200);
+      } }, '▶ 지금 업로드'),
+      el('span', { class: 'hint' }, '주기/연결 변경은 탐색기 ⚙'),
+    ));
+  } else {
+    const cmd = `aws s3 sync "${ob.sync_dir}" s3://<bucket>/${ob.s3_prefix} --exclude "*.tmp"`;
+    box.append(el('div', { class: 'mono', style: { fontSize: '11px', color: 'var(--text-muted)', margin: '2px 0 8px', wordBreak: 'break-all' } }, cmd));
+  }
   box.append(alTable(['key', '크기', '갱신'], (ob.files || []).map((f) => el('tr', {},
     el('td', { class: 'mono' }, f.key),
     el('td', { class: 'mono' }, `${f.size} B`),
@@ -2830,6 +2857,37 @@ function alCsvSync(info) {
     el('button', { class: 'btn', style: { marginTop: '6px' }, onclick: () => {
       tbl.querySelector('tbody').append(mkRow({ key: '', dest: '' }));
     } }, '+ 파일 추가'),
+  );
+}
+
+// ⚙ 매칭알람 전송 열 — flow 로 보내는 알람에 실을 raw 열 + 예시 lot/wafer 개수.
+// 저장은 pipeline.yaml unmatched_scan.alert_cols / example_limit.
+function alAlertColsEditor(cfg, alerts) {
+  const us = cfg.unmatched_scan || {};
+  const cur = (us.alert_cols && Array.isArray(us.alert_cols)) ? us.alert_cols
+    : (alerts.alert_cols || ['eqp_id', 'eqp_model']);
+  const cols = el('input', { type: 'text', value: cur.join(', '), style: { width: '300px' } });
+  const limit = el('input', { type: 'number', value: String(us.example_limit || 3), min: '1', max: '20', style: { width: '54px' } });
+  const fabCols = (((cfg.sources || {}).FAB || {}).columns || []).join(', ');
+  return el('div', { style: { borderTop: AL_HAIR, marginTop: '20px', paddingTop: '12px' } },
+    alSub('⚙ 매칭알람 전송 열',
+      'flow 매칭알람(→ function step 추천)에 같이 실을 raw 열 — 쉼표 구분, raw 에 없는 열은 자동 제외. '
+      + '예시 (root_lot_id·wafer_id) 쌍은 항상 포함'),
+    el('div', { style: { fontSize: '12px', display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' } },
+      '전송 열', cols, '예시 개수', limit,
+      el('button', { class: 'btn', onclick: async (ev) => {
+        ev.target.disabled = true;
+        try {
+          await api.put('/api/pipeline/config/alert-cols', {
+            cols: cols.value.split(',').map((s) => s.trim()).filter(Boolean),
+            example_limit: Number(limit.value) || 3,
+          });
+        } catch (e) { alert(e.message); }
+        loadAlerts();
+      } }, '저장'),
+      el('span', { class: 'hint' }, '다음 파이프라인 실행/발행부터 반영'),
+    ),
+    el('div', { class: 'hint', style: { marginTop: '4px' } }, `FAB raw 열: ${fabCols}`),
   );
 }
 

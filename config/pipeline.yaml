@@ -44,6 +44,11 @@
 #                    flow 가 알람 판정을 반영해 내려준다. legacy 직접매핑 형식도 지원.
 #
 # unmatched_scan.exclude — 미매칭 step 스캔에서 뺄 eqp_id/eqp_model fnmatch 패턴
+# unmatched_scan.alert_cols — 매칭알람(unmatched_step)에 실어 보낼 raw 열 (알람 탭 ⚙).
+#                    raw 에 없는 열은 조용히 빠진다. 키가 없으면 코드 기본값
+#                    eqp_id, eqp_model. 예시 (root_lot_id, wafer_id) 쌍은 항상
+#                    example_limit 개까지 같이 실린다 — flow 매칭알람 화면과
+#                    function step 추천(LLM)의 입력.
 #
 # knob_skip — knob step 미통과(값이 빈) wafer 처리 -----------------------
 #   명시: ppid_knob.csv 의 AND 블록(같은 feature+rule_order 복수 행, category=SKIP,
@@ -69,8 +74,8 @@ runtime:
   sched_tick_sec: 60
   loop_enabled: false
   quiet_enabled: true
-  quiet_start: '00:00'
-  quiet_end: '02:00'
+  quiet_start: 00:00
+  quiet_end: 02:00
 sources:
   FAB:
     table: RAW_FAB_DATA
@@ -136,6 +141,10 @@ unmatched_scan:
     - AUX_*
     eqp_model:
     - MEA-*
+  alert_cols:
+  - eqp_id
+  - eqp_model
+  example_limit: 3
 knob_skip:
   enabled: true
   auto: true

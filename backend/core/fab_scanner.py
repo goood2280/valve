@@ -128,6 +128,11 @@ class LakeFabDbClient(FabDbClient):
         if eqp_filter:
             params[eqp_mode] = {"op": "in", "value": eqp_filter}
         df = self._run_query(params, columns)
+        # 해당 기간에 데이터가 없으면 어댑터가 빈 df(컬럼 없음)를 줄 수 있다 —
+        # 스캐너가 step_id/root_lot_id 를 바로 참조하므로 요청 컬럼 스키마를 보장한다.
+        missing = [c for c in columns if c not in df.columns]
+        if missing:
+            df = df.with_columns([pl.lit(None, dtype=pl.Utf8).alias(c) for c in missing])
         if "step_id" in df.columns:
             df = df.with_columns(pl.col("step_id").cast(pl.Utf8))
         return df

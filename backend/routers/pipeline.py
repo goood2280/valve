@@ -13,6 +13,7 @@
   GET  /api/pipeline/sources             소스별 테이블/컬럼 설정 (FAB·INLINE·VM)
   PUT  /api/pipeline/config/sources      소스별 테이블/컬럼 저장
   PUT  /api/pipeline/config/exclude      미매칭 스캔 exclude 패턴 저장
+  PUT  /api/pipeline/config/alert-cols   매칭알람 전송 열/예시 개수 저장 (알람 탭 ⚙)
 """
 from __future__ import annotations
 
@@ -208,6 +209,41 @@ def put_exclude(body: dict = Body(...)):
     }
     _p().save_global_cfg(cfg)
     return {"ok": True, "exclude": cfg["unmatched_scan"]["exclude"]}
+
+
+# 알람 행에 이미 고정으로 존재하는 키 — 전송 열 이름으로 쓰면 값이 덮이거나
+# flow 화면·ack 로직이 깨진다.
+RESERVED_ALERT_COLS = {
+    "id", "type", "vehicle", "product", "step_id", "step_desc", "ppid", "split",
+    "rows", "n_lots", "status", "note", "ack_note", "first_seen_ts",
+    "last_seen_ts", "examples", "decision", "excluded_by",
+}
+
+
+@router.put("/api/pipeline/config/alert-cols")
+def put_alert_cols(body: dict = Body(...)):
+    """매칭알람 전송 열 저장 — {cols: [...], example_limit: n} (알람 탭 ⚙).
+
+    cols 는 FAB raw 컬럼명 — raw 에 없는 열은 스캔 때 조용히 빠진다.
+    예시 (root_lot_id, wafer_id) 쌍은 항상 전송되며 example_limit 개까지."""
+    cols: list[str] = []
+    for c in (body.get("cols") or []):
+        c = str(c).strip()
+        if not c or c in cols:
+            continue
+        if c in RESERVED_ALERT_COLS:
+            raise HTTPException(400, f"예약된 열 이름: {c}")
+        cols.append(c)
+    try:
+        limit = max(1, min(20, int(body.get("example_limit") or 3)))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "example_limit 은 숫자")
+    cfg = _p().global_cfg()
+    us = cfg.setdefault("unmatched_scan", {})
+    us["alert_cols"] = cols
+    us["example_limit"] = limit
+    _p().save_global_cfg(cfg)
+    return {"ok": True, "alert_cols": cols, "example_limit": limit}
 
 
 @router.post("/api/pipeline/wide/{vehicle}")

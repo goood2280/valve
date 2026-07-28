@@ -195,7 +195,14 @@ class LakeAPI:
 
     @staticmethod
     def _to_polars(df) -> pl.DataFrame:
-        """pandas / polars 둘 다 polars 로 통일. pyarrow 버전 충돌 시 dict 경유 폴백."""
+        """pandas / polars 둘 다 polars 로 통일. pyarrow 버전 충돌 시 dict 경유 폴백.
+
+        사내 어댑터는 '해당 조건 데이터 없음' 을 None(또는 빈 list)으로 주기도 한다 —
+        조회 결과 없음은 에러가 아니라 빈 DataFrame 이다 (뒷단이 그대로 흘려보낸다)."""
+        if df is None:
+            return pl.DataFrame()
+        if isinstance(df, list) and not df:
+            return pl.DataFrame()
         if isinstance(df, pl.DataFrame):
             return df
         if isinstance(df, pd.DataFrame):

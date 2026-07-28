@@ -1,12 +1,26 @@
 {
   "name": "Valve",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "codename": "valve",
   "pairs_with": "flow",
   "purpose": "DataLake 수도꼭지 — 사내 API 에서 데이터를 뽑아 S3 로 흘려 flow 에 공급",
   "tagline": "turn the valve · feed the flow",
   "created": "2026-04-24",
   "changelog": [
+    {
+      "version": "0.3.4",
+      "date": "2026-07-28",
+      "tag": "feat",
+      "title": "매칭알람 전송 개편 (예시 lot/wafer · ⚙ 전송 열 · 폴더 단위 업로드) + 빈 쿼리 방어 + DB 루트 분리",
+      "changes": [
+        "매칭알람(unmatched_step)에 예시 (root_lot_id, wafer_id) 쌍(서로 다른 lot 우선, 기본 3개)과 전송 열(기본 eqp_id/eqp_model, raw 에 있으면만)을 동봉 — flow 매칭알람 화면이 동적 열로 표시하며 function step 추천(LLM)의 입력이 된다",
+        "알람 탭 ⚙ 매칭알람 전송 열 — 보낼 raw 열/예시 개수를 편집 (pipeline.yaml unmatched_scan.alert_cols/example_limit, PUT /api/pipeline/config/alert-cols, 예약 키 거부)",
+        "매칭알람 폴더 단위 전송 — s3_outbox/valve-alerts 를 s3_jobs 업로드 항목(up_valve_alerts, sync·10분 주기)으로 자동 시드. 탐색기 db 폴더와 같은 전송 엔진을 타며, 알람 탭에서 항목 상태·▶ 지금 업로드 제공. 업로드 시 *.tmp 제외",
+        "raw 쿼리 빈 결과 방어 — 해당 날짜에 root_lot_id 가 없어도 에러 없이 빈 결과로 흐른다: 어댑터가 None/빈 값을 줘도 빈 DataFrame 으로, 빈 shard 목록은 in () 필터로 주입하지 않음, probe 의 null shard 제거, FAB 스캔 쿼리는 요청 컬럼 스키마 보장",
+        "DB 루트 분리 — pipeline.yaml db_root 가 절대경로(예: D:/Valve_DB) 지원 + VALVE_DB_ROOT 환경변수 우선. setup.py extract: 설치본이 C: 드라이브이고 D: 가 있으면 db_root 를 D:/Valve_DB 로 자동 설정 (운영자가 바꾼 값은 존중). 탐색기/전송의 db 루트도 같은 경로를 따름",
+        "정적파일 no-cache 재검증 — 업데이트 후에도 브라우저가 구버전 app.js 를 계속 쓰던 문제 (내용 같으면 304)"
+      ]
+    },
     {
       "version": "0.3.3",
       "date": "2026-07-28",
