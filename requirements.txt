@@ -1,3 +1,15 @@
+# Valve 백엔드 의존성 — Python 3.10 이상 필수 (backend/ 가 3.10+ 타입 문법 사용)
+#
+# 설치:  python -m pip install -r requirements.txt
+#        (python setup.py 로 설치했다면 이미 자동으로 실행됨)
+#
+# fastapi 하나만 설치하면 sse_starlette / polars 등 ModuleNotFoundError 가 계속 난다 —
+# 반드시 이 파일 전체를 설치할 것.
+#
+# 아래 버전 범위는 최소 요구선. 검증된 조합 (2026-07-28, Python 3.14):
+#   fastapi 0.135.2 · uvicorn 0.42.0 · pydantic 2.12.5 · polars 1.40.0
+#   pandas 3.0.1 · pyarrow 24.0.0 · boto3 1.43.32 · python-multipart 0.0.22
+#   pyyaml 6.0.3 · sse-starlette 3.3.3
 fastapi>=0.110
 uvicorn[standard]>=0.27
 pydantic>=2.5
@@ -8,3 +20,6 @@ boto3>=1.34
 python-multipart>=0.0.9
 pyyaml>=6.0
 sse-starlette>=2.0
+
+# 선택: 없어도 동작 (메모리 기반 워커 수 산정 정밀도만 좋아짐)
+psutil>=5.9

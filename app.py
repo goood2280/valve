@@ -10,6 +10,16 @@ Valve — DataLake 의 수도꼭지. 사내 API 에서 데이터를 뽑아 S3 �
 """
 from __future__ import annotations
 
+import sys
+
+# backend/ 코드가 3.10+ 문법(list[str] | None)을 쓴다 — 낮은 버전이면 import 중
+# 알 수 없는 TypeError 로 죽으므로 여기서 먼저 명확하게 알린다.
+if sys.version_info < (3, 10):
+    raise SystemExit(
+        f"[valve] Python 3.10 이상이 필요합니다 — 현재 {sys.version.split()[0]}.\n"
+        "        여러 버전이 설치돼 있다면:  py -3.11 -m uvicorn app:app --port 8090"
+    )
+
 import json
 from pathlib import Path
 

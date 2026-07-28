@@ -36,13 +36,37 @@
 - **max_concurrent: 3** — 사내 API 부담 최소.
 - **HY000 / Timeout / 5xx 자동 재시도** — exponential backoff 10s → 30s → 2min, 3회까지.
 
-## 실행
+## 설치 · 실행
+
+**요구사항: Python 3.10 이상.** (backend 코드가 3.10+ 타입 문법을 쓴다 — 3.9 이하에서는
+서버 기동 시 `TypeError: unsupported operand type(s) for |` 로 죽는다. 여러 버전이 깔린
+PC 라면 `py -3.11` 처럼 버전을 지정해서 실행할 것.)
+
+### 설치본(setup.py)으로 — 사내 배포 표준
+
+```bash
+python setup.py        # 소스 추출 + requirements.txt 전체 pip 설치까지 자동
+uvicorn app:app --host 0.0.0.0 --port 8090
+```
+
+이미 추출된 상태에서 의존성만 다시 깔려면 `python setup.py install-deps`.
+
+### 저장소에서 직접
 
 ```bash
 cd Valve
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 uvicorn app:app --host 0.0.0.0 --port 8090 --reload
 ```
+
+### 안 뜰 때 체크리스트
+
+| 증상 | 원인 · 해결 |
+|---|---|
+| `ModuleNotFoundError: sse_starlette` (또는 polars·pyarrow…) | `pip install fastapi` 만으로는 부족 — **`pip install -r requirements.txt` 로 전체 설치** |
+| `TypeError: unsupported operand type(s) for \|` | Python 3.9 이하 — 3.10+ 로 실행 (`python --version` 확인) |
+| pip 이 아주 낮은 버전을 골라 설치 | 파이썬이 낡아 최신 wheel 을 못 받는 것 — 3.10+ 환경에서 다시 설치 |
+| 사내망이라 pip 이 외부를 못 봄 | 외부 PC 에서 `pip download -r requirements.txt -d wheels/` 후 반입 → `pip install --no-index --find-links wheels/ -r requirements.txt` |
 
 기본값은 **Mock 모드** (가짜 데이터 · HY000 5% 확률 · 1% 확률 6분 timeout 주입). 웹에서 Settings → `lake_api.mode: real` 로 바꾸고 `module: mycorp.datalake:query` 같은 실제 경로를 넣으면 전환.
 
