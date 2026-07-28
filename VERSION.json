@@ -1,12 +1,32 @@
 {
   "name": "Valve",
-  "version": "0.3.1",
+  "version": "0.3.3",
   "codename": "valve",
   "pairs_with": "flow",
   "purpose": "DataLake 수도꼭지 — 사내 API 에서 데이터를 뽑아 S3 로 흘려 flow 에 공급",
   "tagline": "turn the valve · feed the flow",
   "created": "2026-04-24",
   "changelog": [
+    {
+      "version": "0.3.3",
+      "date": "2026-07-28",
+      "tag": "fix",
+      "title": "Windows 에서 setup.py 의존성 설치 실패 수정 (Invalid requirement: 'fastapi)",
+      "changes": [
+        "setup.py install-deps: pip 을 문자열+shell=True 로 부르던 것을 리스트 argv 로 교체 — Windows cmd 는 shlex.quote 의 작은따옴표를 벗기지 않고 'fastapi>=0.110' 의 > 를 리다이렉션으로 해석해 pip 이 'fastapi 라는 깨진 인자를 받았다"
+      ]
+    },
+    {
+      "version": "0.3.2",
+      "date": "2026-07-28",
+      "tag": "fix",
+      "title": "사내 이식 시 설치 실패를 명확한 안내로 — Python 3.10 검사 + 의존성 문서화",
+      "changes": [
+        "app.py / setup.py: Python 3.10 미만이면 알 수 없는 TypeError(| union 문법) 대신 버전·해결법을 한글로 안내하고 즉시 종료 (setup.py 는 restore/snapshots/version 만 예외 허용)",
+        "requirements.txt: 최소 파이썬 버전 · 'fastapi 만 설치하면 안 된다' 경고 · 검증된 버전 조합 주석 + psutil(선택) 추가",
+        "README: 설치·실행 섹션 개편 — setup.py 표준 설치 경로 · 안 뜰 때 체크리스트(누락 모듈 · 구버전 파이썬 · 오프라인 wheel 반입)"
+      ]
+    },
     {
       "version": "0.3.1",
       "date": "2026-07-27",

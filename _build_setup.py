@@ -139,7 +139,6 @@ import gzip
 import hashlib
 import json
 import os
-import shlex
 import shutil
 import subprocess
 import sys
@@ -338,10 +337,11 @@ def install_deps() -> int:
     else:
         pkgs = ['fastapi', 'uvicorn[standard]', 'pydantic', 'polars', 'pandas',
                 'pyarrow', 'boto3', 'python-multipart', 'pyyaml', 'sse-starlette']
+    # 리스트 argv 로 실행 — 문자열+shell=True 는 Windows cmd 에서 shlex.quote 의
+    # 작은따옴표가 벗겨지지 않고 '>=' 의 > 가 리다이렉션으로 해석돼 설치가 깨진다.
     rc = subprocess.run(
-        f"{sys.executable} -m pip install --disable-pip-version-check "
-        + ' '.join(shlex.quote(p) for p in pkgs),
-        cwd=str(ROOT), shell=True).returncode
+        [sys.executable, '-m', 'pip', 'install', '--disable-pip-version-check', *pkgs],
+        cwd=str(ROOT)).returncode
     return rc
 
 
@@ -375,14 +375,34 @@ COMMANDS = {
 }
 
 
+# 앱(backend/)이 3.10+ 타입 문법을 쓴다. 낮은 버전으로 설치하면 pip 이 낡은
+# 의존성을 고르고 서버도 TypeError 로 죽으므로 설치 계열 명령은 여기서 막는다.
+_MIN_PY = (3, 10)
+_PY_EXEMPT = {'version', 'snapshots', 'restore'}  # 복구/조회는 낮은 버전에서도 허용
+
+
+def _check_python(cmd: str) -> bool:
+    if sys.version_info >= _MIN_PY or cmd in _PY_EXEMPT:
+        return True
+    cur = '.'.join(str(v) for v in sys.version_info[:3])
+    print(f'[valve] Python {_MIN_PY[0]}.{_MIN_PY[1]} 이상이 필요합니다 - 현재 {cur}.',
+          file=sys.stderr)
+    print('        여러 버전이 있다면:  py -3.11 setup.py', file=sys.stderr)
+    return False
+
+
 def main(argv):
     if not argv:
+        if not _check_python('all'):
+            return 3
         return all_steps()
     cmd = argv[0]
     if cmd in ('-h', '--help', 'help'):
         print(__doc__)
         print('\\nCommands: ' + ', '.join(sorted(COMMANDS)))
         return 0
+    if not _check_python(cmd):
+        return 3
     fn = COMMANDS.get(cmd)
     if not fn:
         print(f'Unknown command: {cmd}', file=sys.stderr)
