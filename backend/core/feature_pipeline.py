@@ -72,21 +72,28 @@ def alert_scan_cols(us_cfg: dict) -> list[str]:
     return out
 
 # 추출 소스 기본값 — config/pipeline.yaml 의 sources 로 override (테이블명/컬럼 조절)
+# time_col = raw 를 date= 파티션으로 나누는 기준 열. 전 소스를 tkout_time(공정 진행
+# 시각)으로 통일해 두면 소스가 달라도 같은 날짜 축으로 정렬된다 — INLINE/VM 의
+# 측정 시각(time)은 track-out 보다 늦게 찍혀 하루가 밀릴 수 있다.
 DEFAULT_SOURCES = {
     "FAB": {
         "table": "RAW_FAB_DATA",
         "columns": ["root_lot_id", "wafer_id", "part_id", "tkout_time", "step_id",
                     "step_desc", "ppid", "reticle_id", "eqp_id", "eqp_model",
                     "chamber_id", "unit_id", "sleuth_order"],
+        "time_col": "tkout_time",
     },
     "INLINE": {
         "table": "RAW_INLINE_DATA",
-        "columns": ["root_lot_id", "wafer_id", "item_id", "value", "measure_pos", "time"],
+        "columns": ["root_lot_id", "wafer_id", "item_id", "value", "measure_pos",
+                    "tkout_time", "time"],
+        "time_col": "tkout_time",
     },
     "VM": {
         "table": "RAW_VM_DATA",
         "columns": ["root_lot_id", "wafer_id", "sensor_id", "eqp_id", "step_id",
-                    "predicted_value", "actual_value", "residual", "time"],
+                    "predicted_value", "actual_value", "residual", "tkout_time", "time"],
+        "time_col": "tkout_time",
     },
 }
 
@@ -801,25 +808,50 @@ class FeaturePipeline:
     def _time_col(self, source: str) -> str | None:
         """raw 를 date= 파티션으로 나누는 **기준 열**.
 
-        기본은 컬럼 목록에서 'time' 이 들어간 첫 컬럼 —
-        FAB·ET = tkout_time, INLINE·VM = time.
-        컬럼 순서에 의존하고 싶지 않으면 pipeline.yaml 에서 명시한다:
-            sources: {FAB: {time_col: tkout_time}}
-        명시한 열이 columns 에 없으면 조용히 엉뚱한 날짜로 저장되는 대신 실패시킨다
-        (기준 열을 못 찾으면 하루치가 통째로 쿼리 시작일 파티션으로 들어간다)."""
+        해석 순서 (알람 탭 ⚙ '조회 컬럼 · 파티션 기준 열' 에서 편집):
+          1) pipeline.yaml sources.<name>.time_col 로 명시한 열 — 없는 열이면
+             조용히 엉뚱한 날짜로 저장하는 대신 실패시킨다 (기준 열을 못 찾으면
+             하루치가 통째로 쿼리 시작일 파티션으로 들어간다)
+          2) 코드 기본값(DEFAULT_SOURCES.time_col = tkout_time) — 단 그 열이 실제
+             조회 컬럼에 있을 때만. 기존 설치의 pipeline.yaml 은 seed-only 라
+             tkout_time 이 없을 수 있는데, 그때 실패시키면 업그레이드가 파이프라인을
+             멈춘다. 그런 경우는 3) 으로 내려가 종전처럼 동작한다
+          3) 컬럼 목록에서 'time' 이 들어간 첫 컬럼 (예전 방식)"""
         sc = self.sources_cfg()[source]
+        cols = sc["columns"]
         user = ((self.global_cfg().get("sources") or {}).get(source) or {}).get("time_col")
         if user:
             user = str(user).strip()
-            if user not in sc["columns"]:
+            if user not in cols:
                 raise ValueError(
                     f"{source}.time_col={user!r} 이 columns 에 없습니다 — "
                     f"파티션 기준 열은 조회 컬럼이어야 합니다")
             return user
-        for c in sc["columns"]:
+        dflt = (DEFAULT_SOURCES.get(source) or {}).get("time_col")
+        if dflt and dflt in cols:
+            return dflt
+        for c in cols:
             if "time" in c.lower():
                 return c
         return None
+
+    def sources_view(self) -> dict:
+        """소스 설정 + 해석된 기준 열 (웹 편집기용).
+        time_col = 명시값(없으면 ''), resolved = 실제로 쓰이는 열."""
+        out = {}
+        gcfg = self.global_cfg().get("sources") or {}
+        for name, sc in self.sources_cfg().items():
+            user = str((gcfg.get(name) or {}).get("time_col") or "").strip()
+            try:
+                resolved, error = self._time_col(name), ""
+            except ValueError as e:
+                resolved, error = None, str(e)
+            out[name] = {
+                "table": sc["table"], "columns": sc["columns"],
+                "time_col": user, "resolved_time_col": resolved, "error": error,
+                "event_enabled": self.event_enabled(name),
+            }
+        return out
 
     @staticmethod
     def _write_partition(df: pl.DataFrame, pdir: Path):
@@ -945,19 +977,31 @@ class FeaturePipeline:
                     })
         return pl.DataFrame(rows)
 
+    @staticmethod
+    def _mock_tkout(rng, start: date, end: date) -> datetime:
+        """공정 진행 시각 — 쿼리 구간 [start, end) 안 (파티션 기준 열)."""
+        span = max(int((end - start).days) * 86400, 86400)
+        return datetime.combine(start, datetime.min.time()) + timedelta(
+            seconds=rng.randint(0, span - 1))
+
     def _mock_inline(self, cfg: dict, start: date, end: date, split: str) -> pl.DataFrame:
         rng = self._rng(cfg, split, "INLINE")
         items = ["ITEM_CD_001", "ITEM_THK_002", "ITEM_OVL_003"]
+        fmt = "%Y-%m-%d %H:%M:%S"
         rows = []
         for _ in range(8):
             lot = f"R{rng.randint(0, 199):03d}"
             for w in range(1, 5):
+                tk = self._mock_tkout(rng, start, end)      # wafer 단위 track-out
                 for item in items:
+                    # 측정 시각은 track-out 보다 뒤 — 자정을 넘겨 다음 날이 되기도 한다.
+                    # 파티션은 tkout_time 기준이라 그래도 같은 날에 머문다.
+                    meas = tk + timedelta(minutes=rng.randint(5, 180))
                     rows.append({
                         "root_lot_id": lot, "wafer_id": str(w), "item_id": item,
                         "value": round(rng.gauss(100, 8), 4),
                         "measure_pos": str(rng.randint(1, 9)),
-                        "time": f"{start} 0{rng.randint(0, 9)}:00:00",
+                        "tkout_time": tk.strftime(fmt), "time": meas.strftime(fmt),
                         "split": split,
                     })
         return pl.DataFrame(rows)
@@ -965,10 +1009,12 @@ class FeaturePipeline:
     def _mock_vm(self, cfg: dict, start: date, end: date, split: str) -> pl.DataFrame:
         rng = self._rng(cfg, split, "VM")
         sensors = ["SNS_TEMP_01", "SNS_PRES_02"]
+        fmt = "%Y-%m-%d %H:%M:%S"
         rows = []
         for _ in range(8):
             lot = f"R{rng.randint(0, 199):03d}"
             for w in range(1, 5):
+                tk = self._mock_tkout(rng, start, end)
                 for s in sensors:
                     pred = rng.gauss(50, 3)
                     act = pred + rng.gauss(0, 0.8)
@@ -979,7 +1025,8 @@ class FeaturePipeline:
                         "eqp_id": "ETCH_01", "step_id": step,
                         "predicted_value": round(pred, 4), "actual_value": round(act, 4),
                         "residual": round(act - pred, 4),
-                        "time": f"{start} 0{rng.randint(0, 9)}:00:00",
+                        "tkout_time": tk.strftime(fmt),
+                        "time": (tk + timedelta(minutes=rng.randint(1, 90))).strftime(fmt),
                         "split": split,
                     })
         return pl.DataFrame(rows)

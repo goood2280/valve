@@ -2574,7 +2574,7 @@ async function loadAlerts() {
   const wrap = $('#alWrap');
   if (!wrap) return;
   try {
-    const [status, alerts, cfg, csvInfo, outbox, sched, runs, s3items] = await Promise.all([
+    const [status, alerts, cfg, csvInfo, outbox, sched, runs, s3items, sources] = await Promise.all([
       api.get('/api/pipeline/status'),
       api.get('/api/pipeline/alerts'),
       api.get('/api/pipeline/config'),
@@ -2583,6 +2583,7 @@ async function loadAlerts() {
       api.get('/api/pipeline/schedule').catch(() => null),
       api.get('/api/pipeline/runs?limit=60').catch(() => null),
       api.get('/api/s3/items').catch(() => null),
+      api.get('/api/pipeline/sources').catch(() => null),
     ]);
     wrap.innerHTML = '';
 
@@ -2630,6 +2631,7 @@ async function loadAlerts() {
 
     if (outbox) wrap.append(alOutbox(outbox, s3items));
     wrap.append(alAlertColsEditor(cfg, alerts));
+    wrap.append(alSourcesEditor(sources));
     wrap.append(alExcludeEditor(cfg));
     wrap.append(alCsvSync(csvInfo));
   } catch (e) {
@@ -3197,6 +3199,67 @@ function alAlertColsEditor(cfg, alerts) {
       el('span', { class: 'hint' }, '다음 파이프라인 실행/발행부터 반영'),
     ),
     el('div', { class: 'hint', style: { marginTop: '4px' } }, `FAB raw 열: ${fabCols}`),
+  );
+}
+
+// ⚙ 소스별 조회 컬럼 · 파티션 기준 열 — raw 를 date= 로 나누는 기준을 웹에서 바꾼다.
+// 전 소스를 tkout_time(공정 진행 시각)으로 통일해 두면 소스가 달라도 같은 날짜 축이 된다.
+function alSourcesEditor(sources) {
+  if (!sources || !Object.keys(sources).length) return el('div', {});
+  const draft = {};
+  const rows = [];
+  Object.entries(sources).forEach(([name, s]) => {
+    draft[name] = { table: s.table, columns: (s.columns || []).join(', '),
+      time_col: s.time_col || '' };
+    const sel = el('select', { style: { fontSize: '11px', minWidth: '120px' },
+      onchange: (e) => { draft[name].time_col = e.target.value; } },
+      el('option', draft[name].time_col ? { value: '' } : { value: '', selected: '' },
+        `(자동: ${s.resolved_time_col || '없음'})`),
+      ...(s.columns || []).map((c) => el('option',
+        c === draft[name].time_col ? { value: c, selected: '' } : { value: c }, c)));
+    rows.push(el('tr', {},
+      el('td', { class: 'mono', style: { fontWeight: 700 } }, name),
+      el('td', {}, el('input', { type: 'text', value: draft[name].table,
+        style: { width: '150px' }, onchange: (e) => { draft[name].table = e.target.value; } })),
+      el('td', {}, el('input', { type: 'text', value: draft[name].columns,
+        style: { width: '100%', minWidth: '280px' },
+        onchange: (e) => { draft[name].columns = e.target.value; } })),
+      el('td', {}, sel),
+      el('td', { class: 'mono', style: { fontSize: '11px',
+        color: s.error ? '#e5484d' : 'var(--text-muted)' } },
+        s.error ? '설정 오류' : (s.resolved_time_col || '-')),
+    ));
+  });
+
+  const save = async (ev) => {
+    const btn = ev.target;
+    btn.disabled = true;
+    const payload = {};
+    Object.entries(draft).forEach(([name, d]) => {
+      payload[name] = { table: d.table,
+        columns: d.columns.split(',').map((x) => x.trim()).filter(Boolean),
+        time_col: d.time_col };
+    });
+    try {
+      await api.put('/api/pipeline/config/sources', payload);
+    } catch (e) {
+      alert(e.message);
+    }
+    btn.disabled = false;
+    loadAlerts();
+  };
+
+  return el('div', { style: { borderTop: AL_HAIR, marginTop: '20px', paddingTop: '12px' } },
+    alSub('⚙ 조회 컬럼 · 파티션 기준 열',
+      'raw 를 date= 파티션으로 나누는 기준 열 — 전 소스를 tkout_time(공정 진행 시각)으로 '
+      + '맞추면 소스가 달라도 같은 날짜 축이 된다. 기준 열은 조회 컬럼에 있어야 하며, '
+      + '바꾼 뒤에는 해당 소스 raw 를 다시 받아야 파티션이 새 기준으로 정리된다'),
+    el('div', { style: { overflowX: 'auto' } },
+      alTable(['소스', 'table', '조회 컬럼 (쉼표 구분)', '기준 열', '적용 중'], rows)),
+    el('div', { style: { marginTop: '6px', display: 'flex', gap: '8px', alignItems: 'center' } },
+      el('button', { class: 'btn', onclick: save }, '저장'),
+      el('span', { class: 'hint' }, '저장 즉시 다음 raw 실행부터 적용 (기존 파티션은 그대로)'),
+    ),
   );
 }
 

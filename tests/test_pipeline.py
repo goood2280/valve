@@ -262,8 +262,9 @@ def test_raw_query_window_is_half_open(pipe):
     # 나뉘므로, 쿼리 구간이 넓어져도 각 date= 안에는 그 날 행만 들어간다.
     import polars as pl
     pipe.run_raw_query("VH_PRODA")
-    assert pipe._time_col("FAB") == "tkout_time"
-    assert pipe._time_col("INLINE") == "time"
+    # 전 소스가 tkout_time(공정 진행 시각) 기준 — 소스가 달라도 같은 날짜 축
+    for src in ("FAB", "INLINE", "VM", "ET"):
+        assert pipe._time_col(src) == "tkout_time", src
     for src in ("FAB", "INLINE", "VM"):
         tcol = pipe._time_col(src)
         dirs = sorted(pipe.raw_dir("VH_PRODA", src).glob("date=*"))
@@ -276,20 +277,40 @@ def test_raw_query_window_is_half_open(pipe):
 
 
 def test_explicit_time_col_override_is_validated(pipe):
-    """파티션 기준 열을 명시할 수 있고, 오타는 조용히 넘어가지 않는다
+    """파티션 기준 열은 웹(⚙)에서 바꾼다. 오타는 조용히 넘어가지 않는다
     (기준 열을 못 찾으면 하루치가 통째로 엉뚱한 파티션으로 들어간다)."""
     import pytest as _pytest
 
     cfg = pipe.global_cfg()
-    cfg["sources"]["FAB"]["time_col"] = "tkout_time"
+    cfg["sources"]["INLINE"]["time_col"] = "time"     # 측정 시각 기준으로 되돌리기
     pipe.save_global_cfg(cfg)
-    assert pipe._time_col("FAB") == "tkout_time"
+    assert pipe._time_col("INLINE") == "time"
+    assert pipe.sources_view()["INLINE"]["resolved_time_col"] == "time"
 
     cfg = pipe.global_cfg()
-    cfg["sources"]["FAB"]["time_col"] = "no_such_time"
+    cfg["sources"]["INLINE"]["time_col"] = "no_such_time"
     pipe.save_global_cfg(cfg)
     with _pytest.raises(ValueError, match="time_col"):
-        pipe._time_col("FAB")
+        pipe._time_col("INLINE")
+    # 화면은 죽지 않고 오류를 표시한다 (설정 오류로 UI 전체가 안 뜨면 고칠 수도 없다)
+    view = pipe.sources_view()["INLINE"]
+    assert view["resolved_time_col"] is None and "time_col" in view["error"]
+
+
+def test_legacy_config_without_tkout_time_keeps_working(pipe):
+    """기존 설치의 pipeline.yaml 은 seed-only 라 INLINE/VM 에 tkout_time 이 없다.
+    그때 코드 기본값(tkout_time)을 강요하면 업그레이드가 파이프라인을 멈춘다 —
+    조회 컬럼에 없으면 종전처럼 time 으로 내려간다."""
+    cfg = pipe.global_cfg()
+    cfg["sources"]["INLINE"] = {
+        "table": "RAW_INLINE_DATA",
+        "columns": ["root_lot_id", "wafer_id", "item_id", "value", "measure_pos", "time"],
+    }
+    pipe.save_global_cfg(cfg)
+    assert pipe._time_col("INLINE") == "time"
+    assert pipe.sources_view()["INLINE"]["error"] == ""
+    pipe.run_raw_query("VH_PRODA")     # 실행도 정상
+    assert pipe.status("VH_PRODA")["raw"]["INLINE"]
 
 
 def test_db_usage_flags_vehicles_over_threshold(pipe):

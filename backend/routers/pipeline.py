@@ -225,26 +225,47 @@ def get_config():
 
 @router.get("/api/pipeline/sources")
 def get_sources():
-    return _p().sources_cfg()
+    """소스별 테이블/조회 컬럼 + 파티션 기준 열(명시값과 실제 적용값)."""
+    return _p().sources_view()
 
 
 @router.put("/api/pipeline/config/sources")
 def put_sources(body: dict = Body(...)):
-    """소스별 테이블/컬럼 저장 — {FAB: {table, columns: [...]}, INLINE: …, VM: …}"""
-    out = {}
-    for name in DEFAULT_SOURCES:
-        src = body.get(name) or {}
+    """소스별 테이블/조회 컬럼/파티션 기준 열 저장 —
+    {FAB: {table, columns: [...], time_col?}, INLINE: …} (보낸 소스만 갱신).
+
+    time_col 은 raw 를 date= 파티션으로 나누는 기준 열. 조회 컬럼에 없는 열을
+    저장하려 하면 400 — 통과시키면 하루치가 통째로 엉뚱한 파티션에 들어간다.
+    빈 문자열이면 자동 인식으로 되돌린다. event/reformatter/match 등 UI 가 모르는
+    키는 그대로 보존한다 (예전엔 저장 한 번에 지워졌다)."""
+    cfg = _p().global_cfg()
+    cur = dict(cfg.get("sources") or {})
+    for name, src in (body or {}).items():
+        if not isinstance(src, dict):
+            continue
+        entry = dict(cur.get(name) or {})
         cols = [str(c).strip() for c in (src.get("columns") or []) if str(c).strip()]
         if not cols:
             raise HTTPException(400, f"{name}: columns 가 비어있음")
-        out[name] = {"table": str(src.get("table") or DEFAULT_SOURCES[name]["table"]).strip(),
-                     "columns": cols}
-    # 확장 소스(ET 등, pipeline.yaml 에서 추가)는 UI 저장 시에도 보존
-    for name, src in (_p().global_cfg().get("sources") or {}).items():
-        if name not in DEFAULT_SOURCES:
-            out[name] = src
-    _p().save_sources_cfg(out)
-    return {"ok": True, "sources": out}
+        entry["columns"] = cols
+        entry["table"] = str(src.get("table")
+                             or entry.get("table")
+                             or (DEFAULT_SOURCES.get(name) or {}).get("table")
+                             or f"RAW_{name}_DATA").strip()
+        if "time_col" in src:
+            tcol = str(src.get("time_col") or "").strip()
+            if tcol and tcol not in cols:
+                raise HTTPException(
+                    400, f"{name}: 파티션 기준 열 '{tcol}' 이 조회 컬럼에 없습니다 "
+                         f"— 컬럼에 먼저 추가하세요")
+            if tcol:
+                entry["time_col"] = tcol
+            else:
+                entry.pop("time_col", None)     # 자동 인식으로 되돌림
+        cur[name] = entry
+    cfg["sources"] = cur
+    _p().save_global_cfg(cfg)
+    return {"ok": True, "sources": _p().sources_view()}
 
 
 @router.put("/api/pipeline/config/exclude")

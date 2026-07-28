@@ -1,12 +1,25 @@
 {
   "name": "Valve",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "codename": "valve",
   "pairs_with": "flow",
   "purpose": "DataLake 수도꼭지 — 사내 API 에서 데이터를 뽑아 S3 로 흘려 flow 에 공급",
   "tagline": "turn the valve · feed the flow",
   "created": "2026-04-24",
   "changelog": [
+    {
+      "version": "0.3.8",
+      "date": "2026-07-29",
+      "tag": "feat",
+      "title": "전 소스 파티션 기준 열을 tkout_time 으로 통일 + 웹(⚙)에서 조회 컬럼·기준 열 편집",
+      "changes": [
+        "INLINE·VM 도 tkout_time 기준으로 파티셔닝 — 조회 컬럼에 tkout_time 추가하고 time_col 을 명시. 측정 시각(time)은 track-out 보다 늦게 찍혀 하루가 밀리는데, 이제 소스가 달라도 같은 날짜 축으로 정렬된다 (FAB·ET 는 종전과 동일)",
+        "알람 탭 ⚙ '조회 컬럼 · 파티션 기준 열' — 소스별 table·조회 컬럼·기준 열을 웹에서 수정 (기준 열은 그 소스의 컬럼 중에서 선택, 비우면 자동 인식). 조회 컬럼에 없는 열을 기준으로 저장하려 하면 400 으로 거부한다 — 통과시키면 하루치가 통째로 엉뚱한 파티션에 들어간다",
+        "fix: 소스 설정을 웹에서 저장하면 event/reformatter/match 처럼 UI 가 모르는 키가 지워지던 문제 (ET 의 raw 전용 설정이 저장 한 번에 날아갔다). 이제 보낸 소스만 갱신하고 나머지 키는 보존",
+        "기존 설치 호환 — config/ 는 seed-only 라 업그레이드해도 INLINE/VM 에 tkout_time 이 없다. 그 경우 코드 기본값을 강요하지 않고 종전처럼 time 으로 동작하며, ⚙ 에서 컬럼을 추가한 뒤 기준 열을 바꾸면 된다",
+        "GET /api/pipeline/sources 가 명시값(time_col)과 실제 적용값(resolved_time_col)·설정 오류를 함께 반환"
+      ]
+    },
     {
       "version": "0.3.7",
       "date": "2026-07-29",

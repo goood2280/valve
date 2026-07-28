@@ -45,10 +45,13 @@
 #     · 손으로 고칠 땐 따옴표를 붙일 것 — 9:00 은 yaml 이 540 으로 읽는다
 #
 # sources — 소스별 추출 테이블/컬럼 -------------------------------------
-#   time_col   raw 를 date= 파티션으로 나누는 기준 열 (생략 시 자동 인식 —
-#              columns 에서 'time' 이 들어간 첫 열. FAB·ET=tkout_time, INLINE·VM=time)
+#   time_col   raw 를 date= 파티션으로 나누는 기준 열. 전 소스를 tkout_time
+#              (공정 진행 시각)으로 통일한다 — 소스가 달라도 같은 날짜 축이 된다.
+#              INLINE/VM 의 측정 시각(time)은 track-out 보다 늦게 찍혀 하루가 밀린다.
 #              쿼리 구간이 여러 날에 걸쳐도 행은 이 열의 날짜로 각자 맞는 파티션에 들어간다.
-#              적어 둔 열이 columns 에 없으면 기동/실행 시 에러로 알려 준다.
+#              알람 탭 ⚙ '조회 컬럼 · 파티션 기준 열' 에서 웹으로 수정한다.
+#              적어 둔 열이 columns 에 없으면 저장을 거부하고, 실행 시엔 에러로 알려 준다.
+#              (생략하면 자동 인식 — tkout_time 이 컬럼에 있으면 그것, 없으면 'time')
 #   FAB / INLINE / VM  raw + event (event DB 를 만든다)
 #   ET                 raw 전용 (event: false). auto report 와 동일한 reformatter 인식 —
 #                      config/reformatter/{vehicle}_reformatter.csv 의 CATEGORY=REAL 행
@@ -88,7 +91,11 @@ runtime:
   mem_per_worker_gb: 4
   cpu_cores: auto
   interval_hours: 6
-  retry_delays_sec: [300, 900, 1800, 3600]
+  retry_delays_sec:
+  - 300
+  - 900
+  - 1800
+  - 3600
   retry_max_attempts: 5
   retry_critical_after_sec: 43200
   retry_critical_attempts: 5
@@ -116,6 +123,7 @@ sources:
     - chamber_id
     - unit_id
     - sleuth_order
+    time_col: tkout_time
   INLINE:
     table: RAW_INLINE_DATA
     columns:
@@ -124,7 +132,9 @@ sources:
     - item_id
     - value
     - measure_pos
+    - tkout_time
     - time
+    time_col: tkout_time
   VM:
     table: RAW_VM_DATA
     columns:
@@ -136,7 +146,9 @@ sources:
     - predicted_value
     - actual_value
     - residual
+    - tkout_time
     - time
+    time_col: tkout_time
   ET:
     table: f_et_test
     columns:
@@ -149,6 +161,7 @@ sources:
     - eqp_id
     - step_seq
     - tkout_time
+    time_col: tkout_time
     reformatter: config/reformatter
     event: false
 step_matching: config/step_matching/vehicle_matching.csv
