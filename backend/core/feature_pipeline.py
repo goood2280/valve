@@ -697,32 +697,53 @@ class FeaturePipeline:
             return {**cache, "cached": True}
 
         warn_at = self.db_warn_bytes()
+        gb = 1024 ** 3
         vehicles: dict[str, dict] = {}
+        by_source: dict[str, dict] = {}
         for v in self.vehicles():
             parts = {"raw": 0, "event": 0, "feature": 0, "reports": 0}
             files = 0
+            # 소스(FAB/INLINE/VM/ET)별 raw·event — "어느 DB 가 큰지" 가 정리 판단의 기준
+            sources: dict[str, dict] = {}
             for source in self.sources_cfg():
-                b, n = self._dir_bytes(self.raw_dir(v, source))
-                parts["raw"] += b
-                files += n
-            for key, path in (("event", self.db_root() / "2.EVENT_DB" / v),
-                              ("feature", self.feature_dir(v)),
+                rb, rn = self._dir_bytes(self.raw_dir(v, source))
+                eb, en = self._dir_bytes(self.event_dir(v, source))
+                try:
+                    tcol = self._time_col(source)
+                except ValueError:      # time_col 설정 오류 — 용량 조회까지 막지는 않는다
+                    tcol = None
+                sources[source] = {
+                    "raw": rb, "event": eb, "bytes": rb + eb,
+                    "gb": round((rb + eb) / gb, 2), "files": rn + en,
+                    "event_enabled": self.event_enabled(source), "time_col": tcol,
+                }
+                parts["raw"] += rb
+                parts["event"] += eb
+                files += rn + en
+                agg = by_source.setdefault(source, {"raw": 0, "event": 0, "bytes": 0})
+                agg["raw"] += rb
+                agg["event"] += eb
+                agg["bytes"] += rb + eb
+            for key, path in (("feature", self.feature_dir(v)),
                               ("reports", self.report_dir(v))):
                 b, n = self._dir_bytes(path)
                 parts[key] += b
                 files += n
             total = sum(parts.values())
-            vehicles[v] = {"bytes": total, "gb": round(total / (1024 ** 3), 2),
-                           "files": files, "parts": parts, "warn": total >= warn_at}
+            vehicles[v] = {"bytes": total, "gb": round(total / gb, 2),
+                           "files": files, "parts": parts, "sources": sources,
+                           "warn": total >= warn_at}
+        for agg in by_source.values():
+            agg["gb"] = round(agg["bytes"] / gb, 2)
         shared = {}
         for key, path in (("wide", self.wide_dir()), ("send", self.send_dir())):
             b, n = self._dir_bytes(path)
-            shared[key] = {"bytes": b, "gb": round(b / (1024 ** 3), 2), "files": n}
+            shared[key] = {"bytes": b, "gb": round(b / gb, 2), "files": n}
         out = {
             "ts": now, "cached": False,
             "db_root": str(self.db_root()),
-            "warn_gb": round(warn_at / (1024 ** 3), 2),
-            "vehicles": vehicles, "shared": shared,
+            "warn_gb": round(warn_at / gb, 2),
+            "vehicles": vehicles, "shared": shared, "by_source": by_source,
             "total_bytes": sum(x["bytes"] for x in vehicles.values())
                            + sum(x["bytes"] for x in shared.values()),
             "warn_vehicles": sorted(v for v, x in vehicles.items() if x["warn"]),
@@ -778,8 +799,24 @@ class FeaturePipeline:
         return df.height
 
     def _time_col(self, source: str) -> str | None:
-        """소스의 시간 컬럼 (raw 파티션 키) — tkout_time/time 등 'time' 포함 첫 컬럼."""
-        for c in self.sources_cfg()[source]["columns"]:
+        """raw 를 date= 파티션으로 나누는 **기준 열**.
+
+        기본은 컬럼 목록에서 'time' 이 들어간 첫 컬럼 —
+        FAB·ET = tkout_time, INLINE·VM = time.
+        컬럼 순서에 의존하고 싶지 않으면 pipeline.yaml 에서 명시한다:
+            sources: {FAB: {time_col: tkout_time}}
+        명시한 열이 columns 에 없으면 조용히 엉뚱한 날짜로 저장되는 대신 실패시킨다
+        (기준 열을 못 찾으면 하루치가 통째로 쿼리 시작일 파티션으로 들어간다)."""
+        sc = self.sources_cfg()[source]
+        user = ((self.global_cfg().get("sources") or {}).get(source) or {}).get("time_col")
+        if user:
+            user = str(user).strip()
+            if user not in sc["columns"]:
+                raise ValueError(
+                    f"{source}.time_col={user!r} 이 columns 에 없습니다 — "
+                    f"파티션 기준 열은 조회 컬럼이어야 합니다")
+            return user
+        for c in sc["columns"]:
             if "time" in c.lower():
                 return c
         return None

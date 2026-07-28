@@ -1,12 +1,24 @@
 {
   "name": "Valve",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "codename": "valve",
   "pairs_with": "flow",
   "purpose": "DataLake 수도꼭지 — 사내 API 에서 데이터를 뽑아 S3 로 흘려 flow 에 공급",
   "tagline": "turn the valve · feed the flow",
   "created": "2026-04-24",
   "changelog": [
+    {
+      "version": "0.3.7",
+      "date": "2026-07-29",
+      "tag": "feat",
+      "title": "DB 사용량을 소스(FAB/INLINE/VM/ET)별 raw·event 로 · 파티션 기준 열 명시 가능",
+      "changes": [
+        "DB 사용량을 제품 합계가 아니라 제품 × 소스로 분해 — 소스마다 raw·event 를 나눠 보여주고(기준 열 표시), 전 제품 소스별 합계도 함께. 어느 DB 가 커졌는지 보고 무엇부터 지울지 정할 수 있다. 40GB 경고는 제품 합계 기준 유지",
+        "크기 표기를 GB 고정에서 적응형(KB/MB/GB)으로 — 초기·개발 데이터가 전부 0.00GB 로 보이던 문제",
+        "파티션 기준 열을 pipeline.yaml sources.<name>.time_col 로 명시 가능. 기본은 지금까지와 같은 자동 인식(컬럼 목록의 'time' 포함 첫 열 — FAB·ET=tkout_time, INLINE·VM=time). 명시한 열이 columns 에 없으면 조용히 엉뚱한 날짜로 저장하지 않고 실패시킨다",
+        "당일 쿼리 구간(v0.3.6 반열림 [from, to)) 저장 검증 — 각 date= 파티션에 그 날 행만 들어가는지 소스별로 확인하는 테스트 추가 (FAB·INLINE·VM)"
+      ]
+    },
     {
       "version": "0.3.6",
       "date": "2026-07-29",

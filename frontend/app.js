@@ -2857,27 +2857,58 @@ function renderQueue(box, q) {
   }
 }
 
-// DB 사용량 — 제품별 임계(기본 40GB) 초과 시 경고. 자동 삭제는 하지 않는다.
+// DB 사용량 — 제품 × 소스(FAB/INLINE/VM/ET) 단위로 raw·event 를 나눠 본다.
+// "어느 DB 가 커졌는지" 를 봐야 무엇부터 지울지 정할 수 있다. 자동 삭제는 하지 않는다.
+// 크기 표기 — GB 고정이면 개발/초기 데이터가 전부 0.00GB 로 보인다. 단위를 맞춰 준다.
+const GBs = (b) => (!b ? '0'
+  : b >= 1073741824 ? `${(b / 1073741824).toFixed(2)}GB`
+  : b >= 1048576 ? `${(b / 1048576).toFixed(1)}MB`
+  : `${Math.max(1, Math.round(b / 1024))}KB`);
+
 function alDbUsage(u) {
-  if (!u || !u.vehicles) return null;
-  const rows = Object.entries(u.vehicles).sort((a, b) => b[1].bytes - a[1].bytes);
-  if (!rows.length) return null;
+  if (!u || !u.vehicles || !Object.keys(u.vehicles).length) return null;
   const box = el('div', { style: { margin: '10px 0' } });
   if ((u.warn_vehicles || []).length) {
     box.append(el('div', { class: 'alert warn', style: { fontSize: '12px' } },
       `⚠ DB 사용량 ${u.warn_gb}GB 초과: ${u.warn_vehicles.join(', ')} — `
-      + '오래된 date= 파티션부터 정리하세요 (자동 삭제는 하지 않습니다)'));
+      + '아래에서 큰 소스의 오래된 date= 파티션부터 정리하세요 (자동 삭제는 하지 않습니다)'));
   }
-  box.append(el('div', { style: { display: 'flex', gap: '12px', flexWrap: 'wrap',
-    fontSize: '11px', color: 'var(--text-muted)', alignItems: 'center' } },
-    el('span', {}, 'DB 사용량'),
-    ...rows.map(([v, x]) => el('span', {
-      style: x.warn ? { color: '#e5484d', fontWeight: 700 } : {},
-      title: `raw ${(x.parts.raw / 1073741824).toFixed(2)}GB · event ${(x.parts.event / 1073741824).toFixed(2)}GB`
-        + ` · feature ${(x.parts.feature / 1073741824).toFixed(2)}GB · 파일 ${x.files}개`,
-    }, `${v} ${x.gb}GB`)),
-    el('span', { class: 'mono' }, u.db_root || ''),
-    el('span', { class: 'hint' }, `임계 ${u.warn_gb}GB`),
+
+  const rows = [];
+  Object.entries(u.vehicles)
+    .sort((a, b) => b[1].bytes - a[1].bytes)
+    .forEach(([v, x]) => {
+      Object.entries(x.sources || {})
+        .sort((a, b) => b[1].bytes - a[1].bytes)
+        .forEach(([s, d], i) => rows.push(el('tr', {},
+          el('td', { class: 'mono', style: { fontWeight: 700 } }, i === 0 ? v : ''),
+          el('td', { class: 'mono', style: { fontWeight: 700 } }, s),
+          el('td', { class: 'mono', style: { fontSize: '11px', color: 'var(--text-muted)' },
+            title: 'raw 를 date= 파티션으로 나누는 기준 열' }, d.time_col || '(없음)'),
+          el('td', { class: 'mono' }, GBs(d.raw)),
+          el('td', { class: 'mono', style: d.event_enabled ? {} : { color: 'var(--text-muted)' } },
+            d.event_enabled ? GBs(d.event) : '– raw 전용'),
+          el('td', { class: 'mono', style: { fontWeight: 700 } }, GBs(d.bytes)),
+        )));
+      rows.push(el('tr', { style: { borderTop: '1px solid var(--border)' } },
+        el('td', { class: 'mono', style: { fontWeight: 800 } }, `${v} 합계`),
+        el('td', { colspan: '3', style: { fontSize: '11px', color: 'var(--text-muted)' } },
+          `feature ${GBs(x.parts.feature)} · reports ${GBs(x.parts.reports)} · 파일 ${x.files}개`),
+        el('td', {}, ''),
+        el('td', { class: 'mono', style: { fontWeight: 800, color: x.warn ? '#e5484d' : '' },
+          title: x.warn ? `임계 ${u.warn_gb}GB 초과` : '' }, GBs(x.bytes)),
+      ));
+    });
+
+  box.append(el('details', { style: { marginTop: '4px' } },
+    el('summary', { style: { fontSize: '12px', cursor: 'pointer' } },
+      `DB 사용량 — 소스별 (${Object.entries(u.by_source || {})
+        .sort((a, b) => b[1].bytes - a[1].bytes)
+        .map(([s, a]) => `${s} ${GBs(a.bytes)}`).join(' · ')})`),
+    alTable(['제품', '소스', '기준 열', 'raw', 'event', '소계'], rows),
+    el('div', { style: { fontSize: '11px', color: 'var(--text-muted)', marginTop: '4px' } },
+      `공용 wide ${GBs((u.shared?.wide?.bytes) || 0)} · send ${GBs((u.shared?.send?.bytes) || 0)}`
+      + ` · 임계 ${u.warn_gb}GB · ${u.db_root || ''}`),
   ));
   return box;
 }

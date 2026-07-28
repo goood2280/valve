@@ -45,6 +45,10 @@
 #     · 손으로 고칠 땐 따옴표를 붙일 것 — 9:00 은 yaml 이 540 으로 읽는다
 #
 # sources — 소스별 추출 테이블/컬럼 -------------------------------------
+#   time_col   raw 를 date= 파티션으로 나누는 기준 열 (생략 시 자동 인식 —
+#              columns 에서 'time' 이 들어간 첫 열. FAB·ET=tkout_time, INLINE·VM=time)
+#              쿼리 구간이 여러 날에 걸쳐도 행은 이 열의 날짜로 각자 맞는 파티션에 들어간다.
+#              적어 둔 열이 columns 에 없으면 기동/실행 시 에러로 알려 준다.
 #   FAB / INLINE / VM  raw + event (event DB 를 만든다)
 #   ET                 raw 전용 (event: false). auto report 와 동일한 reformatter 인식 —
 #                      config/reformatter/{vehicle}_reformatter.csv 의 CATEGORY=REAL 행

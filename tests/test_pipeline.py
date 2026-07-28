@@ -258,10 +258,38 @@ def test_raw_query_window_is_half_open(pipe):
     for (_, prev_end), (nxt_start, _) in zip(windows, windows[1:]):
         assert prev_end == nxt_start                         # 빈틈도 겹침도 없다
 
-    # 실제 저장도 하루=한 파티션 (시간 컬럼 날짜로 파티셔닝되므로 섞이지 않는다)
+    # 실제 저장 검증 — 파티션 기준 열(FAB·ET=tkout_time, INLINE·VM=time)의 날짜로
+    # 나뉘므로, 쿼리 구간이 넓어져도 각 date= 안에는 그 날 행만 들어간다.
+    import polars as pl
     pipe.run_raw_query("VH_PRODA")
-    dates = pipe.status("VH_PRODA")["raw"]["FAB"]
-    assert len(dates) == len(set(dates))
+    assert pipe._time_col("FAB") == "tkout_time"
+    assert pipe._time_col("INLINE") == "time"
+    for src in ("FAB", "INLINE", "VM"):
+        tcol = pipe._time_col(src)
+        dirs = sorted(pipe.raw_dir("VH_PRODA", src).glob("date=*"))
+        assert dirs, f"{src} raw 파티션 없음"
+        assert len({d.name for d in dirs}) == len(dirs)        # 날짜 중복 없음
+        for d in dirs:
+            df = pl.concat([pl.read_parquet(f) for f in d.glob("*.parquet")])
+            got = set(df[tcol].cast(pl.Utf8).str.slice(0, 10).to_list())
+            assert got == {d.name[5:]}, f"{src} {d.name} 에 다른 날짜 행이 섞임: {got}"
+
+
+def test_explicit_time_col_override_is_validated(pipe):
+    """파티션 기준 열을 명시할 수 있고, 오타는 조용히 넘어가지 않는다
+    (기준 열을 못 찾으면 하루치가 통째로 엉뚱한 파티션으로 들어간다)."""
+    import pytest as _pytest
+
+    cfg = pipe.global_cfg()
+    cfg["sources"]["FAB"]["time_col"] = "tkout_time"
+    pipe.save_global_cfg(cfg)
+    assert pipe._time_col("FAB") == "tkout_time"
+
+    cfg = pipe.global_cfg()
+    cfg["sources"]["FAB"]["time_col"] = "no_such_time"
+    pipe.save_global_cfg(cfg)
+    with _pytest.raises(ValueError, match="time_col"):
+        pipe._time_col("FAB")
 
 
 def test_db_usage_flags_vehicles_over_threshold(pipe):
@@ -271,6 +299,18 @@ def test_db_usage_flags_vehicles_over_threshold(pipe):
     assert u["vehicles"]["VH_PRODA"]["bytes"] > 0
     assert u["vehicles"]["VH_PRODA"]["parts"]["raw"] > 0
     assert u["warn_gb"] == 40 and not u["warn_vehicles"]     # 기본 임계 40GB
+
+    # 소스(FAB/INLINE/VM/ET)별 raw·event 를 따로 본다 — 무엇부터 지울지 정하는 근거
+    srcs = u["vehicles"]["VH_PRODA"]["sources"]
+    assert {"FAB", "INLINE", "VM"} <= set(srcs)
+    assert srcs["FAB"]["raw"] > 0 and srcs["FAB"]["event"] > 0
+    assert srcs["FAB"]["time_col"] == "tkout_time"
+    assert srcs["ET"]["event_enabled"] is False and srcs["ET"]["event"] == 0
+    assert u["by_source"]["FAB"]["bytes"] >= srcs["FAB"]["bytes"]   # 전 제품 합
+    # 제품 합계 = 소스별 raw+event + feature + reports
+    parts = u["vehicles"]["VH_PRODA"]["parts"]
+    assert parts["raw"] == sum(d["raw"] for d in srcs.values())
+    assert parts["event"] == sum(d["event"] for d in srcs.values())
 
     # 임계를 아주 낮추면 경고로 잡힌다 (운영에서 40GB 초과 시 나오는 그 표시)
     cfg = pipe.global_cfg()
