@@ -932,8 +932,8 @@ class FeaturePipeline:
             for date_dir in sorted(self.raw_dir(vehicle, source).glob("date=*")):
                 raw_files = sorted(date_dir.glob("*.parquet"))  # data.parquet (구 part-000 호환)
                 out_dir = edir / date_dir.name
-                done = bool(list(out_dir.glob("*.parquet"))) if out_dir.exists() else False
-                if not raw_files or (done and not rebuild):
+                if not raw_files or (not rebuild
+                                     and self._event_partition_fresh(raw_files, out_dir)):
                     continue
                 raw = pl.concat([pl.read_parquet(f) for f in raw_files])
                 rows_in += raw.height
@@ -961,6 +961,26 @@ class FeaturePipeline:
             results[source] = {"raw_rows": rows_in, "event_rows": rows_out,
                                "partitions": parts, "rebuilt": rebuild}
         return results
+
+    @staticmethod
+    def _event_partition_fresh(raw_files: list, out_dir: Path) -> bool:
+        """이 날짜의 event 파티션이 raw 보다 최신인가.
+
+        raw 는 롤링 윈도우(raw_days)로 매 실행 재조회되고 실패 유닛도 재시도로
+        다시 받아진다 — 그때마다 파티션이 새 데이터로 덮인다. 예전엔 'event
+        파일이 있으면 skip' 이라 늦게 도착한 데이터가 event 에 영영 반영되지
+        않았다(첫 스냅샷 고정). raw 가 event 보다 새로 쓰였으면 다시 만든다."""
+        if not out_dir.exists():
+            return False
+        out_files = list(out_dir.glob("*.parquet"))
+        if not out_files:
+            return False
+        try:
+            raw_m = max(f.stat().st_mtime for f in raw_files)
+            ev_m = max(f.stat().st_mtime for f in out_files)
+        except OSError:
+            return False
+        return ev_m >= raw_m
 
     @staticmethod
     def _partition_files(root: Path) -> list[Path]:
@@ -1569,9 +1589,16 @@ class FeaturePipeline:
                     meta = json.loads(meta_path.read_text(encoding="utf-8"))
                 except Exception:
                     meta = {}
+            # 미처리 = event 파티션이 없거나, raw 가 그 뒤에 다시 받아진 날짜
+            # (롤링 재조회·재시도 — run_event 의 _event_partition_fresh 와 같은 기준)
+            pending = []
+            for d in raw[source]:
+                rf = sorted((self.raw_dir(vehicle, source) / f"date={d}").glob("*.parquet"))
+                if rf and not self._event_partition_fresh(rf, edir / f"date={d}"):
+                    pending.append(d)
             event[source] = {
                 "dates": dates,
-                "pending": [d for d in raw[source] if d not in dates],
+                "pending": pending,
                 "stale": bool(dates) and meta.get("ver") != self.event_version(vehicle, source),
                 "applied_ts": meta.get("ts"),
                 "matching_file": meta.get("file"),

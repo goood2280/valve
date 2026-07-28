@@ -1,12 +1,26 @@
 {
   "name": "Valve",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "codename": "valve",
   "pairs_with": "flow",
   "purpose": "DataLake 수도꼭지 — 사내 API 에서 데이터를 뽑아 S3 로 흘려 flow 에 공급",
   "tagline": "turn the valve · feed the flow",
   "created": "2026-04-24",
   "changelog": [
+    {
+      "version": "0.3.5",
+      "date": "2026-07-28",
+      "tag": "fix",
+      "title": "raw 실패 유닛 영구 재시도 큐 + 재조회 raw 가 event 에 반영되지 않던 문제 수정 + 이상로그 severity",
+      "changes": [
+        "raw 실패 유닛 재시도 큐 — 실패한 (source×날짜) 유닛은 logs/pipeline_retries.json 에 남아 raw_days 윈도우를 벗어나도 성공할 때까지 재시도 (runtime.retry_delays_sec 백오프, 기본 5m/15m/30m/1h). 스케줄러가 재시도 시각이 되면 실행을 걸고, 12h 초과·5회 이상이면 severity=critical (GET /api/pipeline/retries)",
+        "이상로그 severity 3단계(info/warning/critical) — pipeline_runs·jobs history 에 기록/필터, 로그 탭 severity pill",
+        "fix: event 단계가 'event 파티션이 있으면 skip' 이라 롤링 윈도우 재조회·재시도로 raw 가 다시 받아져도 event 는 첫 스냅샷에 고정되던 문제 — raw 파티션이 event 보다 새로 쓰였으면 해당 날짜만 다시 만든다 (_event_partition_fresh, mtime 비교). 늦게 도착한 데이터가 이제 event/feature 에 반영된다",
+        "status 의 미처리(pending) 판정도 같은 기준 — event 파티션이 없거나 raw 가 그 뒤에 다시 받아진 날짜 (DB heatmap '미처리' 표시가 정확해짐)",
+        "알람 탭: 제품 현황에 '놓친 유닛 N · 재시도 HH:MM' 배지(12시간 넘게 밀리면 빨강), 실행 로그 상세에 실패 유닛의 시도 횟수·재시도 예정 시각과 재시도 성공(복구) 줄, 결과 표기를 성공/부분 실패/중단 3단계로",
+        "매칭 csv ↔ event DB 갱신 매핑은 기존 로직 검증으로 확인: vehicle_matching → FAB·VM event 전체 재생성(적용 안 된 vehicle×소스만), inline_matching(inline.csv) → INLINE event 재생성, vm_matching(vm.csv) 은 event 필터와 무관하고 feature 단계가 매 실행 전체 재산출이라 다음 실행에서 항상 반영"
+      ]
+    },
     {
       "version": "0.3.4",
       "date": "2026-07-28",

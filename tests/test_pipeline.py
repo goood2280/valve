@@ -241,6 +241,34 @@ def test_status_reports_feature_covered_span(pipe):
     assert all(f.suffix == ".parquet" for f in pipe.feature_dir("VH_PRODA").glob("*.parquet"))
 
 
+def test_requeried_raw_refreshes_event_partition(pipe):
+    """롤링 윈도우 재조회/재시도로 raw 파티션이 다시 받아지면 해당 날짜 event 도
+    다시 만들어져야 한다 — 예전엔 'event 파일이 있으면 skip' 이라 늦게 도착한
+    데이터가 event 에 반영되지 않았다 (첫 스냅샷 고정)."""
+    import polars as pl
+    pipe.run_raw_query("VH_PRODA")
+    pipe.run_event("VH_PRODA")
+    st = pipe.status("VH_PRODA")
+    assert st["event"]["FAB"]["pending"] == []      # 방금 만들었으니 전부 최신
+
+    # 한 날짜의 raw 를 '늦게 도착한 데이터' 로 다시 쓰기 — GATE_ETCH 행 제거
+    # (다시 쓰인 mtime 이 event 파티션보다 새것이 된다)
+    date_dir = sorted(pipe.raw_dir("VH_PRODA", "FAB").glob("date=*"))[0]
+    d = date_dir.name[5:]
+    fp = date_dir / "data.parquet"
+    raw = pl.read_parquet(fp)
+    pl.DataFrame(raw.filter(pl.col("step_desc") != "GATE_ETCH")).write_parquet(fp)
+
+    st = pipe.status("VH_PRODA")
+    assert d in st["event"]["FAB"]["pending"]        # 미처리로 감지
+
+    r = pipe.run_event("VH_PRODA")
+    assert not r["FAB"]["rebuilt"]                   # 전체 재생성이 아니라 그 날짜만
+    ev = pl.read_parquet(pipe.event_dir("VH_PRODA", "FAB") / date_dir.name / "data.parquet")
+    assert "GATE_ETCH" not in set(ev["step_desc"].unique())   # 새 raw 가 반영됨
+    assert pipe.status("VH_PRODA")["event"]["FAB"]["pending"] == []
+
+
 def test_inline_matching_change_rebuilds_inline_event(pipe):
     import polars as pl
     pipe.run_raw_query("VH_PRODA")

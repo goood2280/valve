@@ -19,6 +19,17 @@ _products = None
 _settings = None
 _log_path: Path = None
 
+SEVERITY_ORDER = {"info": 0, "warning": 1, "critical": 2}
+
+
+def _history_severity(status: str | None, probe_failed: bool = False) -> str:
+    status = (status or "").lower()
+    if status in {"failed", "upload_failed"}:
+        return "critical"
+    if status in {"timeout_reshard", "completeness_failed", "partial_failed", "retry_wait"} or probe_failed:
+        return "warning"
+    return "info"
+
 
 def deps(state, executor, planner, products, settings, log_path=None):
     global _state, _executor, _planner, _products, _settings, _log_path
@@ -183,17 +194,16 @@ async def s3_flush():
 
 @router.get("/history")
 def history(limit: int = 300, product: str = "", source: str = "",
-            status: str = "", failed_only: bool = False, kind: str = "chunk"):
+            status: str = "", failed_only: bool = False, kind: str = "chunk",
+            severity: str = "", min_severity: str = ""):
     """실행 이력: jobs.jsonl 뒤에서부터 tail 하며 필터링.
     - kind: 'chunk'(기본) · 'plan' · 'partition' · 'all'
     - failed_only: failed / timeout_reshard / completeness_failed / upload_failed 만
     - status: 특정 상태 1개로 필터 (정확 일치). failed_only 와 동시 사용 가능
     반환은 최신순 (내림차순), 시도 시간/상태/에러 타입/메시지/duration 포함.
     """
-    if not _log_path or not _log_path.exists():
-        return {"items": [], "total_scanned": 0, "log_exists": False}
-
     limit = max(1, min(int(limit or 300), 5000))
+    scan_item_cap = limit if not (severity or min_severity) else min(5000, max(200, limit * 20))
     kind_filter = None if (kind or "").lower() == "all" else (kind or "chunk").lower()
     FAIL_STATUSES = {"failed", "timeout_reshard", "completeness_failed", "upload_failed"}
 
@@ -203,11 +213,13 @@ def history(limit: int = 300, product: str = "", source: str = "",
     total_scanned = 0
 
     # 뒤에서부터 라인 읽기 (파일이 크지 않다고 가정; 커지면 read reverse 최적화)
-    try:
-        with open(_log_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-    except Exception as e:
-        raise HTTPException(500, f"log read error: {e}")
+    lines = []
+    if _log_path and _log_path.exists():
+        try:
+            with open(_log_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+        except Exception as e:
+            raise HTTPException(500, f"log read error: {e}")
 
     for raw in reversed(lines):
         total_scanned += 1
@@ -258,6 +270,7 @@ def history(limit: int = 300, product: str = "", source: str = "",
                 "error_type": upd.get("error_type"),
                 "error": upd.get("error"),
                 "shard_filters": upd.get("shard_filters"),
+                "severity": _history_severity(st),
             }
             items.append(item)
             seen_chunks.add(cid)
@@ -267,6 +280,7 @@ def history(limit: int = 300, product: str = "", source: str = "",
                 continue
             if source and p.get("source") != source:
                 continue
+            probe_failed = bool((p.get("probe_meta") or {}).get("error"))
             items.append({
                 "ts": evt.get("ts"),
                 "kind": "plan",
@@ -276,6 +290,7 @@ def history(limit: int = 300, product: str = "", source: str = "",
                 "date": p.get("date"),
                 "chunks": len(p.get("chunks") or []),
                 "probe_meta": p.get("probe_meta"),
+                "severity": _history_severity(None, probe_failed),
             })
         elif k == "partition":
             upd = evt.get("update") or {}
@@ -295,9 +310,56 @@ def history(limit: int = 300, product: str = "", source: str = "",
                 "product": prod_, "source": src_, "date": date_,
                 "status": upd.get("status"),
                 "update": upd,
+                "severity": _history_severity(upd.get("status")),
             })
 
-        if len(items) >= limit:
+        if len(items) >= scan_item_cap:
             break
 
-    return {"items": items, "total_scanned": total_scanned, "log_exists": True}
+    # The Logs tab is the operational view, so include pipeline-level runs as
+    # well as low-level planner/chunk events when kind=all or kind=pipeline.
+    if kind_filter in (None, "pipeline") and _log_path:
+        pipeline_path = _log_path.parent / "pipeline_runs.jsonl"
+        if pipeline_path.exists():
+            try:
+                pipeline_lines = pipeline_path.read_text(encoding="utf-8").splitlines()
+            except Exception:
+                pipeline_lines = []
+            for raw in reversed(pipeline_lines[-max(limit * 3, 100):]):
+                try:
+                    rec = json.loads(raw)
+                except Exception:
+                    continue
+                prod_ = rec.get("product")
+                raw_errors = ((rec.get("stages") or {}).get("raw") or {}).get("errors") or []
+                st = "failed" if rec.get("error") else ("partial_failed" if raw_errors else "success")
+                sev = rec.get("severity") or _history_severity(st)
+                if product and prod_ != product:
+                    continue
+                if source and not any(e.get("source") == source for e in raw_errors):
+                    continue
+                if status and st != status:
+                    continue
+                if failed_only and st == "success":
+                    continue
+                items.append({
+                    "ts": rec.get("ended_ts") or rec.get("ts"), "kind": "pipeline",
+                    "vehicle": rec.get("vehicle"), "product": prod_, "source": None,
+                    "date": None, "status": st, "severity": sev,
+                    "duration_sec": rec.get("elapsed_sec"), "error": rec.get("error"),
+                    "raw_errors": raw_errors, "retry": rec.get("retry") or {},
+                    "mode": rec.get("mode"),
+                })
+
+    valid_severity = severity if severity in SEVERITY_ORDER else ""
+    valid_min = min_severity if min_severity in SEVERITY_ORDER else ""
+    if valid_severity:
+        items = [v for v in items if v.get("severity") == valid_severity]
+    if valid_min:
+        floor = SEVERITY_ORDER[valid_min]
+        items = [v for v in items if SEVERITY_ORDER.get(v.get("severity"), 0) >= floor]
+    items.sort(key=lambda v: float(v.get("ts") or 0), reverse=True)
+    items = items[:limit]
+    counts = {name: sum(v.get("severity") == name for v in items) for name in SEVERITY_ORDER}
+    return {"items": items, "severity_counts": counts, "total_scanned": total_scanned,
+            "log_exists": bool(lines) or bool(items)}

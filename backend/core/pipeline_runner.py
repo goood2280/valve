@@ -46,6 +46,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from backend.core.feature_pipeline import FeaturePipeline
+from backend.core.pipeline_retry import PipelineRetryStore
 from backend.core.run_log import RunLog
 from backend.core.runtime_env import WorkerPlan, plan_workers
 
@@ -62,6 +63,7 @@ class PipelineRunner:
     def __init__(self, pipe: FeaturePipeline, run_log: RunLog | None = None):
         self.pipe = pipe
         self.runs = run_log or RunLog(pipe.root / "logs" / "pipeline_runs.jsonl")
+        self.retries = PipelineRetryStore(pipe.root / "logs" / "pipeline_retries.json")
         self._bg_task: asyncio.Task | None = None
         self.last_run: dict | None = None
         self.last_rebuild: dict | None = None   # 매칭 갱신 재생성 결과 (조용한 실패 방지)
@@ -80,6 +82,24 @@ class PipelineRunner:
 
     def plan(self) -> WorkerPlan:
         return plan_workers(self.runtime_cfg())
+
+    def retry_delays(self) -> list[int]:
+        values = self.runtime_cfg().get("retry_delays_sec") or [300, 900, 1800, 3600]
+        try:
+            parsed = [max(1, int(v)) for v in values]
+        except (TypeError, ValueError):
+            parsed = [300, 900, 1800, 3600]
+        return parsed or [300, 900, 1800, 3600]
+
+    def retry_severity(self, vehicle: str, now: float | None = None) -> str:
+        summary = self.retries.summary(vehicle, now)
+        rt = self.runtime_cfg()
+        critical_age = int(rt.get("retry_critical_after_sec") or 43200)
+        critical_attempts = int(rt.get("retry_critical_attempts") or 5)
+        if summary["pending"] and (summary["oldest_age_sec"] >= critical_age
+                                   or summary["max_attempts"] >= critical_attempts):
+            return "critical"
+        return "warning" if summary["pending"] else "info"
 
     def schedule_enabled(self) -> bool:
         """자동 실행 마스터 스위치 — 켜져 있고 실제 주기를 가진 제품이 하나라도 있으면 True."""
@@ -193,18 +213,27 @@ class PipelineRunner:
             rpd, src = self.runs_per_day(cfg or {})
             interval = DAY_SEC / rpd if rpd > 0 else 0.0
             t = last.get(v)
-            next_ts = (t + interval) if (t and interval > 0) else (now if interval > 0 else None)
+            normal_next = (t + interval) if (t and interval > 0) else (now if interval > 0 else None)
+            retry = self.retries.summary(v, now)
+            retry_next = retry.get("next_retry_at") if retry.get("pending") else None
+            candidates = [x for x in (normal_next, retry_next) if x is not None]
+            next_ts = min(candidates) if candidates else None
             # 금지 시간대에 걸린 예정은 해제 시각으로 밀린다 (건너뛰는 게 아니라 미뤄짐)
             if quiet_until and next_ts is not None and next_ts < quiet_until:
                 next_ts = quiet_until
+            normal_due = bool(interval > 0 and (t is None or now - t >= interval))
+            retry_due = bool(interval > 0 and retry.get("due"))
             out[v] = {
                 "vehicle": v, "product": (cfg or {}).get("product"),
                 "runs_per_day": rpd, "source": src,
                 "interval_sec": interval,
                 "interval_hours": round(interval / 3600, 2) if interval else 0,
                 "last_ts": t, "next_ts": next_ts,
-                "due": bool(interval > 0 and (t is None or now - t >= interval)
-                            and not quiet_until),
+                "due": bool((normal_due or retry_due) and not quiet_until),
+                "retry_pending": retry.get("pending", 0),
+                "retry_due": retry.get("due", 0),
+                "retry_oldest_age_sec": retry.get("oldest_age_sec", 0),
+                "retry_next_ts": retry_next,
                 "quiet_blocked": bool(quiet_until and interval > 0),
                 "enabled": bool(master and interval > 0),
             }
@@ -239,6 +268,7 @@ class PipelineRunner:
             snap["quiet"] = self.quiet_state()
         except Exception:
             snap["quiet"] = {"enabled": False, "now": False}
+        snap["retry"] = self.retries.summary()
         return snap
 
     def _raw_guarded(self, cfg, source, start, end, split) -> int:
@@ -258,6 +288,14 @@ class PipelineRunner:
             cfg = self.pipe.vehicle_cfg(vehicle)
             rec["product"] = cfg.get("product")
             units = self.pipe._raw_units(cfg)
+            # Failed units remain retryable after they leave the rolling raw_days window.
+            # De-duplicate because recent failed dates are also present in normal units.
+            unit_keys = {(str(s), str(a), str(b), str(label)) for s, a, b, label in units}
+            for unit in self.retries.due_units(vehicle):
+                key = tuple(str(v) for v in unit)
+                if key not in unit_keys:
+                    units.append(unit)
+                    unit_keys.add(key)
 
             # 1) RAW — (source × 날짜) 병렬. 동시 실행은 전역 raw 세마포어가 제한(≤ raw_api_max).
             ts = time.time()
@@ -268,16 +306,25 @@ class PipelineRunner:
             with ThreadPoolExecutor(max_workers=max(1, plan.raw_workers),
                                     thread_name_prefix=f"raw-{vehicle}") as ex:
                 futs = {ex.submit(self._raw_guarded, cfg, *u): u for u in units}
+                recovered = []
                 for f in as_completed(futs):
-                    src, start, *_ = futs[f]
+                    src, start, end, split = futs[f]
                     done += 1
                     try:
                         rows[src] = rows.get(src, 0) + f.result()
+                        resolved = self.retries.mark_success(vehicle, src, start, end, split)
+                        if resolved:
+                            recovered.append({"source": src, "date": str(start),
+                                              "attempts": resolved.get("attempts")})
                     except Exception as e:
-                        errors.append({"source": src, "date": str(start), "error": str(e)[:300]})
+                        retry = self.retries.record_failure(
+                            vehicle, src, start, end, split, str(e), self.retry_delays())
+                        errors.append({"source": src, "date": str(start), "error": str(e)[:300],
+                                       "attempts": retry["attempts"],
+                                       "next_retry_at": retry["next_retry_at"]})
                     self._prog(vehicle, raw_done=done, source=src)
             stages["raw"] = {"sec": round(time.time() - ts, 2), "units": len(units),
-                             "rows": rows, "errors": errors}
+                             "rows": rows, "errors": errors, "recovered": recovered}
 
             # 2) EVENT
             ts = time.time()
@@ -322,10 +369,19 @@ class PipelineRunner:
                 "wide": wide,
                 "elapsed_sec": round(time.time() - t0, 2),
             }
+            retry_summary = self.retries.summary(vehicle)
             rec["ok"] = not errors
+            rec["severity"] = self.retry_severity(vehicle)
+            rec["retry"] = {k: retry_summary[k] for k in
+                            ("pending", "due", "oldest_age_sec", "next_retry_at", "max_attempts")}
+            result["severity"] = rec["severity"]
+            result["retry"] = dict(rec["retry"])
+            self._prog(vehicle, stage="done", severity=rec["severity"],
+                       retry_pending=retry_summary["pending"])
             return result
         except Exception as e:
             rec["error"] = str(e)[:500]
+            rec["severity"] = "critical"
             raise
         finally:
             rec["ended_ts"] = time.time()
@@ -385,7 +441,7 @@ class PipelineRunner:
                 self.progress["send_form"] = "error" if "error" in send_form else "done"
 
             summary = {
-                "ok": all("error" not in r for r in results.values()),
+                "ok": all("error" not in r and not r.get("errors") for r in results.values()),
                 "mode": mode, "vehicles": results, "plan": plan.__dict__,
                 "send_form": send_form,
                 "elapsed_sec": round(time.time() - t0, 2), "ts": t0,

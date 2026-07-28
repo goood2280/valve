@@ -21,6 +21,12 @@
 #     sched_tick_sec   "돌 때가 된 제품" 을 확인하는 간격 — 주기 자체가 아니다
 #     loop_enabled     쉬지 않고 반복 실행 (개발·백필용)
 #
+#   raw 실패 유닛 재시도 — 실패한 (source×날짜) 유닛은 raw_days 윈도우를
+#   벗어나도 성공할 때까지 재시도 큐(logs/pipeline_retries.json)에 남는다.
+#     retry_delays_sec          시도 횟수별 대기 (마지막 값으로 고정 반복)
+#     retry_critical_after_sec  이 시간 넘게 밀리면 severity=critical (기본 12h)
+#     retry_critical_attempts   이 횟수 이상 실패해도 critical
+#
 #   실행 금지 시간대 — 이 구간에는 자동 실행(스케줄·루프)을 띄우지 않는다.
 #     quiet_enabled / quiet_start / quiet_end   서버 로컬 시각 "HH:MM"
 #     · start > end 면 자정을 넘는 구간 (예 '23:00' ~ '02:00')
@@ -70,6 +76,9 @@ runtime:
   mem_per_worker_gb: 4
   cpu_cores: auto
   interval_hours: 6
+  retry_delays_sec: [300, 900, 1800, 3600]
+  retry_critical_after_sec: 43200
+  retry_critical_attempts: 5
   schedule_enabled: true
   sched_tick_sec: 60
   loop_enabled: false

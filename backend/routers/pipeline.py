@@ -150,11 +150,19 @@ def put_pipeline_schedule(vehicle: str, body: dict = Body(...)):
 
 
 @router.get("/api/pipeline/runs")
-def pipeline_runs(vehicle: str = "", limit: int = 50, failed_only: bool = False):
+def pipeline_runs(vehicle: str = "", limit: int = 50, failed_only: bool = False,
+                  severity: str = ""):
     """제품별 실행 로그 — 단계(raw/event/feature/wide)별 소요·산출·실패 사유."""
     return {"runs": runner.runs.tail(limit=limit, vehicle=vehicle or None,
-                                     failed_only=failed_only),
-            "summary": runner.runs.vehicle_summary()}
+                                     failed_only=failed_only, severity=severity or None),
+            "summary": runner.runs.vehicle_summary(),
+            "retry": runner.retries.summary(vehicle or None)}
+
+
+@router.get("/api/pipeline/retries")
+def pipeline_retries(vehicle: str = ""):
+    """Persistent failed source/date units waiting for eventual refresh."""
+    return runner.retries.summary(vehicle or None)
 
 
 @router.get("/api/pipeline/progress")

@@ -40,6 +40,9 @@ class RunLog:
 
     # ── 쓰기 ──
     def append(self, rec: dict) -> dict:
+        if not rec.get("severity"):
+            rec["severity"] = ("critical" if rec.get("error") else
+                               ("warning" if rec.get("ok") is False else "info"))
         line = json.dumps(rec, ensure_ascii=False, default=str)
         with self._lock:
             try:
@@ -81,7 +84,8 @@ class RunLog:
         return out
 
     def tail(self, limit: int = 100, vehicle: str | None = None,
-             mode: str | None = None, failed_only: bool = False) -> list[dict]:
+             mode: str | None = None, failed_only: bool = False,
+             severity: str | None = None) -> list[dict]:
         """최신순. vehicle/mode/실패 필터."""
         recs = self._all()
         if vehicle:
@@ -90,6 +94,9 @@ class RunLog:
             recs = [r for r in recs if r.get("mode") == mode]
         if failed_only:
             recs = [r for r in recs if not r.get("ok")]
+        if severity:
+            recs = [r for r in recs if (r.get("severity") or
+                    ("warning" if r.get("ok") is False else "info")) == severity]
         return recs[-max(1, int(limit)):][::-1]
 
     def last_started(self) -> dict[str, float]:

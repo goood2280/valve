@@ -53,7 +53,7 @@ const STATE = {
   partitions: {},
   currentTab: 'monitor',
   es: null,
-  logsFilter: { product: '', source: '', status: '', failed_only: false, kind: 'chunk', limit: 300 },
+  logsFilter: { product: '', source: '', status: '', severity: '', failed_only: false, kind: 'all', limit: 300 },
   logsItems: [],
   logsRefresh: null,
 };
@@ -1442,6 +1442,14 @@ const LOG_STATUS_META = {
   timeout_reshard:      { label: 'timeout',   cls: 'err',  color: '#991b1b' },
   completeness_failed:  { label: 'incomplete', cls: 'warn', color: '#92400e' },
   upload_failed:        { label: 'upload err', cls: 'err', color: '#991b1b' },
+  partial_failed:       { label: 'partial',    cls: 'warn', color: '#92400e' },
+  retry_wait:           { label: 'retry',      cls: 'warn', color: '#92400e' },
+};
+
+const LOG_SEVERITY_META = {
+  info:     { label: 'INFO',     cls: 'sev-info' },
+  warning:  { label: 'WARNING',  cls: 'sev-warning' },
+  critical: { label: 'CRITICAL', cls: 'sev-critical' },
 };
 
 async function renderLogs() {
@@ -1471,6 +1479,13 @@ async function renderLogs() {
       el('option', { value: '' }, '전체'),
       ...Object.keys(LOG_STATUS_META).map(k => el('option', { value: k, ...(k === f.status ? { selected: 'selected' } : {}) }, k)),
     ),
+    el('label', { class: 'hint' }, 'Severity'),
+    el('select', { class: 'inline-input', onchange: e => { f.severity = e.target.value; applyAndReload(); } },
+      el('option', { value: '' }, 'ALL'),
+      ...Object.keys(LOG_SEVERITY_META).map(k => el('option', {
+        value: k, ...(k === f.severity ? { selected: 'selected' } : {})
+      }, LOG_SEVERITY_META[k].label)),
+    ),
     el('label', { class: 'check' },
       el('input', { type: 'checkbox', ...(f.failed_only ? { checked: 'checked' } : {}),
         onchange: e => { f.failed_only = e.target.checked; applyAndReload(); } }),
@@ -1478,7 +1493,7 @@ async function renderLogs() {
     ),
     el('label', { class: 'hint' }, '종류'),
     el('select', { class: 'inline-input', onchange: e => { f.kind = e.target.value; applyAndReload(); } },
-      ...['chunk','plan','partition','all'].map(k => el('option', { value: k, ...(k === f.kind ? { selected: 'selected' } : {}) }, k)),
+      ...['all','pipeline','chunk','plan','partition'].map(k => el('option', { value: k, ...(k === f.kind ? { selected: 'selected' } : {}) }, k)),
     ),
     el('label', { class: 'hint' }, 'N'),
     el('input', { type: 'number', class: 'inline-input narrow', min: '10', max: '5000',
@@ -1493,6 +1508,12 @@ async function renderLogs() {
         el('div', { class: 'section-title' }, '실행 로그'),
         el('div', { class: 'section-desc' }, '각 chunk 의 마지막 시도 결과 — 언제 시도했고, 얼마 걸렸고, 왜 실패했는지.'),
       ),
+    ),
+    el('div', { class: 'card logs-highlight-card', id: 'logs-highlights' },
+      el('div', { class: 'card-title' }, 'Important issues',
+        el('span', { class: 'count' }, 'WARNING / CRITICAL')),
+      el('div', { id: 'logs-highlight-body', class: 'logs-highlight-grid' },
+        el('div', { class: 'empty' }, 'Loading important events…')),
     ),
     el('div', { class: 'card', id: 'logs-card' },
       el('div', { class: 'card-title' }, '📜 실행 이력', el('span', { class: 'count' }, '…')),
@@ -1517,15 +1538,22 @@ async function loadLogs() {
   if (f.product) q.set('product', f.product);
   if (f.source) q.set('source', f.source);
   if (f.status) q.set('status', f.status);
+  if (f.severity) q.set('severity', f.severity);
   if (f.failed_only) q.set('failed_only', 'true');
   if (f.kind) q.set('kind', f.kind);
   q.set('limit', String(f.limit || 300));
 
   const body = $('#logs-body');
+  const highlightBody = $('#logs-highlight-body');
   const countEl = document.querySelector('#logs-card .card-title .count');
   try {
-    const r = await api.get(`/api/jobs/history?${q.toString()}`);
+    const hq = new URLSearchParams({ kind: 'all', min_severity: 'warning', limit: '8' });
+    const [r, highlights] = await Promise.all([
+      api.get(`/api/jobs/history?${q.toString()}`),
+      api.get(`/api/jobs/history?${hq.toString()}`),
+    ]);
     STATE.logsItems = r.items || [];
+    if (highlightBody) renderLogHighlights(highlightBody, highlights.items || []);
     if (countEl) countEl.textContent = `${STATE.logsItems.length} 건${r.log_exists ? '' : ' (로그 없음)'}`;
     if (!STATE.logsItems.length) {
       body.innerHTML = '';
@@ -1540,6 +1568,50 @@ async function loadLogs() {
   }
 }
 
+function logReason(it) {
+  if (it.kind === 'pipeline') {
+    if (it.error) return it.error;
+    const errors = it.raw_errors || [];
+    if (errors.length) {
+      const first = errors[0];
+      const extra = errors.length > 1 ? ` +${errors.length - 1}` : '';
+      return `${first.source || 'RAW'} ${first.date || ''}: ${first.error || 'retry scheduled'}${extra}`;
+    }
+    return `pipeline ${it.status || ''}`;
+  }
+  if (it.kind === 'chunk') {
+    if (it.error) return `${it.error_type || 'error'}: ${it.error}`;
+    if (it.actual_rows != null) return `expected ${fmt.int(it.expected_rows)} · actual ${fmt.int(it.actual_rows)}`;
+  }
+  if (it.kind === 'plan') {
+    const pm = it.probe_meta || {};
+    if (pm.error) return `probe failed; fallback chunking: ${pm.error}`;
+    if (pm.skipped) return `probe skipped (${pm.reason || 'manual'})`;
+    return `chunks=${it.chunks} · probe=${pm.strategy || '-'}`;
+  }
+  return JSON.stringify(it.update || {}).slice(0, 160);
+}
+
+function renderLogHighlights(target, items) {
+  target.innerHTML = '';
+  if (!items.length) {
+    target.append(el('div', { class: 'logs-all-clear' }, '✓ No recent WARNING or CRITICAL events'));
+    return;
+  }
+  items.forEach(it => {
+    const sev = LOG_SEVERITY_META[it.severity] || LOG_SEVERITY_META.warning;
+    const when = it.ts ? `${fmt.ago(it.ts)} · ${new Date(it.ts * 1000).toLocaleString('sv').slice(5, 16)}` : '-';
+    target.append(el('div', { class: `logs-highlight ${sev.cls}` },
+      el('div', { class: 'logs-highlight-head' },
+        el('span', { class: `severity-pill ${sev.cls}` }, sev.label),
+        el('strong', {}, `${it.product || it.vehicle || '-'}${it.source ? ` / ${it.source}` : ''}`),
+        el('span', { class: 'hint' }, when),
+      ),
+      el('div', { class: 'logs-highlight-reason', title: logReason(it) }, logReason(it)),
+    ));
+  });
+}
+
 function renderLogsTable(items) {
   const tbl = el('table', { class: 'tbl logs-tbl' },
     el('thead', {}, el('tr', {},
@@ -1549,6 +1621,7 @@ function renderLogsTable(items) {
       el('th', {}, '소스'),
       el('th', {}, '날짜'),
       el('th', {}, '상태'),
+      el('th', {}, 'Severity'),
       el('th', {}, 'duration'),
       el('th', {}, 'rows'),
       el('th', {}, '사유 / 메모'),
@@ -1570,10 +1643,12 @@ function renderLogsTable(items) {
         } else {
           reason = JSON.stringify(it.update || {}).slice(0, 120);
         }
+        reason = logReason(it);
+        const sev = LOG_SEVERITY_META[it.severity] || LOG_SEVERITY_META.info;
         const probeFailed = it.kind === 'plan' && it.probe_meta?.error;
         const rowCls = [
-          it.status && ['failed','timeout_reshard','completeness_failed','upload_failed'].includes(it.status) ? 'row-err' : '',
-          probeFailed ? 'row-warn' : '',
+          it.severity === 'critical' ? 'row-err' : '',
+          it.severity === 'warning' || probeFailed ? 'row-warn' : '',
         ].filter(Boolean).join(' ');
         const rowsTxt = it.kind === 'chunk' && it.actual_rows != null
           ? `${fmt.int(it.actual_rows)}${it.expected_rows ? ` / ${fmt.int(it.expected_rows)}` : ''}`
@@ -1590,6 +1665,7 @@ function renderLogsTable(items) {
             : (it.kind === 'plan' && it.probe_meta?.skipped) ? el('span', { class: 'pill pending' }, 'probe skip')
             : (it.kind === 'plan') ? el('span', { class: 'pill run' }, 'planned')
             : '-'),
+          el('td', {}, el('span', { class: `severity-pill ${sev.cls}` }, sev.label)),
           el('td', { class: 'mono' }, it.duration_sec != null ? fmt.dur(it.duration_sec) : '-'),
           el('td', { class: 'mono' }, rowsTxt),
           el('td', { class: 'logs-reason', title: reason }, reason || ''),
@@ -2610,6 +2686,13 @@ function alSchedCell(v, sc, sum) {
     bits.push(el('span', { style: { color: '#e5484d' }, title: sum.last_error || '' },
       `최근 ${sum.runs}회 중 실패 ${sum.failed}`));
   }
+  if (sc.retry_pending) {
+    bits.push(el('span', {
+      style: { color: sc.retry_oldest_age_sec > 43200 ? '#e5484d' : '#f5a524', fontWeight: 700 },
+      title: '실패한 (source×날짜) 유닛 — 롤링 윈도우를 벗어나도 성공할 때까지 재시도 대상으로 남는다',
+    }, `놓친 유닛 ${sc.retry_pending}`
+      + (sc.retry_next_ts ? ` · 재시도 ${fmtClock(sc.retry_next_ts)}` : '')));
+  }
   return el('span', { style: { display: 'flex', gap: '5px', alignItems: 'center', fontSize: '11px' } }, ...bits);
 }
 
@@ -2695,7 +2778,10 @@ function alRunLog(data) {
       el('td', { class: 'mono' }, fmtRunTs(r.ts)),
       el('td', { class: 'mono', style: { fontWeight: 700 } }, r.vehicle || '-'),
       el('td', {}, RUN_MODE[r.mode] || r.mode || '-'),
-      el('td', { style: { color: r.ok ? '#30a46c' : '#e5484d', fontWeight: 700 } }, r.ok ? '성공' : '실패'),
+      // 성공 / 부분 실패(raw 유닛 일부 실패 — 재시도 큐에 남음) / 중단(단계 자체가 못 돎)
+      el('td', { style: { color: r.ok ? '#30a46c' : (r.error ? '#e5484d' : '#f5a524'), fontWeight: 700 },
+        title: r.error || '' },
+        r.ok ? '성공' : (r.error ? '중단' : '부분 실패')),
       el('td', { class: 'mono' }, `${r.elapsed_sec ?? '-'}s`),
       el('td', { style: { display: 'flex', gap: '10px', flexWrap: 'wrap' } }, ...bar),
     );
@@ -2731,7 +2817,11 @@ function runDetailText(r) {
   if (st.raw) {
     L.push(`[raw] ${st.raw.sec}s · 유닛 ${st.raw.units}`);
     Object.entries(st.raw.rows || {}).forEach(([s, n]) => L.push(`    ${s}: ${n} rows`));
-    (st.raw.errors || []).forEach((e) => L.push(`    ✗ ${e.source} ${e.date}: ${e.error}`));
+    (st.raw.errors || []).forEach((e) => L.push(
+      `    ✗ ${e.source} ${e.date}: ${e.error}`
+      + (e.attempts ? ` — 시도 ${e.attempts}회 · 재시도 예정 ${fmtRunTs(e.next_retry_at)}` : '')));
+    (st.raw.recovered || []).forEach((e) => L.push(
+      `    ↻ ${e.source} ${e.date}: 재시도 성공${e.attempts ? ` (실패 ${e.attempts}회 후 복구)` : ''}`));
   }
   if (st.event) {
     L.push(`[event] ${st.event.sec}s${st.event.rebuilt?.length ? ` · 전체 재생성: ${st.event.rebuilt.join(', ')}` : ''}`);
