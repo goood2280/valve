@@ -132,6 +132,21 @@ def get_split_date_ranges(query_span_days: int, split_span_days: int, today: dat
     return ranges
 
 
+def raw_query_window(start: date, end: date) -> tuple[date, date]:
+    """raw 유닛 (start, end) → 실제 쿼리 구간 [from, to) — to 는 **배타적**.
+
+    get_split_date_ranges 의 마지막 유닛은 (today, today) 라 그대로 쓰면 폭이 0 이다
+    (사내 API 에 dateFrom==dateTo 로 나가면 당일 데이터가 통째로 안 잡힌다).
+    반대로 양끝을 포함으로 해석하면 이웃 유닛과 하루씩 겹쳐 같은 날을 두 번 쿼리하고
+    같은 파티션을 두 유닛이 쓴다. 그래서 항상 반열림으로 통일한다:
+      (T-5, T-4) → [T-5, T-4)   하루
+      (T,   T  ) → [T,   T+1)   오늘 하루
+    저장은 어차피 시간 컬럼(tkout_time 등)의 날짜로 파티셔닝되므로(_write_raw_partitions)
+    구간이 여러 날에 걸쳐도 행은 각자 맞는 date= 파티션으로 들어간다.
+    """
+    return start, (end if end > start else start + timedelta(days=1))
+
+
 def safe_filename(name: str) -> str:
     name = re.sub(r'[\\/:\*\?"<>\|]+', "_", name)
     name = re.sub(r"\s+", "_", name)
@@ -638,6 +653,83 @@ class FeaturePipeline:
     def report_dir(self, vehicle: str) -> Path:
         return self.db_root() / "REPORTS" / vehicle
 
+    # ── DB 사용량 (제품별 경고 임계) ────────────────────────────
+    @staticmethod
+    def _dir_bytes(root: Path) -> tuple[int, int]:
+        """(바이트, 파일수) — 없으면 (0, 0). scandir 재귀 (심볼릭 링크는 따라가지 않음)."""
+        total = files = 0
+        stack = [str(root)]
+        while stack:
+            d = stack.pop()
+            try:
+                with os.scandir(d) as it:
+                    for e in it:
+                        try:
+                            if e.is_dir(follow_symlinks=False):
+                                stack.append(e.path)
+                            elif e.is_file(follow_symlinks=False):
+                                total += e.stat().st_size
+                                files += 1
+                        except OSError:
+                            continue
+            except OSError:
+                continue
+        return total, files
+
+    def db_warn_bytes(self) -> int:
+        """제품 하나의 DB 가 이 크기를 넘으면 경고 — runtime.db_warn_gb (기본 40GB)."""
+        try:
+            gb = float((self.global_cfg().get("runtime") or {}).get("db_warn_gb") or 40)
+        except (TypeError, ValueError):
+            gb = 40.0
+        if gb <= 0:                 # 0/음수 = 잘못 적은 값 — 기본값으로
+            gb = 40.0
+        return int(gb * (1024 ** 3))
+
+    def db_usage(self, ttl: float = 600.0, force: bool = False) -> dict:
+        """제품별 DB 사용량 — raw/event/feature/report 합계와 경고 여부.
+
+        전체 트리를 걷는 작업이라 기본 10분 캐시한다 (화면 폴링마다 걷지 않도록).
+        보존 정책은 두지 않는다 — 임계를 넘으면 알려만 주고, 무엇을 지울지는 사람이 판단한다."""
+        now = time.time()
+        cache = getattr(self, "_usage_cache", None)
+        if not force and cache and (now - cache.get("ts", 0)) < ttl:
+            return {**cache, "cached": True}
+
+        warn_at = self.db_warn_bytes()
+        vehicles: dict[str, dict] = {}
+        for v in self.vehicles():
+            parts = {"raw": 0, "event": 0, "feature": 0, "reports": 0}
+            files = 0
+            for source in self.sources_cfg():
+                b, n = self._dir_bytes(self.raw_dir(v, source))
+                parts["raw"] += b
+                files += n
+            for key, path in (("event", self.db_root() / "2.EVENT_DB" / v),
+                              ("feature", self.feature_dir(v)),
+                              ("reports", self.report_dir(v))):
+                b, n = self._dir_bytes(path)
+                parts[key] += b
+                files += n
+            total = sum(parts.values())
+            vehicles[v] = {"bytes": total, "gb": round(total / (1024 ** 3), 2),
+                           "files": files, "parts": parts, "warn": total >= warn_at}
+        shared = {}
+        for key, path in (("wide", self.wide_dir()), ("send", self.send_dir())):
+            b, n = self._dir_bytes(path)
+            shared[key] = {"bytes": b, "gb": round(b / (1024 ** 3), 2), "files": n}
+        out = {
+            "ts": now, "cached": False,
+            "db_root": str(self.db_root()),
+            "warn_gb": round(warn_at / (1024 ** 3), 2),
+            "vehicles": vehicles, "shared": shared,
+            "total_bytes": sum(x["bytes"] for x in vehicles.values())
+                           + sum(x["bytes"] for x in shared.values()),
+            "warn_vehicles": sorted(v for v, x in vehicles.items() if x["warn"]),
+        }
+        self._usage_cache = out
+        return out
+
     # ─────────────────────────────────────────
     # 1) RAW QUERY  (mock: 결정적 합성 데이터)
     # ─────────────────────────────────────────
@@ -672,9 +764,12 @@ class FeaturePipeline:
         items = self.reformatter_items(cfg["vehicle"], source)
         if items is not None and not items:
             return 0  # reformatter 설정됐으나 이 vehicle 의 파일/REAL 항목 없음
+        # 쿼리 구간은 반열림 [q_from, q_to) — 마지막 (today, today) 유닛도 하루가 된다
+        q_from, q_to = raw_query_window(start, end)
         gen = self._mock_for(source)
-        df = (gen(cfg, start, end, split) if gen
-              else self._mock_generic(cfg, start, end, split, source, sc["columns"], items=items))
+        df = (gen(cfg, q_from, q_to, split) if gen
+              else self._mock_generic(cfg, q_from, q_to, split, source, sc["columns"],
+                                      items=items))
         if items and "item_id" in df.columns:
             df = df.filter(pl.col("item_id").is_in(items))  # 실 어댑터 교체 대비 안전망
         keep = [c for c in sc["columns"] if c in df.columns] + ["split"]

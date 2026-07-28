@@ -55,8 +55,15 @@ DAY_SEC = 86400.0
 QUIET_DEFAULT = ("00:00", "02:00")
 
 
+TASK_HISTORY = 20        # 끝난 작업은 최근 N 건만 큐 화면에 남긴다
+
+
 class PipelineBusy(RuntimeError):
     """다른 실행(스케줄/수동/재생성)이 산출물을 쓰고 있어 지금은 진입 불가."""
+
+
+class PipelineCancelled(RuntimeError):
+    """사용자가 큐에서 취소 — 안전 지점(유닛/단계 경계)에서 중단됐다."""
 
 
 class PipelineRunner:
@@ -73,6 +80,10 @@ class PipelineRunner:
         self._run_lock = threading.Lock()
         self._raw_sem = threading.BoundedSemaphore(3)  # 전역 raw 동시 상한 (run_all 시 재설정)
         self._loop_count = 0
+        # 작업 큐 — 실행/대기/최근 작업을 한 곳에서 보고 취소한다 (/api/pipeline/queue)
+        self._tasks: dict[str, dict] = {}
+        self._task_seq = 0
+        self._current_task: dict | None = None
         self.progress: dict = {"running": False, "mode": None, "loop": False,
                                "loop_iter": 0, "started": None, "ts": None, "vehicles": {}}
 
@@ -91,15 +102,111 @@ class PipelineRunner:
             parsed = [300, 900, 1800, 3600]
         return parsed or [300, 900, 1800, 3600]
 
+    def max_retry_attempts(self) -> int:
+        """이 횟수만큼 연속 실패하면 자동 재시도를 멈추고 critical 로 올린다.
+        (일시 장애가 아니라 자격증명 만료 같은 사람이 고칠 문제로 본다)"""
+        try:
+            return max(1, int(self.runtime_cfg().get("retry_max_attempts") or 5))
+        except (TypeError, ValueError):
+            return 5
+
     def retry_severity(self, vehicle: str, now: float | None = None) -> str:
         summary = self.retries.summary(vehicle, now)
         rt = self.runtime_cfg()
         critical_age = int(rt.get("retry_critical_after_sec") or 43200)
         critical_attempts = int(rt.get("retry_critical_attempts") or 5)
+        if summary.get("blocked"):
+            return "critical"        # 자동 재시도 중단 — 사람이 봐야 한다
         if summary["pending"] and (summary["oldest_age_sec"] >= critical_age
                                    or summary["max_attempts"] >= critical_attempts):
             return "critical"
         return "warning" if summary["pending"] else "info"
+
+    # ── 작업 큐 (실행 중 · 락 대기 · 예정) + 취소 ──────────────
+    # 파이프라인의 모든 쓰기 진입점은 하나의 실행 락을 공유한다. 예전에는 그 락을
+    # 기다리는 작업(특히 매칭 갱신 재생성)이 화면에 안 보여서 "왜 아무 일도 안 하지" 로
+    # 보였다. 여기에 등록해 두면 무엇이 돌고 무엇이 대기 중인지 보이고 취소도 된다.
+    def _task_new(self, kind: str, label: str, vehicles=None,
+                  cancellable: bool = True) -> dict:
+        with self._lock:
+            self._task_seq += 1
+            task = {"id": f"t{self._task_seq}", "kind": kind, "label": label,
+                    "vehicles": list(vehicles or []), "state": "waiting",
+                    "enqueued_ts": time.time(), "started_ts": None, "ended_ts": None,
+                    "cancel": False, "cancellable": bool(cancellable), "result": None}
+            self._tasks[task["id"]] = task
+            self._trim_tasks_locked()
+            return task
+
+    def _task_set(self, task: dict, **kw):
+        with self._lock:
+            task.update(kw)
+
+    def _task_end(self, task: dict, state: str, result: str | None = None):
+        with self._lock:
+            task.update({"state": state, "ended_ts": time.time(), "result": result})
+            self._trim_tasks_locked()
+
+    def _trim_tasks_locked(self):
+        done = [t for t in self._tasks.values() if t["state"] not in ("waiting", "running")]
+        done.sort(key=lambda t: t.get("ended_ts") or 0)
+        for t in done[:-TASK_HISTORY]:
+            self._tasks.pop(t["id"], None)
+
+    def _cancelled(self) -> bool:
+        task = self._current_task
+        return bool(task and task.get("cancel"))
+
+    def _checkpoint(self, what: str):
+        """안전 지점에서만 취소를 반영한다 — event/feature 를 쓰는 도중에 끊으면
+        파티션이 반만 남는다. 단계 경계와 raw 유닛 경계에서만 부른다."""
+        if self._cancelled():
+            raise PipelineCancelled(f"{what} 직전 취소됨")
+
+    def cancel_task(self, task_id: str) -> dict:
+        """대기 중이면 즉시 취소, 실행 중이면 다음 안전 지점에서 중단(cancelling)."""
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None:
+                return {"ok": False, "error": f"알 수 없는 작업: {task_id}"}
+            if task["state"] not in ("waiting", "running"):
+                return {"ok": False, "error": "이미 끝난 작업입니다"}
+            if not task["cancellable"]:
+                return {"ok": False, "error": "취소할 수 없는 작업입니다"}
+            task["cancel"] = True
+            if task["state"] == "waiting":
+                task.update({"state": "cancelled", "ended_ts": time.time(),
+                             "result": "대기 중 취소됨"})
+                return {"ok": True, "state": "cancelled", "id": task_id}
+        return {"ok": True, "state": "cancelling", "id": task_id}
+
+    def queue(self, now: float | None = None) -> dict:
+        """작업 큐 스냅샷 — 실행 중 · 락 대기 · 예정(스케줄/재시도) · 최근 완료."""
+        now = now or time.time()
+        with self._lock:
+            tasks = [dict(t) for t in self._tasks.values()]
+        tasks.sort(key=lambda t: t.get("enqueued_ts") or 0)
+        upcoming = []
+        try:
+            for v, p in self.schedule_plan(now).items():
+                if not p["enabled"] or p["next_ts"] is None:
+                    continue
+                upcoming.append({
+                    "vehicle": v, "next_ts": p["next_ts"], "due": p["due"],
+                    "retry_pending": p["retry_pending"], "retry_blocked": p.get("retry_blocked", 0),
+                    "quiet_blocked": p["quiet_blocked"]})
+            upcoming.sort(key=lambda x: x["next_ts"])
+        except Exception:
+            upcoming = []
+        return {
+            "running": [t for t in tasks if t["state"] == "running"],
+            "waiting": [t for t in tasks if t["state"] == "waiting"],
+            "recent": [t for t in tasks if t["state"] not in ("running", "waiting")][::-1][:10],
+            "upcoming": upcoming,
+            "busy": self._run_lock.locked(),
+            "retry": self.retries.summary(),
+            "ts": now,
+        }
 
     def schedule_enabled(self) -> bool:
         """자동 실행 마스터 스위치 — 켜져 있고 실제 주기를 가진 제품이 하나라도 있으면 True."""
@@ -232,6 +339,9 @@ class PipelineRunner:
                 "due": bool((normal_due or retry_due) and not quiet_until),
                 "retry_pending": retry.get("pending", 0),
                 "retry_due": retry.get("due", 0),
+                # blocked = 연속 실패로 자동 재시도가 멈춘 유닛 (resume 필요)
+                "retry_blocked": retry.get("blocked", 0),
+                "retry_hint": retry.get("hint", ""),
                 "retry_oldest_age_sec": retry.get("oldest_age_sec", 0),
                 "retry_next_ts": retry_next,
                 "quiet_blocked": bool(quiet_until and interval > 0),
@@ -272,8 +382,11 @@ class PipelineRunner:
         return snap
 
     def _raw_guarded(self, cfg, source, start, end, split) -> int:
-        """전역 raw 세마포어를 잡고 raw 유닛 실행 — 전 vehicle 합쳐 동시 raw ≤ raw_api_max."""
+        """전역 raw 세마포어를 잡고 raw 유닛 실행 — 전 vehicle 합쳐 동시 raw ≤ raw_api_max.
+        취소되면 아직 시작하지 않은 유닛은 실행하지 않는다 (실패로 기록하지 않는다)."""
+        self._checkpoint(f"{source} {start} raw")
         with self._raw_sem:
+            self._checkpoint(f"{source} {start} raw")
             return self.pipe._run_raw_unit(cfg, source, start, end, split)
 
     # ── 단일 vehicle: 병렬 raw → event → feature (단계별 progress + 실행 로그) ──
@@ -303,6 +416,7 @@ class PipelineRunner:
             rows: dict[str, int] = {}
             errors: list[dict] = []
             done = 0
+            cancelled_units = 0
             with ThreadPoolExecutor(max_workers=max(1, plan.raw_workers),
                                     thread_name_prefix=f"raw-{vehicle}") as ex:
                 futs = {ex.submit(self._raw_guarded, cfg, *u): u for u in units}
@@ -316,17 +430,24 @@ class PipelineRunner:
                         if resolved:
                             recovered.append({"source": src, "date": str(start),
                                               "attempts": resolved.get("attempts")})
+                    except PipelineCancelled:
+                        cancelled_units += 1     # 취소로 안 돈 유닛 — 실패가 아니다
                     except Exception as e:
                         retry = self.retries.record_failure(
-                            vehicle, src, start, end, split, str(e), self.retry_delays())
+                            vehicle, src, start, end, split, str(e), self.retry_delays(),
+                            max_attempts=self.max_retry_attempts())
                         errors.append({"source": src, "date": str(start), "error": str(e)[:300],
                                        "attempts": retry["attempts"],
+                                       "blocked": retry["status"] == "blocked",
                                        "next_retry_at": retry["next_retry_at"]})
                     self._prog(vehicle, raw_done=done, source=src)
             stages["raw"] = {"sec": round(time.time() - ts, 2), "units": len(units),
-                             "rows": rows, "errors": errors, "recovered": recovered}
+                             "rows": rows, "errors": errors, "recovered": recovered,
+                             "cancelled_units": cancelled_units}
 
-            # 2) EVENT
+            # 2) EVENT — 취소는 여기(단계 경계)까지만. raw 만 갱신된 채 끝나도
+            # 다음 실행에서 event 가 따라잡는다 (파티션 신선도 비교).
+            self._checkpoint("event")
             ts = time.time()
             self._prog(vehicle, stage="event", source=None)
             event = self.pipe.run_event(vehicle)
@@ -339,6 +460,7 @@ class PipelineRunner:
             }
 
             # 3) FEATURE — event DB 전체 대상
+            self._checkpoint("feature")
             ts = time.time()
             ev_dates = self.pipe.event_date_count(vehicle)
             self._prog(vehicle, stage="feature", event_dates=ev_dates)
@@ -353,6 +475,7 @@ class PipelineRunner:
             }
 
             # 4) WIDE — feature 전부를 ML_TABLE 로 병합
+            self._checkpoint("wide")
             ts = time.time()
             self._prog(vehicle, stage="wide")
             wide = self.pipe.run_wide(vehicle)
@@ -379,6 +502,15 @@ class PipelineRunner:
             self._prog(vehicle, stage="done", severity=rec["severity"],
                        retry_pending=retry_summary["pending"])
             return result
+        except PipelineCancelled as e:
+            # 취소는 장애가 아니다 — 안전 지점에서 멈췄고, 남은 일은 다음 실행이 잇는다.
+            # error 를 채워 두면 알람 발행 훅이 옛 리포트를 내보내지 않는다.
+            rec["cancelled"] = True
+            rec["error"] = str(e)[:500]
+            rec["severity"] = "warning"
+            self._prog(vehicle, stage="cancelled", error=str(e)[:200])
+            return {"vehicle": vehicle, "cancelled": True, "reason": str(e),
+                    "stages": stages, "elapsed_sec": round(time.time() - t0, 2)}
         except Exception as e:
             rec["error"] = str(e)[:500]
             rec["severity"] = "critical"
@@ -394,20 +526,26 @@ class PipelineRunner:
                     self.on_vehicle_done(vehicle, rec)
                 except Exception:
                     pass
-        return result
 
     # ── vehicle 순회 (중복 실행 방지). vehicles=None 이면 전 제품 ──
     def run_all(self, plan: WorkerPlan | None = None, mode: str = "manual",
                 vehicles: list[str] | None = None) -> dict:
+        label = {"schedule": "자동 실행", "loop": "루프 실행"}.get(mode, "전체 실행")
+        task = self._task_new("run", label, vehicles)
         if not self._run_lock.acquire(blocking=False):
+            self._task_end(task, "skipped", "이미 다른 실행이 진행 중")
             return {"ok": False, "skipped": "이미 실행 중", "progress": self.snapshot()}
+        self._task_set(task, state="running", started_ts=time.time())
+        self._current_task = task
         try:
             plan = plan or self.plan()
             t0 = time.time()
             known = list(self.pipe.vehicles().keys())
             vehicles = [v for v in (vehicles or known) if v in known]
             if not vehicles:
+                self._task_end(task, "done", "대상 제품 없음")
                 return {"ok": True, "skipped": "대상 제품 없음", "mode": mode, "vehicles": {}}
+            self._task_set(task, vehicles=list(vehicles))
             if mode == "loop":
                 self._loop_count += 1
             with self._lock:
@@ -430,18 +568,26 @@ class PipelineRunner:
                         self._prog(v, stage="error", error=str(e)[:200])
 
             # 5) SEND FORM — 전 vehicle ML_TABLE 병합 → prefix 그룹 분리 (KNOB/FAB+MASK/VM/INLINE)
-            with self._lock:
-                self.progress["send_form"] = "running"
-                self.progress["ts"] = time.time()
-            try:
-                send_form = self.pipe.run_send_form()
-            except Exception as e:
-                send_form = {"error": str(e)[:300]}
-            with self._lock:
-                self.progress["send_form"] = "error" if "error" in send_form else "done"
+            # 취소됐으면 산출물 일부만으로 send form 을 덮어쓰지 않는다.
+            cancelled = self._cancelled()
+            if cancelled:
+                send_form = {"skipped": "취소됨"}
+            else:
+                with self._lock:
+                    self.progress["send_form"] = "running"
+                    self.progress["ts"] = time.time()
+                try:
+                    send_form = self.pipe.run_send_form()
+                except Exception as e:
+                    send_form = {"error": str(e)[:300]}
+                with self._lock:
+                    self.progress["send_form"] = "error" if "error" in send_form else "done"
 
             summary = {
-                "ok": all("error" not in r and not r.get("errors") for r in results.values()),
+                "ok": (not cancelled
+                       and all("error" not in r and not r.get("errors")
+                               for r in results.values())),
+                "cancelled": cancelled,
                 "mode": mode, "vehicles": results, "plan": plan.__dict__,
                 "send_form": send_form,
                 "elapsed_sec": round(time.time() - t0, 2), "ts": t0,
@@ -452,21 +598,36 @@ class PipelineRunner:
             with self._lock:
                 self.progress["running"] = False
                 self.progress["ts"] = time.time()
+            self._current_task = None
+            if task["state"] == "running":
+                self._task_end(task, "cancelled" if task["cancel"] else "done")
             self._run_lock.release()
 
     # ── 락을 공유하는 단독 진입점들 ───────────────────────────────
-    def _enter(self, what: str):
-        """산출물 쓰기 구간 진입. 다른 실행 중이면 PipelineBusy."""
+    def _enter(self, what: str, kind: str = "job", vehicles=None,
+               cancellable: bool = False) -> dict:
+        """산출물 쓰기 구간 진입. 다른 실행 중이면 PipelineBusy.
+        작업 큐에 등록해서 무엇이 돌고 있는지 화면에 보이게 한다."""
+        task = self._task_new(kind, what, vehicles, cancellable=cancellable)
         if not self._run_lock.acquire(blocking=False):
+            self._task_end(task, "skipped", "다른 실행이 진행 중")
             raise PipelineBusy(
                 f"{what}: 다른 파이프라인 실행이 진행 중입니다 "
                 f"(mode={self.snapshot().get('mode')}) — 끝난 뒤 다시 시도하세요")
+        self._task_set(task, state="running", started_ts=time.time())
+        return task
+
+    def _leave(self, task: dict, state: str = "done", result: str | None = None):
+        if task["state"] == "running":
+            self._task_end(task, "cancelled" if task["cancel"] else state, result)
+        self._run_lock.release()
 
     def run_vehicle_once(self, vehicle: str) -> dict:
         """수동 단건 실행 (raw→event→feature→wide→unmatched). 스케줄러와 락 공유.
         스케줄 실행과 같은 경로를 타므로 실행 로그·진행상황이 똑같이 남는다."""
         self.pipe.vehicle_cfg(vehicle)          # 없는 vehicle 이면 여기서 ValueError → 404
-        self._enter(f"{vehicle} 실행")
+        task = self._enter(f"{vehicle} 수동 실행", "run", [vehicle], cancellable=True)
+        self._current_task = task
         try:
             plan = self.plan()
             self._raw_sem = threading.BoundedSemaphore(max(1, plan.raw_workers))
@@ -475,6 +636,8 @@ class PipelineRunner:
                                  "loop_iter": self._loop_count, "started": time.time(),
                                  "ts": time.time(), "vehicles": {vehicle: {"stage": "queued"}}}
             result = self.run_vehicle(vehicle, plan, mode="manual")
+            if result.get("cancelled"):
+                return result
             try:
                 result["unmatched"] = self.pipe.scan_unmatched(vehicle)
             except Exception as e:
@@ -484,21 +647,22 @@ class PipelineRunner:
             with self._lock:
                 self.progress["running"] = False
                 self.progress["ts"] = time.time()
-            self._run_lock.release()
+            self._current_task = None
+            self._leave(task)
 
     def run_wide_once(self, vehicle: str) -> dict:
-        self._enter(f"{vehicle} wide")
+        task = self._enter(f"{vehicle} wide 병합", "wide", [vehicle])
         try:
             return self.pipe.run_wide(vehicle)
         finally:
-            self._run_lock.release()
+            self._leave(task)
 
     def run_send_form_once(self) -> dict:
-        self._enter("send form")
+        task = self._enter("send form 생성", "send")
         try:
             return self.pipe.run_send_form()
         finally:
-            self._run_lock.release()
+            self._leave(task)
 
     def rebuild_after_config_change(self, timeout: float = 1800) -> dict:
         """매칭 csv 갱신 후 전 vehicle event/feature/wide 재생성 + 알람 재발행.
@@ -508,14 +672,27 @@ class PipelineRunner:
         결과는 last_rebuild 에 남긴다 (예전엔 예외를 조용히 삼켜 실패가 안 보였다).
         """
         t0 = time.time()
-        if not self._run_lock.acquire(timeout=timeout):
-            out = {"ok": False, "waited_sec": round(time.time() - t0, 1),
-                   "error": f"실행 락 대기 시간 초과({timeout}s) — 재생성 건너뜀"}
+        task = self._task_new("rebuild", "매칭 갱신 재생성", cancellable=True)
+        # 락 대기 중에도 큐 화면에 "대기" 로 보이고, 대기 상태에서 취소할 수 있다
+        if not self._acquire_for(task, timeout):
+            cancelled = task["cancel"]
+            out = {"ok": False, "cancelled": cancelled,
+                   "waited_sec": round(time.time() - t0, 1),
+                   "error": ("대기 중 취소됨" if cancelled else
+                             f"실행 락 대기 시간 초과({timeout}s) — 재생성 건너뜀")}
+            if not cancelled:
+                self._task_end(task, "error", out["error"])
             self.last_rebuild = out
             return out
+        self._task_set(task, state="running", started_ts=time.time())
+        self._current_task = task
         try:
             done, errors = [], {}
+            cancelled = False
             for v in self.pipe.vehicles():
+                if self._cancelled():
+                    cancelled = True
+                    break                      # vehicle 경계에서만 중단 (안전 지점)
                 try:
                     self._prog(v, stage="rebuild")
                     self.pipe.run_event(v)
@@ -528,16 +705,33 @@ class PipelineRunner:
                 except Exception as e:
                     errors[v] = str(e)[:300]
                     self._prog(v, stage="error", error=str(e)[:200])
-            try:
-                self.pipe.run_send_form()
-            except Exception as e:
-                errors["send_form"] = str(e)[:300]
-            out = {"ok": not errors, "vehicles": done, "errors": errors,
+            if not cancelled:
+                try:
+                    self.pipe.run_send_form()
+                except Exception as e:
+                    errors["send_form"] = str(e)[:300]
+            out = {"ok": not errors and not cancelled, "cancelled": cancelled,
+                   "vehicles": done, "errors": errors,
                    "waited_sec": round(time.time() - t0, 1), "ts": t0}
             self.last_rebuild = out
             return out
         finally:
-            self._run_lock.release()
+            self._current_task = None
+            self._leave(task, result=f"{len(done)}개 제품 재생성" if done else None)
+
+    def _acquire_for(self, task: dict, timeout: float | None) -> bool:
+        """실행 락을 기다리되 취소를 반영한다. 취소/시간초과면 False."""
+        deadline = None if timeout is None else time.time() + float(timeout)
+        while True:
+            if task.get("cancel"):
+                return False
+            if self._run_lock.acquire(timeout=0.5):
+                if task.get("cancel"):      # 대기 중 취소 → 잡은 락을 바로 놓는다
+                    self._run_lock.release()
+                    return False
+                return True
+            if deadline is not None and time.time() >= deadline:
+                return False
 
     # ── 백그라운드 루프 (제품별 주기 / loop) ──
     async def _loop(self):

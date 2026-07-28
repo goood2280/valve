@@ -241,6 +241,48 @@ def test_status_reports_feature_covered_span(pipe):
     assert all(f.suffix == ".parquet" for f in pipe.feature_dir("VH_PRODA").glob("*.parquet"))
 
 
+def test_raw_query_window_is_half_open(pipe):
+    """유닛의 쿼리 구간은 항상 반열림 [from, to) — 마지막 (today, today) 유닛도
+    하루가 되고(폭 0 이 아님), 이웃 유닛과 겹쳐 같은 날을 두 번 쿼리하지 않는다."""
+    from datetime import date as _d, timedelta as _td
+
+    from backend.core.feature_pipeline import get_split_date_ranges, raw_query_window
+
+    today = _d(2026, 7, 28)
+    ranges = get_split_date_ranges(3, 1, today=today)
+    windows = [raw_query_window(s, e) for s, e in ranges]
+    assert windows[-1] == (today, today + _td(days=1))       # 오늘도 하루치
+    assert all(b > a for a, b in windows)                    # 폭 0 인 구간 없음
+    starts = [a for a, _ in windows]
+    assert len(set(starts)) == len(starts)                   # 시작일 중복 없음
+    for (_, prev_end), (nxt_start, _) in zip(windows, windows[1:]):
+        assert prev_end == nxt_start                         # 빈틈도 겹침도 없다
+
+    # 실제 저장도 하루=한 파티션 (시간 컬럼 날짜로 파티셔닝되므로 섞이지 않는다)
+    pipe.run_raw_query("VH_PRODA")
+    dates = pipe.status("VH_PRODA")["raw"]["FAB"]
+    assert len(dates) == len(set(dates))
+
+
+def test_db_usage_flags_vehicles_over_threshold(pipe):
+    pipe.run_raw_query("VH_PRODA")
+    pipe.run_event("VH_PRODA")
+    u = pipe.db_usage(force=True)
+    assert u["vehicles"]["VH_PRODA"]["bytes"] > 0
+    assert u["vehicles"]["VH_PRODA"]["parts"]["raw"] > 0
+    assert u["warn_gb"] == 40 and not u["warn_vehicles"]     # 기본 임계 40GB
+
+    # 임계를 아주 낮추면 경고로 잡힌다 (운영에서 40GB 초과 시 나오는 그 표시)
+    cfg = pipe.global_cfg()
+    cfg["runtime"]["db_warn_gb"] = 0.000001
+    pipe.save_global_cfg(cfg)
+    u2 = pipe.db_usage(force=True)
+    assert "VH_PRODA" in u2["warn_vehicles"] and u2["vehicles"]["VH_PRODA"]["warn"]
+
+    # 캐시 — 강제하지 않으면 다시 걷지 않는다
+    assert pipe.db_usage()["cached"] is True
+
+
 def test_requeried_raw_refreshes_event_partition(pipe):
     """롤링 윈도우 재조회/재시도로 raw 파티션이 다시 받아지면 해당 날짜 event 도
     다시 만들어져야 한다 — 예전엔 'event 파일이 있으면 skip' 이라 늦게 도착한

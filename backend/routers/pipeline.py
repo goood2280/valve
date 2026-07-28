@@ -14,6 +14,11 @@
   PUT  /api/pipeline/config/sources      소스별 테이블/컬럼 저장
   PUT  /api/pipeline/config/exclude      미매칭 스캔 exclude 패턴 저장
   PUT  /api/pipeline/config/alert-cols   매칭알람 전송 열/예시 개수 저장 (알람 탭 ⚙)
+  GET  /api/pipeline/queue               작업 큐 — 실행 중/락 대기/예정
+  POST /api/pipeline/queue/cancel        작업 취소 (안전 지점에서 중단)
+  GET  /api/pipeline/retries             재시도 큐 (blocked = 자동 재시도 중단)
+  POST /api/pipeline/retries/resume      blocked 유닛 재시도 재개
+  GET  /api/pipeline/db-usage            제품별 DB 사용량 + 40GB 경고
 """
 from __future__ import annotations
 
@@ -161,8 +166,43 @@ def pipeline_runs(vehicle: str = "", limit: int = 50, failed_only: bool = False,
 
 @router.get("/api/pipeline/retries")
 def pipeline_retries(vehicle: str = ""):
-    """Persistent failed source/date units waiting for eventual refresh."""
+    """재시도 큐 — 실패한 (source×날짜) 유닛. blocked 는 자동 재시도가 멈춘 것."""
     return runner.retries.summary(vehicle or None)
+
+
+@router.post("/api/pipeline/retries/resume")
+def pipeline_retries_resume(body: dict = Body(default={})):
+    """blocked 유닛을 다시 자동 재시도 대상으로 — {vehicle?, key?}.
+    (자격증명 만료 등 원인을 고친 뒤 누르는 버튼)"""
+    n = runner.retries.resume(vehicle=(body.get("vehicle") or None),
+                              key=(body.get("key") or None))
+    return {"ok": True, "resumed": n, "retry": runner.retries.summary()}
+
+
+# ── 작업 큐 (실행 중 · 락 대기 · 예정) ──
+@router.get("/api/pipeline/queue")
+def pipeline_queue():
+    """무엇이 돌고 있고, 무엇이 락을 기다리며, 다음에 무엇이 예정인지."""
+    return runner.queue()
+
+
+@router.post("/api/pipeline/queue/cancel")
+def pipeline_queue_cancel(body: dict = Body(...)):
+    """작업 취소 — {id}. 대기 중이면 즉시, 실행 중이면 다음 안전 지점(유닛/단계 경계)에서.
+    실행 중인 event/feature 쓰기를 중간에 끊지는 않는다 (파티션이 반만 남는다)."""
+    task_id = str(body.get("id") or "").strip()
+    if not task_id:
+        raise HTTPException(400, "id 필요")
+    r = runner.cancel_task(task_id)
+    if not r.get("ok"):
+        raise HTTPException(409, r.get("error") or "취소 불가")
+    return r
+
+
+@router.get("/api/pipeline/db-usage")
+def pipeline_db_usage(refresh: bool = False):
+    """제품별 DB 사용량 + 경고 임계(runtime.db_warn_gb, 기본 40GB). 기본 10분 캐시."""
+    return _p().db_usage(force=refresh)
 
 
 @router.get("/api/pipeline/progress")

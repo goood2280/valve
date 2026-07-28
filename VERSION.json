@@ -1,12 +1,27 @@
 {
   "name": "Valve",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "codename": "valve",
   "pairs_with": "flow",
   "purpose": "DataLake 수도꼭지 — 사내 API 에서 데이터를 뽑아 S3 로 흘려 flow 에 공급",
   "tagline": "turn the valve · feed the flow",
   "created": "2026-04-24",
   "changelog": [
+    {
+      "version": "0.3.6",
+      "date": "2026-07-29",
+      "tag": "feat",
+      "title": "작업 큐(실행 중·대기·예정) + 취소 · 재시도 5회 상한 · 제품 DB 40GB 경고 · 당일 쿼리 구간 교정",
+      "changes": [
+        "작업 큐 (GET /api/pipeline/queue) — 지금 도는 작업, 실행 락을 기다리는 작업(특히 매칭 갱신 재생성), 다음 예정, 최근 완료를 알람 탭 맨 위에서 한눈에. 예전엔 락 대기가 화면에 전혀 안 보여 '아무 일도 안 하는' 것처럼 보였다",
+        "작업 취소 (POST /api/pipeline/queue/cancel) — 대기 중이면 즉시, 실행 중이면 안전 지점(raw 유닛 경계·단계 경계)에서 중단. 쓰는 중인 event/feature 를 끊지 않아 파티션이 반만 남지 않는다. 취소 시 send form 도 건너뛴다(부분 산출물로 덮어쓰지 않음). 중단된 일은 다음 실행이 파티션 신선도 비교로 이어받는다",
+        "재시도 무한 반복 방지 — retry_max_attempts(기본 5) 연속 실패하면 자동 재시도를 멈추고(blocked) severity=critical + '자격증명 만료·권한·테이블 변경 확인' 안내. 원인을 고친 뒤 알람 탭의 '↻ 재시도 재개'(POST /api/pipeline/retries/resume)로 다시 큐에 넣는다 (attempts 리셋, 누적은 total_attempts)",
+        "제품별 DB 사용량 경고 (GET /api/pipeline/db-usage) — raw+event+feature+reports 합계가 runtime.db_warn_gb(기본 40GB)를 넘으면 알람 탭에 경고. 자동 삭제는 하지 않는다 (무엇을 지울지는 사람이 판단). 전체 트리 탐색이라 10분 캐시",
+        "fix: raw 유닛 쿼리 구간을 반열림 [from, to) 으로 통일 — 마지막 (today, today) 유닛이 폭 0 이라 실 어댑터 연결 시 당일 데이터가 통째로 빠질 수 있었다. 저장은 시간 컬럼 날짜로 파티셔닝되므로 구간이 여러 날에 걸쳐도 행은 각자 맞는 date= 로 들어간다",
+        "fix: 재시도 큐 파일이 BOM 등으로 파싱 실패하면 큐 전체를 조용히 버리던 문제 — utf-8-sig 로 읽고, 실패 시 원본을 .bad 로 보관하고 경고를 남긴다 (놓친 유닛 추적이 소리 없이 사라지지 않게)",
+        "자동 실행이 꺼진 제품은 재시도도 자동으로 돌지 않는다(수동 실행 때 처리) — 화면에 '자동 실행 꺼짐' 으로 표시"
+      ]
+    },
     {
       "version": "0.3.5",
       "date": "2026-07-28",

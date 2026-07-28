@@ -22,10 +22,18 @@
 #     loop_enabled     쉬지 않고 반복 실행 (개발·백필용)
 #
 #   raw 실패 유닛 재시도 — 실패한 (source×날짜) 유닛은 raw_days 윈도우를
-#   벗어나도 성공할 때까지 재시도 큐(logs/pipeline_retries.json)에 남는다.
+#   벗어나도 재시도 큐(logs/pipeline_retries.json)에 남는다.
 #     retry_delays_sec          시도 횟수별 대기 (마지막 값으로 고정 반복)
+#     retry_max_attempts        이 횟수 연속 실패하면 자동 재시도를 멈추고(blocked)
+#                               critical 로 올린다 — 자격증명 만료처럼 사람이 고칠
+#                               문제로 보고 무한히 사내 API 를 두드리지 않는다.
+#                               고친 뒤 알람 탭의 '재시도 재개' 로 다시 큐에 넣는다
 #     retry_critical_after_sec  이 시간 넘게 밀리면 severity=critical (기본 12h)
 #     retry_critical_attempts   이 횟수 이상 실패해도 critical
+#   자동 실행(스케줄)이 꺼진 제품은 재시도도 자동으로 돌지 않는다 — 수동 실행 시 함께 처리.
+#
+# db_warn_gb — 제품 하나의 DB(raw+event+feature+reports)가 이 크기를 넘으면 경고.
+#              자동 삭제는 하지 않는다 (무엇을 지울지는 사람이 판단).
 #
 #   실행 금지 시간대 — 이 구간에는 자동 실행(스케줄·루프)을 띄우지 않는다.
 #     quiet_enabled / quiet_start / quiet_end   서버 로컬 시각 "HH:MM"
@@ -77,8 +85,10 @@ runtime:
   cpu_cores: auto
   interval_hours: 6
   retry_delays_sec: [300, 900, 1800, 3600]
+  retry_max_attempts: 5
   retry_critical_after_sec: 43200
   retry_critical_attempts: 5
+  db_warn_gb: 40
   schedule_enabled: true
   sched_tick_sec: 60
   loop_enabled: false

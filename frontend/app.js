@@ -2586,6 +2586,17 @@ async function loadAlerts() {
     ]);
     wrap.innerHTML = '';
 
+    // ── 작업 큐 — 지금 도는 것 · 락을 기다리는 것 · 예정된 것 (취소 가능)
+    const qBox = el('div', { id: 'alQueue' });
+    wrap.append(qBox);
+    api.get('/api/pipeline/queue').then((q) => renderQueue(qBox, q)).catch(() => {});
+    startQueuePoll();
+    // ── DB 사용량 — 제품별 임계(기본 40GB) 초과만 경고 (보존 정책은 사람이 판단)
+    api.get('/api/pipeline/db-usage').then((u) => {
+      const node = alDbUsage(u);
+      if (node) qBox.after(node);
+    }).catch(() => {});
+
     // ── 처리 현황 (vehicle 별 한 줄 — 주기 조절 포함)
     wrap.append(alSub('파이프라인 처리 현황',
       'raw → event → feature · vehicle_matching 변경 시 재처리 필요 표시 · '
@@ -2686,14 +2697,189 @@ function alSchedCell(v, sc, sum) {
     bits.push(el('span', { style: { color: '#e5484d' }, title: sum.last_error || '' },
       `최근 ${sum.runs}회 중 실패 ${sum.failed}`));
   }
-  if (sc.retry_pending) {
+  if (sc.retry_blocked) {
+    bits.push(el('span', { style: { color: '#e5484d', fontWeight: 800 },
+      title: sc.retry_hint || '연속 실패로 자동 재시도를 멈췄습니다 — 작업 큐에서 재개',
+    }, `⛔ 재시도 중단 ${sc.retry_blocked}`));
+  }
+  if (sc.retry_pending - (sc.retry_blocked || 0) > 0) {
     bits.push(el('span', {
       style: { color: sc.retry_oldest_age_sec > 43200 ? '#e5484d' : '#f5a524', fontWeight: 700 },
-      title: '실패한 (source×날짜) 유닛 — 롤링 윈도우를 벗어나도 성공할 때까지 재시도 대상으로 남는다',
-    }, `놓친 유닛 ${sc.retry_pending}`
-      + (sc.retry_next_ts ? ` · 재시도 ${fmtClock(sc.retry_next_ts)}` : '')));
+      title: '실패한 (source×날짜) 유닛 — 롤링 윈도우를 벗어나도 재시도 대상으로 남는다'
+        + (sc.enabled ? '' : ' (자동 실행이 꺼져 있어 수동 실행 때 처리된다)'),
+    }, `놓친 유닛 ${sc.retry_pending - (sc.retry_blocked || 0)}`
+      + (sc.retry_next_ts ? ` · 재시도 ${fmtClock(sc.retry_next_ts)}` : '')
+      + (sc.enabled ? '' : ' · 자동 실행 꺼짐')));
   }
   return el('span', { style: { display: 'flex', gap: '5px', alignItems: 'center', fontSize: '11px' } }, ...bits);
+}
+
+// ─── 작업 큐 ───────────────────────────────────────────────
+// 파이프라인의 쓰기 작업은 실행 락 하나를 공유한다. 예전에는 그 락을 기다리는 작업
+// (특히 매칭 갱신 재생성)이 화면에 안 보여서 "왜 아무 일도 안 하지" 로 보였다.
+// 여기서 실행 중 · 대기 · 예정을 한눈에 보고 취소한다.
+let AL_QUEUE_TIMER = null;
+let AL_QUEUE_SIG = '';
+
+const QUEUE_KIND = { run: '실행', rebuild: '매칭 갱신 재생성', wide: 'wide 병합',
+  send: 'send form', job: '작업' };
+const QUEUE_STATE = { done: '완료', error: '실패', cancelled: '취소됨', skipped: '건너뜀' };
+
+function stopQueuePoll() { if (AL_QUEUE_TIMER) { clearInterval(AL_QUEUE_TIMER); AL_QUEUE_TIMER = null; } }
+
+function startQueuePoll() {
+  stopQueuePoll();
+  AL_QUEUE_SIG = '';
+  AL_QUEUE_TIMER = setInterval(async () => {
+    const box = $('#alQueue');
+    if (!box) return stopQueuePoll();      // 탭을 떠나면 스스로 멈춘다
+    let q; try { q = await api.get('/api/pipeline/queue'); } catch { return; }
+    renderQueue(box, q);
+  }, 3000);
+}
+
+const fmtSecs = (s) => (s >= 3600 ? `${Math.floor(s / 3600)}시간 ${Math.floor((s % 3600) / 60)}분`
+  : s >= 60 ? `${Math.floor(s / 60)}분 ${Math.round(s % 60)}초` : `${Math.round(s)}초`);
+
+async function cancelQueueTask(id, btn) {
+  btn.disabled = true;
+  btn.textContent = '취소 중…';
+  try {
+    const r = await api.post('/api/pipeline/queue/cancel', { id });
+    btn.textContent = r.state === 'cancelled' ? '취소됨' : '중단 대기…';
+  } catch (e) {
+    alert(e.message);
+    btn.disabled = false;
+    btn.textContent = '취소';
+  }
+  AL_QUEUE_SIG = '';       // 다음 폴링에서 무조건 다시 그린다
+}
+
+async function resumeRetries(btn) {
+  btn.disabled = true;
+  try { await api.post('/api/pipeline/retries/resume', {}); } catch (e) { alert(e.message); }
+  AL_QUEUE_SIG = '';
+  loadAlerts();
+}
+
+function renderQueue(box, q) {
+  const now = q.ts || (Date.now() / 1000);
+  const running = q.running || [];
+  const waiting = q.waiting || [];
+  const recent = q.recent || [];
+  const upcoming = q.upcoming || [];
+  const retry = q.retry || {};
+  // 변경이 없으면 다시 그리지 않는다 (3초마다 노드를 갈아치우면 화면이 튀고 클릭이 씹힌다).
+  // 실행 중 경과만 5초 단위로 갱신되게 서명에 넣는다.
+  const sig = JSON.stringify([
+    running.map((t) => [t.id, t.state, t.cancel, Math.round((now - (t.started_ts || now)) / 5)]),
+    waiting.map((t) => [t.id, t.cancel]),
+    recent.map((t) => [t.id, t.state]),
+    upcoming.map((u) => [u.vehicle, Math.round((u.next_ts || 0) / 30), u.due]),
+    [retry.pending, retry.blocked, q.busy],
+  ]);
+  if (sig === AL_QUEUE_SIG) return;
+  AL_QUEUE_SIG = sig;
+
+  box.innerHTML = '';
+  box.append(alSub('작업 큐',
+    '지금 도는 작업 · 실행 락을 기다리는 작업 · 다음 예정. '
+    + '취소는 안전 지점(raw 유닛/단계 경계)에서 멈춘다 — 쓰는 중인 event/feature 를 끊지 않는다'));
+
+  const line = (bits, style) => el('div', {
+    style: Object.assign({ display: 'flex', gap: '10px', alignItems: 'center',
+      fontSize: '12px', padding: '4px 0',
+      borderBottom: '1px solid var(--border-weak, rgba(128,128,128,.15))' }, style || {}),
+  }, ...bits);
+
+  const cancelBtn = (t) => (t.cancellable && !t.cancel
+    ? el('button', { class: 'btn', style: { marginLeft: 'auto' },
+      onclick: (ev) => cancelQueueTask(t.id, ev.target) }, '취소')
+    : el('span', { style: { marginLeft: 'auto', color: 'var(--text-muted)', fontSize: '11px' } },
+      t.cancel ? '중단 대기…' : '취소 불가'));
+
+  running.forEach((t) => box.append(line([
+    el('span', { style: { color: '#30a46c', fontWeight: 800 } }, '▶ 실행 중'),
+    el('span', { style: { fontWeight: 700 } }, t.label),
+    el('span', { class: 'mono', style: { color: 'var(--text-muted)' } }, (t.vehicles || []).join(', ')),
+    el('span', { style: { color: 'var(--text-muted)' } }, fmtSecs(now - (t.started_ts || now))),
+    cancelBtn(t),
+  ])));
+  waiting.forEach((t) => box.append(line([
+    el('span', { style: { color: '#f5a524', fontWeight: 800 } }, '⏸ 대기'),
+    el('span', { style: { fontWeight: 700 } }, t.label),
+    el('span', { style: { color: 'var(--text-muted)' } },
+      `${fmtSecs(now - (t.enqueued_ts || now))} 째 실행 락 대기`),
+    cancelBtn(t),
+  ])));
+  if (!running.length && !waiting.length) {
+    box.append(line([el('span', { style: { color: 'var(--text-muted)' } },
+      q.busy ? '· 다른 작업이 락을 잡고 있음' : '· 지금 도는 작업 없음')]));
+  }
+
+  // 재시도 큐 — blocked 는 자동 재시도가 멈춘 상태라 사람이 봐야 한다
+  if (retry.blocked) {
+    box.append(el('div', { class: 'alert err', style: { fontSize: '12px', margin: '8px 0' } },
+      el('div', { style: { fontWeight: 700 } },
+        `⛔ 재시도 중단 ${retry.blocked}건 — ${retry.hint || '연속 실패로 자동 재시도를 멈췄습니다'}`),
+      ...(retry.blocked_errors || []).slice(0, 2).map((e) =>
+        el('div', { class: 'mono', style: { fontSize: '11px', marginTop: '2px' } }, e)),
+      el('button', { class: 'btn', style: { marginTop: '6px' },
+        onclick: (ev) => resumeRetries(ev.target) }, '↻ 재시도 재개'),
+    ));
+  } else if (retry.pending) {
+    box.append(line([
+      el('span', { style: { color: '#f5a524', fontWeight: 700 } }, `↻ 재시도 대기 ${retry.pending}건`),
+      el('span', { style: { color: 'var(--text-muted)' } },
+        retry.next_retry_at ? `다음 ${fmtClock(retry.next_retry_at)}` : ''),
+    ]));
+  }
+
+  if (upcoming.length) {
+    box.append(el('div', { style: { fontSize: '11px', color: 'var(--text-muted)', margin: '8px 0 2px' } },
+      '예정 (자동 실행)'));
+    upcoming.slice(0, 6).forEach((u) => box.append(line([
+      el('span', { class: 'mono', style: { fontWeight: 700, minWidth: '90px' } }, u.vehicle),
+      el('span', { style: { color: u.due ? '#f5a524' : 'var(--text-muted)' } },
+        u.due ? '곧 실행' : fmtClock(u.next_ts)),
+      ...(u.quiet_blocked ? [el('span', { class: 'hint' }, '🌙 금지 시간대 해제 후')] : []),
+      ...(u.retry_pending ? [el('span', { style: { color: '#f5a524' } },
+        `놓친 유닛 ${u.retry_pending}`)] : []),
+      ...(u.retry_blocked ? [el('span', { style: { color: '#e5484d', fontWeight: 700 } },
+        `재시도 중단 ${u.retry_blocked}`)] : []),
+    ], { borderBottom: 'none', padding: '2px 0' })));
+  }
+
+  if (recent.length) {
+    box.append(el('div', { style: { fontSize: '11px', color: 'var(--text-muted)', marginTop: '8px' } },
+      '최근: ' + recent.slice(0, 5).map((t) =>
+        `${t.label} ${QUEUE_STATE[t.state] || t.state}${t.result ? ` (${t.result})` : ''}`).join(' · ')));
+  }
+}
+
+// DB 사용량 — 제품별 임계(기본 40GB) 초과 시 경고. 자동 삭제는 하지 않는다.
+function alDbUsage(u) {
+  if (!u || !u.vehicles) return null;
+  const rows = Object.entries(u.vehicles).sort((a, b) => b[1].bytes - a[1].bytes);
+  if (!rows.length) return null;
+  const box = el('div', { style: { margin: '10px 0' } });
+  if ((u.warn_vehicles || []).length) {
+    box.append(el('div', { class: 'alert warn', style: { fontSize: '12px' } },
+      `⚠ DB 사용량 ${u.warn_gb}GB 초과: ${u.warn_vehicles.join(', ')} — `
+      + '오래된 date= 파티션부터 정리하세요 (자동 삭제는 하지 않습니다)'));
+  }
+  box.append(el('div', { style: { display: 'flex', gap: '12px', flexWrap: 'wrap',
+    fontSize: '11px', color: 'var(--text-muted)', alignItems: 'center' } },
+    el('span', {}, 'DB 사용량'),
+    ...rows.map(([v, x]) => el('span', {
+      style: x.warn ? { color: '#e5484d', fontWeight: 700 } : {},
+      title: `raw ${(x.parts.raw / 1073741824).toFixed(2)}GB · event ${(x.parts.event / 1073741824).toFixed(2)}GB`
+        + ` · feature ${(x.parts.feature / 1073741824).toFixed(2)}GB · 파일 ${x.files}개`,
+    }, `${v} ${x.gb}GB`)),
+    el('span', { class: 'mono' }, u.db_root || ''),
+    el('span', { class: 'hint' }, `임계 ${u.warn_gb}GB`),
+  ));
+  return box;
 }
 
 // 통합 알람 테이블 — 한 행 = 한 알람. 유형은 색으로 구분 (미매칭 step 빨강 · RO ppid 주황)
@@ -2778,10 +2964,10 @@ function alRunLog(data) {
       el('td', { class: 'mono' }, fmtRunTs(r.ts)),
       el('td', { class: 'mono', style: { fontWeight: 700 } }, r.vehicle || '-'),
       el('td', {}, RUN_MODE[r.mode] || r.mode || '-'),
-      // 성공 / 부분 실패(raw 유닛 일부 실패 — 재시도 큐에 남음) / 중단(단계 자체가 못 돎)
-      el('td', { style: { color: r.ok ? '#30a46c' : (r.error ? '#e5484d' : '#f5a524'), fontWeight: 700 },
-        title: r.error || '' },
-        r.ok ? '성공' : (r.error ? '중단' : '부분 실패')),
+      // 성공 / 취소 / 부분 실패(raw 유닛 일부 실패 — 재시도 큐에 남음) / 중단(단계가 못 돎)
+      el('td', { style: { color: r.ok ? '#30a46c' : (r.cancelled ? 'var(--text-muted)'
+        : (r.error ? '#e5484d' : '#f5a524')), fontWeight: 700 }, title: r.error || '' },
+        r.ok ? '성공' : (r.cancelled ? '취소' : (r.error ? '중단' : '부분 실패'))),
       el('td', { class: 'mono' }, `${r.elapsed_sec ?? '-'}s`),
       el('td', { style: { display: 'flex', gap: '10px', flexWrap: 'wrap' } }, ...bar),
     );
@@ -2819,7 +3005,9 @@ function runDetailText(r) {
     Object.entries(st.raw.rows || {}).forEach(([s, n]) => L.push(`    ${s}: ${n} rows`));
     (st.raw.errors || []).forEach((e) => L.push(
       `    ✗ ${e.source} ${e.date}: ${e.error}`
-      + (e.attempts ? ` — 시도 ${e.attempts}회 · 재시도 예정 ${fmtRunTs(e.next_retry_at)}` : '')));
+      + (e.blocked ? ` — ${e.attempts}회 연속 실패로 자동 재시도 중단 (작업 큐에서 재개)`
+        : e.attempts ? ` — 시도 ${e.attempts}회 · 재시도 예정 ${fmtRunTs(e.next_retry_at)}` : '')));
+    if (st.raw.cancelled_units) L.push(`    ⊘ 취소로 실행하지 않은 유닛 ${st.raw.cancelled_units}개`);
     (st.raw.recovered || []).forEach((e) => L.push(
       `    ↻ ${e.source} ${e.date}: 재시도 성공${e.attempts ? ` (실패 ${e.attempts}회 후 복구)` : ''}`));
   }
