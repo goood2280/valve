@@ -3,7 +3,6 @@
     "mode": "mock",
     "module": "valve.mock:query",
     "user": "pipe-runner",
-    "api_key": "",
     "timeout_sec": 290,
     "min_interval_sec": 1,
     "max_concurrent": 3,
@@ -29,7 +28,7 @@
     "prefix": "",
     "access_key": "",
     "secret_key": "",
-    "fake_local_path": "D:/semi all/flow/data/flow-data/s3_bucket",
+    "fake_local_path": "D:\\semi all\\Valve\\s3_local",
     "upload_mode": "immediate",
     "upload_interval_sec": 300,
     "retry_failed_sec": 120
@@ -61,5 +60,6 @@
     "config_prefix": "valve-config",
     "max_per_hour": 60,
     "dedupe_window_sec": 60
-  }
+  },
+  "_root": "D:\\semi all\\Valve"
 }

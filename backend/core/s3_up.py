@@ -3,6 +3,7 @@ Valve · s3_up
 -------------
 S3 업로드 어댑터.
   - 개발 모드: settings.s3.fake_local_path 가 있고 endpoint_url 이 비어있으면 로컬 폴더 모사
+                (상대경로는 app.py 에서 Valve ROOT 기준으로 절대화 · 기본 "s3_local")
   - 실제 모드: boto3 로 업로드 (atomic: tmp key → copy → delete tmp)
 """
 from __future__ import annotations
@@ -25,8 +26,13 @@ class S3Uploader:
         self.secret_key = s3.get("secret_key") or None
 
         self._s3_client = None
+        self.fake_error = ""
         if self._is_fake():
-            Path(self.fake_local).mkdir(parents=True, exist_ok=True)
+            # 없는 드라이브·권한 없는 경로여도 기동은 막지 않는다 (설정 탭에서 고칠 수 있어야 함)
+            try:
+                Path(self.fake_local).mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                self.fake_error = f"fake_local_path 준비 실패 ({self.fake_local}): {e}"
         else:
             self._init_boto()
 

@@ -1,12 +1,26 @@
 {
   "name": "Valve",
-  "version": "0.3.8",
+  "version": "0.3.9",
   "codename": "valve",
   "pairs_with": "flow",
   "purpose": "DataLake 수도꼭지 — 사내 API 에서 데이터를 뽑아 S3 로 흘려 flow 에 공급",
   "tagline": "turn the valve · feed the flow",
   "created": "2026-04-24",
   "changelog": [
+    {
+      "version": "0.3.9",
+      "date": "2026-07-29",
+      "tag": "feat",
+      "title": "매칭알람에 function step 추천 근거(앞뒤 이웃 step 컨텍스트)를 실어 보냄",
+      "changes": [
+        "미매칭 step 알람에 match_hint 추가 — step_id 는 같은 prefix·자릿수 안에서 번호가 공정 순서를 뜻하므로(AA100002 는 AA100000 과 AA100006 사이) 번호가 가장 가까운 앞뒤 '매칭된' step 을 고르고, 최근 며칠치 FAB raw 에서 각각이 실제로 쓴 ppid·eqp_id·eqp_model·area unique 를 같이 보낸다. flow 는 이걸 근거로 GPT OSS 120B 에게 function step 을 추천받는다 (flow 서버에는 FAB raw 가 없어 Valve 가 보내지 않으면 근거가 없다)",
+        "알람 탭 ⚙ 'function step 추천 컨텍스트' — 사용 여부·기간(최근 N일)·앞뒤 이웃 수·비교 열·값 상한을 웹에서 수정 (pipeline.yaml unmatched_scan.hint). 기존 설치는 config/ 가 seed-only 라 키가 없는데, 코드 기본값(7일·앞뒤 3개·ppid/eqp_id/eqp_model/area)으로 그대로 동작한다",
+        "기간은 오늘이 아니라 데이터에 실제로 있는 날짜 기준 — DB 가 며칠 밀려 있어도 '가장 최근 N 일' 이 남는다. 이웃은 같은 prefix 라도 자릿수가 다르면 제외한다 (체계가 다른 step)",
+        "매칭알람 전송 열 코드 기본값에 area 추가. area 로 비교하려면 sources.FAB.columns 에 먼저 있어야 한다 — 사내 테이블에 없는 열을 조회에 넣으면 FAB raw 가 통째로 실패하므로 기본 조회 컬럼에는 넣지 않았다 (⚙ 조회 컬럼에서 추가)",
+        "발행 payload 에 schema 버전 — Valve 를 올리면 알람 구성이 그대로여도 한 번은 다시 발행해 새 필드가 flow 로 넘어간다",
+        "사내 Lake API 설정에서 api_key 제거 — 이 API 의 인증 정보는 user_name 하나뿐인데 쓰지도 않는 키 입력칸이 남아 있었다 (설정 탭·스키마·호출 미리보기·매뉴얼에서 함께 정리). 구버전 설치에 남은 값은 조회 응답에서 걸러내고 저장 시 사라진다"
+      ]
+    },
     {
       "version": "0.3.8",
       "date": "2026-07-29",

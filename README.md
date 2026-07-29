@@ -8,17 +8,18 @@
                               │  query(params, custom_col, user)
                               │  (rate limit · 5분 제한 · HY000 간헐)
                               ▼
-                      ╔════════════════╗
-                      ║     Valve      ║   ← 운영 대시보드
-                      ║  · Probe       ║     (Monitor · Products
-                      ║  · Plan        ║      · Settings · Browser)
-                      ║  · Execute ×3  ║
-                      ║  · Merge       ║
-                      ║  · Upload      ║
-                      ╚════════════════╝
+                      ╔════════════════════╗
+                      ║        Valve       ║   ← 운영 대시보드 6탭
+                      ║  · Probe → Plan    ║     (모니터 · 제품 · 로그
+                      ║  · Execute ×3      ║      · 설정 · 탐색기 · 알람)
+                      ║  · raw → event     ║
+                      ║    → feature       ║
+                      ║    → wide → send   ║
+                      ║  · Upload · 알람   ║
+                      ╚════════════════════╝
                               │
                               │  hive partition parquet
-                              │  date=YYYY-MM-DD/part-0.parquet
+                              │  date=YYYY-MM-DD/data.parquet
                               ▼
                          [S3 bucket]
                               │
@@ -30,7 +31,8 @@
 
 - **Probe-First Two-Stage** — 하루치 쿼리 전에 1시간 샘플로 row 수 추정 → chunk plan 생성. 결과는 **7일 캐시** (한 번 측정하면 일주일 재사용).
 - **Adaptive fallback** — chunk 가 timeout 나면 root_lot_id → item_id 로 자동 재분할.
-- **1일 단위 Hive Partition** — `date=2026-04-24/part-0.parquet` 한 파일로 머지.
+- **1일 단위 Hive Partition** — `date=2026-04-24/data.parquet` 한 파일로 머지. 파티션 날짜는
+  **데이터의 시간 컬럼**(`tkout_time`) 기준이지 쿼리 날짜가 아니다 (auto report 와 동일 규약).
 - **Rolling Backfill** — 기본 3일 창(오늘·어제·그제) 1일 단위 replace. `backfill_days` 로 3~5 조정.
 - **Idempotent Overwrite + Completeness Check** — probe 예상 row 수 vs 실제 row 수 비교, 허용치(기본 0.5%) 초과 시 S3 업로드 보류 + 재큐잉.
 - **max_concurrent: 3** — 사내 API 부담 최소.
@@ -68,7 +70,33 @@ uvicorn app:app --host 0.0.0.0 --port 8090 --reload
 | pip 이 아주 낮은 버전을 골라 설치 | 파이썬이 낡아 최신 wheel 을 못 받는 것 — 3.10+ 환경에서 다시 설치 |
 | 사내망이라 pip 이 외부를 못 봄 | 외부 PC 에서 `pip download -r requirements.txt -d wheels/` 후 반입 → `pip install --no-index --find-links wheels/ -r requirements.txt` |
 
-기본값은 **Mock 모드** (가짜 데이터 · HY000 5% 확률 · 1% 확률 6분 timeout 주입). 웹에서 Settings → `lake_api.mode: real` 로 바꾸고 `module: mycorp.datalake:query` 같은 실제 경로를 넣으면 전환.
+### Mock → 사내 실 API 전환
+
+기본값은 **Mock 모드** (가짜 데이터 · HY000 5% 확률 · 1% 확률 6분 timeout 주입).
+웹 **설정 탭**에서 `lake_api.mode` 를 `real` 로 바꾸면 전환된다. 이때 `lake_api.module` 이
+실제로 호출할 함수를 가리켜야 한다.
+
+- 형식은 **`패키지.모듈:함수`** (`importlib` 로 동적 로드). 기본값 `valve.mock:query` 는 자리표시자다.
+- Valve 가 기대하는 시그니처는 **`query(params, custom_col, user)`** — 반환은 pandas/polars DataFrame.
+- **인증 정보는 `user_name` 하나뿐이다.** 사내 DataLake query API 는 키/토큰을 받지 않는다 —
+  설정 탭의 `lake_api.user` 가 그대로 `getData(user_name=…)` 로 간다. (v0.3.9 에서 쓰지도 않던
+  `api_key` 필드를 없앴다.)
+- 사내 `getData` 는 keyword 시그니처(`getData(params, custom_columns=~, user_name=~)`)라 **그대로 꽂을 수 없다.**
+  `PYTHONPATH` 에 잡히는 곳에 얇은 어댑터를 하나 두고 그 경로를 `module` 에 적는다:
+
+```python
+# mycorp/valve_adapter.py   →   설정 탭에 module: mycorp.valve_adapter:query
+from bigdataquery import getData
+
+def query(params, custom_col, user):
+    if custom_col:                      # 빈 리스트면 전체 컬럼 (인자 자체를 뺀다)
+        return getData(params, custom_columns=custom_col, user_name=user)
+    return getData(params, user_name=user)
+```
+
+`user` 는 `lake_api.user` 기본값이 넘어오고, 호출 측에서 `api.query(params, cols, user="다른계정")`
+처럼 건당 덮어쓸 수 있다. `params` 키(`table_name`·`dateFrom`·`dateTo`·shard 컬럼)는
+제품 탭의 params 템플릿이 만들어 준다 — `reference/Ref_raw_query.py` 와 같은 모양이다.
 
 ## 파일 구조
 
@@ -95,12 +123,12 @@ Valve/
 │
 ├── staging/{product}/{SOURCE}/  임시 parquet (머지 후 정리)
 ├── s3_outbox/valve-alerts/      ★ S3 업로드 폴더 — flow 매칭알람이 읽는다 (아래 참조)
-├── s3_local/                    fake_local_path (개발용 가짜 S3 · 실제 운영엔 없음)
+├── s3_local/                    fake_local_path 기본값 (개발용 가짜 S3 · 실제 운영엔 없음)
 ├── logs/                        운영 로그 (아래 표)
 ├── docs/                        설계 문서 · 매뉴얼 PDF
 ├── scripts/smoke_test.py        stdlib 만으로 핵심 라우트 검증
 ├── scripts/gen_manual_pdf.py    docs/valve_manual.pdf 생성
-└── tests/                       pytest (170개 · `python -m pytest tests -q`)
+└── tests/                       pytest (187개 · `python -m pytest tests -q` · 약 3분)
 ```
 
 ### `config/` — 있어야 도는 파일들
@@ -110,9 +138,9 @@ Valve/
 
 | 파일 | 필수 | 누가 쓰나 | 내용 |
 |---|---|---|---|
-| `pipeline.yaml` | ✅ 전체 | 웹(모니터 ⚙ 실행 관리 · 알람 탭) | `db_root` · `runtime`(워커·주기·**실행 금지 시간대**) · `sources`(테이블/컬럼) · 룰북 경로 · `unmatched_scan.exclude` · `knob_skip` |
+| `pipeline.yaml` | ✅ 전체 | 웹(모니터 ⚙ 실행 관리 · 알람 탭) | `db_root` · `runtime`(워커·주기·**실행 금지 시간대**·재시도) · `sources`(테이블/컬럼/**파티션 기준 열**) · 룰북 경로 · `unmatched_scan`(제외 규칙 · 알람 전송 열 · **function step 추천 컨텍스트**) · `knob_skip` |
 | `vehicles.yaml` | ✅ 전체 | 웹(제품별 주기) | vehicle 정의 — `product` `process_id` `line_id` `QueryTimeSpan` `SplitTimeSpan` `event_days_back` `event_lot_startwith` `runs_per_day` |
-| `settings.json` | ✅ 전체 | 웹(설정 탭) | `lake_api`(mode·module·user·timeout·retry) · `s3`(bucket·key) · `schedule` · `probe` · `alerts` |
+| `settings.json` | ✅ 전체 | 웹(설정 탭) | `lake_api`(mode·module·**user_name**·timeout·retry — 인증은 user 하나뿐) · `s3`(bucket·key) · `schedule` · `probe` · `alerts` |
 | `products.yaml` | ✅ 모니터 백필 | 웹(제품 탭) | 제품 × 소스 테이블 · `shard_hierarchy` · `target_chunk_rows` · `params_template` |
 | `source_types.yaml` | ✅ 제품 편집기 | 웹(설정 › Source types) | 소스 메타 — 컬럼 풀 · 기본 shard · 색 · 힌트 |
 | `step_matching/vehicle_matching.csv` | ✅ event·feature | **flow → S3 ↓** | `vehicle,product,step_id,step_desc` — 이게 없으면 event DB 가 비어 feature 도 안 나온다 |
@@ -166,14 +194,15 @@ Valve/
 | `core/` | 역할 |
 |---|---|
 | `feature_pipeline.py` | **파이프라인 본체** — raw → event → feature → wide → send 전 단계 + 룰북 로딩 + 리포트 |
-| `pipeline_runner.py` | 병렬 오케스트레이터 + 진행상황(stage) 추적 + 제품별 주기/루프 스케줄러 + **실행 금지 시간대** + 실행 락 |
+| `pipeline_runner.py` | 병렬 오케스트레이터 + 진행상황(stage) 추적 + 제품별 주기/루프 스케줄러 + **실행 금지 시간대** + 실행 락 + 작업 큐(실행·대기·예정 · 안전 지점 취소) |
+| `pipeline_retry.py` | raw 실패 유닛 영구 재시도 큐 (severity 3단계 · 상한 도달 시 blocked) |
 | `run_log.py` | 실행 이력 (vehicle 1회 = 1레코드, append-only JSONL) |
 | `runtime_env.py` | 호스트 코어/메모리 → 워커 수 산정 (`auto` 값의 근거) |
 | `lake_api.py` | 사내 DataLake `query()` 어댑터 — Mock/Real · rate limit · retry · timeout |
 | `planner.py` | probe → chunk plan (7일 캐시) |
 | `executor.py` | asyncio chunk worker (`max_concurrent=3`) + 머지 + completeness |
 | `state.py` | plan/chunk/partition 상태 + SSE broadcast + crash recovery |
-| `alert_store.py` | 알람 통합 리스트 + flow 와의 S3 순환(ack) |
+| `alert_store.py` | 알람 통합 리스트 + flow 와의 S3 순환(ack) + 업로드 폴더 미러 · 미매칭 step 에 `match_hint` 동봉 |
 | `fab_scanner.py` | FAB DB 스캔 — 미매칭 step · 미등록 PPID |
 | `s3_jobs.py` | S3 전송 항목 엔진 (단일 워커 큐 · 파일 경계 중지 · 이력) |
 | `s3_up.py` · `s3_queue.py` · `s3_link.py` | atomic put · 지연 큐 · 탐색기 신호등(방향 판정) |
@@ -334,12 +363,54 @@ aws s3 sync "D:/semi all/Valve/s3_outbox/valve-alerts" s3://<bucket>/valve-alert
   flow 의 판정(보류/반영불필요)이 유실된다. ack 는 Valve/flow 가 각자 S3 에 직접 읽고 쓴다.
 - 반대 방향(flow → Valve)의 matching csv 는 `config/csv_sync.yaml` 이 담당한다 (별개 경로).
 
+### 미매칭 step 알람에 실리는 것 — function step 추천 근거
+
+flow 는 신규 step 이 **어느 function step 인지**를 GPT OSS 120B 로 추천한다. 그런데
+flow 서버에는 FAB raw DB 가 없다 — 근거는 Valve 가 알람에 실어 보내야 한다.
+
+`unmatched_step` 알람에는 `match_hint` 가 함께 실린다: step_id 는 같은 prefix·자릿수
+안에서 번호가 공정 순서를 뜻하므로(`AA100002` 는 `AA100000` 과 `AA100006` 사이),
+**번호가 가장 가까운 앞뒤 "매칭된" step** 을 고른 뒤, 최근 며칠치 FAB raw 에서 각각이
+실제로 쓴 `ppid · eqp_id · eqp_model · area` unique 를 뽑아 같이 보낸다.
+
+```jsonc
+{ "id": "um|VH_PRODA|CC955200", "type": "unmatched_step", "step_id": "CC955200",
+  "match_hint": {
+    "prefix": "CC", "number": 955200, "days": 7,
+    "window": {"from": "2026-07-20", "to": "2026-07-26", "dates": 7},
+    "cols": ["ppid", "eqp_id", "eqp_model", "area"],
+    "values": {"ppid": ["PP_SPAC_STD"], "eqp_id": ["CVD_02"]},      // 신규 step
+    "neighbors": [                                                   // 앞뒤 매칭 step
+      {"step_id": "CC955100", "step_desc": "SPACER_CVD", "direction": "prev", "gap": 100,
+       "values": {"ppid": ["PP_SPAC_STD"], "eqp_id": ["CVD_02"]}}
+    ] } }
+```
+
+판단은 flow 몫이다 — ppid 가 같은 이웃이 1순위, 새 ppid 면 eqp_id·eqp_model·area 가
+겹치는 이웃이 후보다. **한 step 은 1회만 검사하고 flow 가 결과를 기록한다.**
+
+| 항목 | 값 | 어디서 |
+|---|---|---|
+| 사용 여부 · 기간 · 이웃 수 · 비교 열 | `unmatched_scan.hint` | 알람 탭 ⚙ *function step 추천 컨텍스트* |
+| 만드는 곳 | `feature_pipeline._step_match_hints` → `alert_store.build` | — |
+
+- `cols` 의 열이 FAB raw 에 없으면 조용히 빠진다. **`area` 를 쓰려면 `sources.FAB.columns`
+  에 먼저 추가**해야 한다 (알람 탭 ⚙ *조회 컬럼*) — 사내 테이블에 없는 열을 조회에 넣으면
+  FAB raw 쿼리가 통째로 실패하므로 기본 조회 컬럼에는 넣지 않았다.
+- 이웃은 **이미 매칭된 step** 만이다. 매칭 테이블에 아직 없는 step 은 추천 근거가 못 된다.
+- 발행 payload 에는 `schema` 버전이 붙는다. Valve 를 올리면 알람 구성이 그대로여도
+  한 번은 다시 발행된다 — 새 필드가 flow 에 전달되도록.
+
 ## 현재 범위
 
 - **v0.1** (2026-04-24) — 백엔드 완성 · Mock 으로 end-to-end 돌아감 · API 로 enqueue/조회 가능
 - **v0.2** — frontend 단일 페이지 (Monitor 캘린더 히트맵 · Products · Settings · Browser 4탭) · smoke_test · 실행 검증
 - **v0.3** (2026-07-26) — 파이프라인 3단계(raw→event→feature)+wide/send · 제품별 실행 주기 · 실행 로그 · S3 전송 항목 엔진(⚙) · 알람 S3 순환 · 실행 락
 - **v0.3.1** (2026-07-27) — `feat` 배지에 커버 구간 · **실행 금지 시간대** · ⚙ 실행 관리로 실행 조작 통합 · 진행 표시 깜빡임 제거
+- **v0.3.2~0.3.4** (2026-07-27~28) — Python 3.10 미만 기동 차단 안내 · Windows 설치 실패 수정 · **매칭알람 전송 개편**(예시 lot/wafer · 전송 열 ⚙ · 업로드 폴더) · DB 루트 분리(`db_root` 절대경로 · `VALVE_DB_ROOT`)
+- **v0.3.5~0.3.6** (2026-07-28) — raw 실패 유닛 **영구 재시도 큐**(severity 3단계) · event skip 버그 수정 · **작업 큐**(실행·대기·예정 + 안전 지점 취소) · 재시도 5회 상한 · DB 40GB 경고
+- **v0.3.7~0.3.8** (2026-07-29) — DB 사용량을 소스별 raw·event 로 분해 · 전 소스 **파티션 기준 열을 `tkout_time` 으로 통일** + 웹(⚙)에서 조회 컬럼·기준 열 편집
+- **v0.3.9** (2026-07-29) — 매칭알람에 **function step 추천 근거**(앞뒤 이웃 step 컨텍스트 `match_hint`) 동봉 + 알람 탭 ⚙ 설정 · 사내 Lake API 설정에서 쓰지 않는 `api_key` 제거(인증은 `user_name` 뿐)
 - **다음** — 실사내 API 연결 (`lake_api.mode: real`) · 알림 연동
 
 ## API 요약
@@ -370,6 +441,12 @@ aws s3 sync "D:/semi all/Valve/s3_outbox/valve-alerts" s3://<bucket>/valve-alert
 | GET  | `/api/pipeline/schedule` | 제품별 실행 주기 + 다음 실행 예정 + 최근 실행 요약 |
 | PUT  | `/api/pipeline/schedule/{vehicle}` | `{runs_per_day}` 저장 (0=제외 · null=전역 추종) |
 | GET  | `/api/pipeline/runs` | 실행 로그 (`?vehicle=&limit=&failed_only=`) |
+| GET  | `/api/pipeline/queue` · POST `/queue/cancel` | 작업 큐(실행·락대기·예정) · 안전 지점 취소 |
+| GET  | `/api/pipeline/retries` · POST `/retries/resume` | raw 재시도 큐 · blocked 재개 |
+| GET  | `/api/pipeline/db-usage` | 제품 × 소스 raw·event DB 사용량 |
+| GET  | `/api/pipeline/sources` · PUT `/config/sources` | 소스별 table·조회 컬럼·파티션 기준 열 |
 | GET  | `/api/pipeline/alerts/outbox` | S3 업로드 폴더 현황 (경로 · 파일 · 발행 주기) |
+| PUT  | `/api/pipeline/config/alert-cols` | 매칭알람 전송 열 · 예시 개수 |
+| PUT  | `/api/pipeline/config/alert-hint` | function step 추천 컨텍스트 (기간 · 이웃 수 · 비교 열) |
 | GET  | `/api/browser/roots` · `/list` | 파일탐색기 |
 | GET  | `/api/query/view` | parquet + SQL 필터 |

@@ -70,6 +70,19 @@
 #                    eqp_id, eqp_model. 예시 (root_lot_id, wafer_id) 쌍은 항상
 #                    example_limit 개까지 같이 실린다 — flow 매칭알람 화면과
 #                    function step 추천(LLM)의 입력.
+# unmatched_scan.hint — 신규 step 의 "앞뒤 이웃 step" 컨텍스트 (알람 탭 ⚙).
+#                    step_id 는 같은 prefix·자릿수 안에서 번호가 공정 순서를 뜻한다
+#                    (AA100002 는 AA100000 과 AA100006 사이). 번호로 이웃을 고른 뒤,
+#                    최근 며칠치 FAB raw 에서 그 이웃들이 실제로 어떤 ppid/eqp_id/
+#                    eqp_model/area 로 돌았는지를 같이 실어 보낸다 — flow 가 이걸
+#                    근거로 function step 을 추천한다(판단은 flow 몫).
+#     enabled       끄면 컨텍스트를 싣지 않는다 (flow 추천도 근거 없음으로 표시)
+#     days          FAB raw 에서 볼 "가장 최근 날짜 파티션" 수 (오늘 기준이 아니라
+#                   데이터에 있는 날짜 기준 — DB 가 밀려 있어도 최근 N 일치가 남는다)
+#     neighbors     앞/뒤 각각 몇 개의 이웃 step 을 실을지
+#     cols          이웃/신규 step 의 unique 값을 뽑을 열. raw 에 없는 열은 조용히 빠진다
+#                   — area 를 쓰려면 sources.FAB.columns 에 먼저 추가할 것(⚙ 조회 컬럼)
+#     value_limit   열 하나에 실을 unique 값 상한
 #
 # knob_skip — knob step 미통과(값이 빈) wafer 처리 -----------------------
 #   명시: ppid_knob.csv 의 AND 블록(같은 feature+rule_order 복수 행, category=SKIP,
@@ -180,7 +193,18 @@ unmatched_scan:
   alert_cols:
   - eqp_id
   - eqp_model
+  - area
   example_limit: 3
+  hint:
+    enabled: true
+    cols:
+    - ppid
+    - eqp_id
+    - eqp_model
+    - area
+    days: 7
+    neighbors: 3
+    value_limit: 12
 knob_skip:
   enabled: true
   auto: true

@@ -85,6 +85,10 @@ settings.json 에 `s3.flow_layout: "canonical"` 플래그 추가, executor 가 `
 Valve 는 `staging/` 로컬만 쓰고 S3 는 `fake_local_path` (디스크) 로 대체.
 flow 는 별도의 `db_root` 를 사용. 두 앱이 파일시스템을 공유하지 않아도 문제 없음 (각자 데모 가능).
 
+기본값은 **Valve 안쪽** `s3_local` (상대경로 → ROOT 기준 절대화). 즉 기본 상태에서 두 앱은
+서로의 디렉터리를 건드리지 않는다. flow 와 한 버킷을 물려 알람/설정 순환까지 붙여 데모하려면
+아래 **C** 처럼 `fake_local_path` 를 flow 쪽 fake 버킷(`.../flow-data/s3_bucket`)으로 바꾼다.
+
 ### C. 소규모 배포 — 공유 워크스페이스 직접 쓰기
 
 `s3.endpoint_url=""`, `fake_local_path` 를 flow 의 `db_root` 로 지정:

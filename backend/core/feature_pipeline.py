@@ -55,8 +55,18 @@ KEY_COLS = ["root_lot_id", "wafer_id"]
 
 # 매칭알람(unmatched_step)에 실어 보낼 raw 열 기본값 — pipeline.yaml
 # unmatched_scan.alert_cols 로 override (알람 탭 ⚙). raw 에 없는 열은 조용히 빠진다.
-ALERT_COLS_DEFAULT = ["eqp_id", "eqp_model"]
+ALERT_COLS_DEFAULT = ["eqp_id", "eqp_model", "area"]
 ALERT_EXAMPLE_LIMIT_DEFAULT = 3
+
+# 신규 step 의 앞뒤 이웃 step 컨텍스트 (flow 의 function step 추천 입력) 기본값 —
+# pipeline.yaml unmatched_scan.hint 로 override (알람 탭 ⚙).
+HINT_DEFAULT = {
+    "enabled": True,
+    "days": 7,          # FAB raw 에서 볼 최근 날짜 파티션 수
+    "neighbors": 3,     # 앞/뒤 각각 실어 보낼 이웃 step 수
+    "cols": ["ppid", "eqp_id", "eqp_model", "area"],
+    "value_limit": 12,  # 열 하나에 실을 unique 값 상한
+}
 
 
 def alert_scan_cols(us_cfg: dict) -> list[str]:
@@ -70,6 +80,45 @@ def alert_scan_cols(us_cfg: dict) -> list[str]:
         if c and c not in out:
             out.append(c)
     return out
+
+
+def alert_hint_cfg(us_cfg: dict) -> dict:
+    """unmatched_scan.hint — 이웃 step 컨텍스트 설정 (미설정 시 코드 기본값).
+
+    config/ 는 seed-only 라 기존 설치의 pipeline.yaml 에는 이 키가 없다 —
+    기본값을 코드에 두어야 업그레이드만으로 동작한다."""
+    raw = us_cfg.get("hint")
+    cfg = dict(HINT_DEFAULT)
+    cfg["cols"] = list(HINT_DEFAULT["cols"])
+    if isinstance(raw, dict):
+        cfg["enabled"] = bool(raw.get("enabled", True))
+        for key, lo, hi in (("days", 1, 90), ("neighbors", 1, 10), ("value_limit", 1, 50)):
+            try:
+                cfg[key] = max(lo, min(hi, int(raw.get(key) or HINT_DEFAULT[key])))
+            except (TypeError, ValueError):
+                pass
+        if isinstance(raw.get("cols"), list):
+            out: list[str] = []
+            for c in raw["cols"]:
+                c = str(c).strip()
+                if c and c not in out:
+                    out.append(c)
+            cfg["cols"] = out or list(HINT_DEFAULT["cols"])
+    return cfg
+
+
+_STEP_NUM_RE = re.compile(r"^(.*?)(\d+)$")
+
+
+def split_step_id(step_id) -> tuple[str, int, int] | None:
+    """'AA100002' → ('AA', 100002, 6). 끝이 숫자가 아니면 None.
+
+    같은 prefix·같은 자릿수의 step 끼리만 번호가 공정 순서를 뜻한다 —
+    자릿수가 다르면 체계가 다른 step 이라 이웃으로 보지 않는다."""
+    m = _STEP_NUM_RE.match(str(step_id or "").strip())
+    if not m:
+        return None
+    return m.group(1), int(m.group(2)), len(m.group(2))
 
 # 추출 소스 기본값 — config/pipeline.yaml 의 sources 로 override (테이블명/컬럼 조절)
 # time_col = raw 를 date= 파티션으로 나누는 기준 열. 전 소스를 tkout_time(공정 진행
@@ -912,6 +961,9 @@ class FeaturePipeline:
             ("MT100200", "MEASURE_CD", "MET_CD_01", "MEA-500"),   # eqp_model 제외 대상
             ("AX550000", "AUX_CLEAN", "AUX_01", "AX-9"),          # eqp_id 제외 대상
             ("XX777700", "IMP_WELL", "IMP_01", "I-2000"),         # 진짜 미매칭 → 리포트 노출
+            # 매칭된 step 과 같은 prefix·자릿수 (CC955100 SPACER_CVD 바로 뒤) +
+            # 같은 설비 — function step 추천(앞뒤 이웃 step 비교) 재현용
+            ("CC955200", "SPACER_CVD_B", "CVD_02", "C-500"),
         ]
         eqp_pool = {
             "GATE_ETCH": [("ETCH_01", "E-3000"), ("ETCH_02", "E-3000")],
@@ -1664,12 +1716,14 @@ class FeaturePipeline:
             else:
                 unmatched.append(row)
 
-        step_extras, present_cols = self._alert_step_extras(
-            raw, {x["step_id"] for x in unmatched}, us_cfg)
+        new_steps = {x["step_id"] for x in unmatched}
+        step_extras, present_cols = self._alert_step_extras(raw, new_steps, us_cfg)
+        step_hints = self._step_match_hints(raw, new_steps, us_cfg, vehicle)
         report = {"product": cfg["product"], "vehicle": vehicle,
                   "unmatched": unmatched, "excluded": excluded,
                   "exclude_config": {"eqp_id": eqp_pats, "eqp_model": model_pats},
-                  "alert_cols": present_cols, "step_extras": step_extras}
+                  "alert_cols": present_cols, "step_extras": step_extras,
+                  "step_hints": step_hints}
         rdir = self.report_dir(vehicle)
         rdir.mkdir(parents=True, exist_ok=True)
         (rdir / "unmatched.json").write_text(
@@ -1734,6 +1788,104 @@ class FeaturePipeline:
                 entry["cols"][c] = ", ".join(vals)
             out[str(r["step_id"])] = entry
         return out, use_cols
+
+    def _recent_raw(self, df: pl.DataFrame, source: str,
+                    days: int) -> tuple[pl.DataFrame, dict]:
+        """raw 를 "가장 최근 N 개 날짜" 로 줄인다 (파티션 기준 열의 날짜).
+
+        오늘 기준이 아니라 데이터에 실제로 있는 날짜 기준이다 — DB 가 며칠 밀려
+        있어도 최근 N 일치가 남는다."""
+        try:
+            tc = self._time_col(source)
+        except ValueError:      # time_col 설정 오류 — 추천 컨텍스트까지 막지는 않는다
+            tc = None
+        if not tc or tc not in df.columns or df.is_empty():
+            return df, {}
+        dated = df.with_columns(pl.col(tc).cast(pl.Utf8).str.slice(0, 10).alias("_pdate"))
+        dates = sorted({d for d in dated["_pdate"].to_list() if d})
+        if not dates:
+            return df, {}
+        keep = dates[-max(1, int(days)):]
+        sub = dated.filter(pl.col("_pdate").is_in(keep)).drop("_pdate")
+        return sub, {"from": keep[0], "to": keep[-1], "dates": len(keep), "time_col": tc}
+
+    def _step_match_hints(self, raw: pl.DataFrame, steps: set,
+                          us_cfg: dict, vehicle: str) -> dict:
+        """신규(미매칭) step 별 "앞뒤 이웃 step" 컨텍스트 — flow 의 function step
+        추천(GPT OSS 120B)이 쓰는 근거 자료.
+
+        step_id 는 같은 prefix·자릿수 안에서 번호가 공정 순서를 뜻한다
+        (AA100002 는 AA100000 과 AA100006 사이). 그래서 번호만 가까운 것을 고르는
+        대신, 최근 며칠치 FAB raw 에서 그 이웃 step 들이 실제로 어떤
+        ppid/eqp_id/eqp_model/area 로 돌았는지를 같이 실어 보낸다. 판단은 flow 가 한다:
+          · 신규 step 의 ppid 가 이웃 step 의 ppid 에 있으면 그 step 과 같은 function step
+          · 새 ppid 면 eqp_id·eqp_model·area 가 겹치는 이웃 step 이 후보
+
+        반환: {step_id: {step_id, prefix, number, days, window, cols,
+                         rows, n_lots, values{열: [값…]},
+                         neighbors: [{step_id, step_desc, direction, gap,
+                                      rows, n_lots, values{…}}]}}
+        """
+        cfg = alert_hint_cfg(us_cfg)
+        if not cfg["enabled"] or not steps:
+            return {}
+        cols = [c for c in cfg["cols"] if c in raw.columns and c != "step_id"]
+        if not cols or "step_id" not in raw.columns:
+            return {}
+        recent, window = self._recent_raw(raw, "FAB", cfg["days"])
+        try:
+            smap = {str(r["step_id"]): str(r.get("step_desc") or "")
+                    for r in self.step_map(vehicle).iter_rows(named=True)}
+        except Exception:
+            smap = {}
+
+        aggs: list = [pl.len().alias("_rows")]
+        has_lot = "root_lot_id" in recent.columns
+        if has_lot:
+            aggs.append(pl.col("root_lot_id").n_unique().alias("_n_lots"))
+        for c in cols:
+            aggs.append(pl.col(c).cast(pl.Utf8).drop_nulls().unique(maintain_order=True)
+                        .head(cfg["value_limit"]).alias(f"_v_{c}"))
+        stat: dict[str, dict] = {}
+        for r in recent.group_by("step_id").agg(aggs).iter_rows(named=True):
+            stat[str(r["step_id"])] = {
+                "rows": int(r.get("_rows") or 0),
+                "n_lots": int(r.get("_n_lots") or 0) if has_lot else 0,
+                "values": {c: [str(v) for v in (r.get(f"_v_{c}") or []) if str(v or "")]
+                           for c in cols},
+            }
+
+        empty = {"rows": 0, "n_lots": 0, "values": {c: [] for c in cols}}
+        out: dict[str, dict] = {}
+        for sid in sorted(str(s) for s in steps):
+            me = stat.get(sid) or empty
+            entry = {"step_id": sid, "days": cfg["days"], "window": window,
+                     "cols": cols, "rows": me["rows"], "n_lots": me["n_lots"],
+                     "values": me["values"], "neighbors": []}
+            parsed = split_step_id(sid)
+            if parsed:
+                prefix, num, width = parsed
+                entry["prefix"], entry["number"] = prefix, num
+                cands = []
+                for other, info in stat.items():
+                    # 이웃은 "이미 매칭된 step" 만 — function step 이 있어야 추천이 된다
+                    if other == sid or not smap.get(other):
+                        continue
+                    p2 = split_step_id(other)
+                    if not p2 or p2[0] != prefix or p2[2] != width:
+                        continue
+                    cands.append((abs(p2[1] - num), p2[1], other, info))
+                near = (sorted((c for c in cands if c[1] < num))[:cfg["neighbors"]]
+                        + sorted((c for c in cands if c[1] > num))[:cfg["neighbors"]])
+                for gap, onum, other, info in sorted(near, key=lambda c: c[1]):
+                    entry["neighbors"].append({
+                        "step_id": other, "step_desc": smap.get(other, ""),
+                        "direction": "prev" if onum < num else "next", "gap": gap,
+                        "rows": info["rows"], "n_lots": info["n_lots"],
+                        "values": info["values"],
+                    })
+            out[sid] = entry
+        return out
 
     # ─────────────────────────────────────────
     # 전체 실행

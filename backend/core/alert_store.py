@@ -14,6 +14,11 @@ Valve · alert_store
      b) 반영 불필요/보류 건 → `{alerts_prefix}/pipeline/ack.json` 에 상태 기록
   3. Valve 는 ack.json 을 읽어 해당 알람을 억제(suppressed) — 다시 알람하지 않음
 
+미매칭 step 알람에는 `match_hint` 가 함께 실린다 — 같은 prefix·자릿수의 앞뒤 이웃
+step 이 최근 며칠간 어떤 ppid/eqp_id/eqp_model/area 로 돌았는지. flow 가 이걸 근거로
+function step 을 추천한다(GPT OSS 120B). 만드는 곳은 feature_pipeline._step_match_hints,
+설정은 pipeline.yaml unmatched_scan.hint (알람 탭 ⚙).
+
 알람 id (억제 단위 — split 이 바뀌어도 같은 건은 재알람 금지):
   미매칭 step : um|{vehicle}|{step_id}
   RO ppid     : ro|{vehicle}|{step_id}|{ppid}
@@ -32,6 +37,11 @@ from pathlib import Path
 from backend.core.feature_pipeline import alert_scan_cols
 
 SUPPRESS_STATUSES = ("미확인예정", "반영불필요")
+
+# 발행 payload 의 형식 버전 — 지문(fp)에 섞어 두면 Valve 를 올렸을 때 알람 구성이
+# 그대로여도 한 번은 다시 발행된다 (새 필드가 flow 에 전달되도록).
+#   1: 초기  2: unmatched_step 에 match_hint(앞뒤 이웃 step 컨텍스트) 추가
+ALERT_SCHEMA_VERSION = 2
 
 
 class AlertStore:
@@ -140,6 +150,7 @@ class AlertStore:
             unm = None
         if unm:
             extras = unm.get("step_extras") or {}
+            hints = unm.get("step_hints") or {}
             by_step: dict[str, dict] = {}
             for x in unm["unmatched"]:
                 g = by_step.setdefault(x["step_id"], {
@@ -165,6 +176,11 @@ class AlertStore:
                 for c, val in (ext.get("cols") or {}).items():
                     if c not in g:
                         g[c] = val
+                # 앞뒤 이웃 step 컨텍스트 — flow 의 function step 추천 입력.
+                # (없으면 키 자체를 넣지 않는다 — flow 가 "컨텍스트 없음" 으로 구분)
+                hint = hints.get(str(sid))
+                if hint:
+                    g["match_hint"] = hint
                 rows.append(g)
 
         by_ppid: dict[str, dict] = {}
@@ -272,6 +288,7 @@ class AlertStore:
             a["last_seen_ts"] = now
         payload = {
             "vehicle": vehicle, "ts": now, "count": len(active_ids),
+            "schema": ALERT_SCHEMA_VERSION,
             "suppressed": len(cur) - len(active_ids),
             "alert_cols": self.alert_cols(),   # flow 가 동적 열 렌더링에 사용
             "fp": self._fingerprint(cur, ack),
@@ -313,6 +330,7 @@ class AlertStore:
         parts = sorted(
             f"{a.get('id')}|{(ack.get(a.get('id')) or {}).get('status') or 'active'}"
             for a in cur)
+        parts.append(f"schema={ALERT_SCHEMA_VERSION}")
         return hashlib.sha1("\n".join(parts).encode("utf-8")).hexdigest()[:16]
 
     def publish_if_changed(self, vehicle: str) -> dict:

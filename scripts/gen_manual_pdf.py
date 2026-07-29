@@ -209,10 +209,10 @@ P("실제 데이터를 가져오는 함수 호출을 어떻게 할지 정합니�
 Row([
     ["필드", "의미 · 권장값"],
     ["mode", "mock (데모/개발) 또는 real. real 로 바꾸면 아래 module 로드."],
-    ["module", "mycorp.datalake:query 형태. importlib 로 동적 로드."],
-    ["user", "사내 query 함수의 user 인자."],
-    ["api_key", "사내 API 인증 키. 있을 때만 query(..., api_key=...) kwarg 로 전달. "
-                 "저장 시 **** 마스킹."],
+    ["module", "real 모드에서 부를 함수 — <b>패키지.모듈:함수</b> (importlib 동적 로드). "
+               "기대 시그니처 query(params, custom_col, user). 아래 팁 참조."],
+    ["user", "사내 getData 의 <b>user_name</b> — 이 API 의 인증 정보는 이것 하나뿐입니다 "
+             "(키·토큰 없음)."],
     ["timeout_sec", "5분(300) 이하 권장. 기본 290."],
     ["min_interval_sec", "rate-limit — 두 호출 사이 최소 간격(초)."],
     ["max_concurrent", "동시 chunk 수. 1~5 권장."],
@@ -221,8 +221,15 @@ Row([
     ["retryable_errors", "재시도 트리거 문자열. HY000, TimeoutError 등."],
 ], widths=[4.2 * cm, 13.3 * cm], header=True)
 
-P("<b>실 모드 팁</b>: query 함수가 api_key kwarg 를 안 받아도 TypeError 감지 후 "
-  "3-인자 폴백하므로 구버전 어댑터 그대로 호환됩니다.", "Hint")
+P("<b>실 모드 팁</b>: 사내 getData 는 keyword 시그니처라 module 에 바로 못 적습니다. "
+  "얇은 어댑터를 만들고 그 경로를 적으세요. 어댑터가 넘길 인증 정보는 user_name 하나뿐입니다.", "Hint")
+Code("# mycorp/valve_adapter.py  →  module: mycorp.valve_adapter:query\n"
+     "from bigdataquery import getData\n"
+     "\n"
+     "def query(params, custom_col, user):\n"
+     "    if custom_col:      # 빈 리스트면 전체 컬럼 (인자 자체를 뺀다)\n"
+     "        return getData(params, custom_columns=custom_col, user_name=user)\n"
+     "    return getData(params, user_name=user)")
 
 # ══════════════════════════════════════════════════════════════════
 # 5. Settings — S3 업로드
@@ -234,7 +241,8 @@ Row([
     ["필드", "의미"],
     ["endpoint_url", "비우면 AWS S3. MinIO 는 http://host:9000 형태."],
     ["bucket / prefix / access_key / secret_key", "표준 boto3 파라미터. secret_key 는 저장 후 ****."],
-    ["fake_local_path", "endpoint_url 비우고 이 값 있으면 <b>개발 모드</b> — 로컬 폴더에 S3 흉내 쓰기."],
+    ["fake_local_path", "endpoint_url 비우고 이 값 있으면 <b>개발 모드</b> — 로컬 폴더에 S3 흉내 쓰기. "
+                        "기본 <b>s3_local</b> (상대경로는 Valve 설치 폴더 기준)."],
     ["upload_mode", "immediate (기본) | interval | manual"],
     ["upload_interval_sec", "interval 모드에서만 의미. 기본 300초(5분). 최소 5초 강제."],
     ["retry_failed_sec", "업로드 실패 항목 재시도 간격. 기본 120초. 3회 실패 시 알람."],
@@ -396,8 +404,7 @@ Code('df: pandas.DataFrame = query(\n'
      '        "product_code": {"op": "eq", "value": "PRODA"},\n'
      '    },\n'
      '    custom_col=["lot_id", "wafer_id", "time", "item_id", "value"],\n'
-     '    user="pipe-runner",\n'
-     '    api_key="{settings.lake_api.api_key}",\n'
+     '    user="pipe-runner",   # = 사내 getData 의 user_name (인증은 이것뿐)\n'
      ')')
 
 story.append(PageBreak())
@@ -571,8 +578,8 @@ H1("16. 트러블슈팅 플레이북")
 Row([
     ["증상", "원인 1순위", "해결"],
     ["모든 chunk 가 HY000 재시도 후 실패",
-     "사내 API 키 미등록 또는 만료",
-     "Settings › Lake API › api_key 갱신. Logs 탭에서 error 메시지 확인."],
+     "user_name 계정 권한 문제 또는 사내 API 장애",
+     "Settings › Lake API › user 확인 (인증은 user_name 뿐). Logs 탭에서 error 메시지 확인."],
     ["partition 이 항상 completeness_failed",
      "tolerance_pct 가 너무 타이트",
      "Settings › 스케줄 › tolerance_pct 를 0.5 → 1.0 로."],

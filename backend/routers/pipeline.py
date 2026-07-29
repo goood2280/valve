@@ -315,6 +315,33 @@ def put_alert_cols(body: dict = Body(...)):
     return {"ok": True, "alert_cols": cols, "example_limit": limit}
 
 
+@router.put("/api/pipeline/config/alert-hint")
+def put_alert_hint(body: dict = Body(...)):
+    """function step 추천 컨텍스트 저장 — {enabled, days, neighbors, cols, value_limit}
+    (알람 탭 ⚙ · pipeline.yaml unmatched_scan.hint).
+
+    cols 는 FAB raw 컬럼명 — raw 에 없는 열은 스캔 때 조용히 빠진다
+    (area 를 쓰려면 sources.FAB.columns 에 먼저 추가)."""
+    cols: list[str] = []
+    for c in (body.get("cols") or []):
+        c = str(c).strip()
+        if c and c not in cols:
+            cols.append(c)
+    if not cols:
+        raise HTTPException(400, "비교할 열을 하나 이상 지정하세요")
+    hint = {"enabled": bool(body.get("enabled", True)), "cols": cols}
+    for key, lo, hi, dflt in (("days", 1, 90, 7), ("neighbors", 1, 10, 3),
+                              ("value_limit", 1, 50, 12)):
+        try:
+            hint[key] = max(lo, min(hi, int(body.get(key) or dflt)))
+        except (TypeError, ValueError):
+            raise HTTPException(400, f"{key} 는 숫자")
+    cfg = _p().global_cfg()
+    cfg.setdefault("unmatched_scan", {})["hint"] = hint
+    _p().save_global_cfg(cfg)
+    return {"ok": True, "hint": hint}
+
+
 @router.post("/api/pipeline/wide/{vehicle}")
 def wide(vehicle: str):
     """vehicle 의 feature 전부를 ML_TABLE 로 병합 → 4.WIDE_FORM."""

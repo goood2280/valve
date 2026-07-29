@@ -158,6 +158,52 @@ def test_unmatched_scan_respects_global_exclude(pipe):
     assert "CC942300" not in shown | set(excluded)
 
 
+def test_unmatched_scan_carries_neighbor_step_hints(pipe):
+    """신규 step 에 앞뒤 이웃 step 컨텍스트가 실린다 (flow function step 추천 입력)."""
+    pipe.run_raw_query("VH_PRODA")
+    rep = pipe.scan_unmatched("VH_PRODA")
+    hints = rep["step_hints"]
+    h = hints["CC955200"]                     # CC955100(SPACER_CVD) 바로 뒤 신규 step
+    assert h["prefix"] == "CC" and h["number"] == 955200
+    assert "ppid" in h["cols"] and h["values"]["ppid"]
+    nb = {n["step_id"]: n for n in h["neighbors"]}
+    # 이웃은 같은 prefix·자릿수의 "매칭된" step 만 — 다른 체계(PH…)나 미매칭은 제외
+    assert set(nb) <= {"CC942300", "CC955100", "CC970200"}
+    assert "CC955100" in nb and nb["CC955100"]["step_desc"] == "SPACER_CVD"
+    assert nb["CC955100"]["direction"] == "prev"
+    # ppid 가 같은 이웃 = 같은 function step 일 확률이 가장 높은 후보
+    assert set(h["values"]["ppid"]) & set(nb["CC955100"]["values"]["ppid"])
+    # 다른 체계의 step 은 이웃이 아니다
+    assert not any(n["step_id"].startswith("PH") for n in h["neighbors"])
+
+
+def test_alert_hint_config_disable_and_days(pipe):
+    pipe.run_raw_query("VH_PRODA")
+    cfg = pipe.global_cfg()
+    cfg["unmatched_scan"]["hint"] = {"enabled": False}
+    pipe.save_global_cfg(cfg)
+    assert pipe.scan_unmatched("VH_PRODA")["step_hints"] == {}
+    cfg["unmatched_scan"]["hint"] = {"enabled": True, "days": 1, "neighbors": 1,
+                                     "cols": ["ppid"], "value_limit": 3}
+    pipe.save_global_cfg(cfg)
+    h = pipe.scan_unmatched("VH_PRODA")["step_hints"]["CC955200"]
+    assert h["cols"] == ["ppid"] and h["days"] == 1
+    assert len(h["neighbors"]) <= 2                  # 앞 1 + 뒤 1
+    assert h["window"]["dates"] == 1                 # 최근 1 일치만
+
+
+def test_alert_payload_includes_match_hint(pipe, fake_s3):
+    """발행 payload 의 unmatched_step 알람에 match_hint 가 실린다."""
+    pipe.run_all("VH_PRODA")
+    store = AlertStore(pipe, fake_s3, {"alerts": {"s3_enabled": True}}, pipe.root)
+    payload = store.publish("VH_PRODA")
+    um = [a for a in payload["alerts"]
+          if a["type"] == "unmatched_step" and a["step_id"] == "CC955200"]
+    assert um and um[0]["match_hint"]["neighbors"]
+    ro = [a for a in payload["alerts"] if a["type"] == "ro_ppid"]
+    assert all("match_hint" not in a for a in ro)    # RO 알람은 대상 아님
+
+
 def test_exclude_config_edit_changes_scan(pipe):
     pipe.run_raw_query("VH_PRODA")
     cfg = pipe.global_cfg()

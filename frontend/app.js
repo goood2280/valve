@@ -1206,10 +1206,6 @@ function queryPreview(p, s) {
     ? '[' + cols.map(c => `"${c}"`).join(', ') + ']'
     : '[]';
 
-  const apiKeyLine = STATE.settings?.lake_api?.api_key
-    ? `    api_key="{settings.lake_api.api_key}",  # **** (저장됨)`
-    : `    # api_key=...  # Settings › Lake API 에서 등록 가능`;
-
   const snippet = [
     '# Valve 는 다음 호출로 DataLake 에서 데이터를 가져와 staging parquet 으로 저장.',
     '# (settings.lake_api.module 에서 로드한 query 함수; mock 모드면 내부 mock engine)',
@@ -1219,8 +1215,7 @@ function queryPreview(p, s) {
     ...paramLines,
     '    },',
     `    custom_col=${colsPy},`,
-    `    user="{settings.lake_api.user}",`,
-    apiKeyLine,
+    `    user="{settings.lake_api.user}",   # = 사내 getData 의 user_name (인증은 이것뿐)`,
     ')',
   ].join('\n');
 
@@ -1692,9 +1687,8 @@ async function renderSettings() {
   const sections = [
     { key: 'lake', label: '🔌 사내 Lake API', rows: [
       ['lake_api.mode',          'select', ['mock','real']],
-      ['lake_api.module',        'text',   null,   'mycorp.datalake:query 형태 (real 모드에서만 의미)'],
-      ['lake_api.user',          'text',   null,   '사내 query 함수 호출 시 user 파라미터로 전달'],
-      ['lake_api.api_key',       'password', null, '사내 API 인증 키 (있는 경우). 저장 후 ****, 빈 값은 보존'],
+      ['lake_api.module',        'text',   null,   'real 모드에서 부를 함수 — "패키지.모듈:함수" (예: mycorp.valve_adapter:query). 시그니처는 query(params, custom_col, user). 사내 getData 는 keyword 형이라 getData(params, custom_columns=custom_col, user_name=user) 로 넘기는 얇은 어댑터를 만들어 그 경로를 적는다'],
+      ['lake_api.user',          'text',   null,   '사내 getData 의 user_name — 이 API 의 인증 정보는 이것 하나뿐이다 (키/토큰 없음)'],
       ['lake_api.timeout_sec',   'number', null,   '5분(300) 이하 권장. 기본 290'],
       ['lake_api.min_interval_sec', 'number'],
       ['lake_api.max_concurrent','number', null,   '동시 chunk 실행 수. 기본 3'],
@@ -2631,6 +2625,7 @@ async function loadAlerts() {
 
     if (outbox) wrap.append(alOutbox(outbox, s3items));
     wrap.append(alAlertColsEditor(cfg, alerts));
+    wrap.append(alAlertHintEditor(cfg));
     wrap.append(alSourcesEditor(sources));
     wrap.append(alExcludeEditor(cfg));
     wrap.append(alCsvSync(csvInfo));
@@ -3199,6 +3194,48 @@ function alAlertColsEditor(cfg, alerts) {
       el('span', { class: 'hint' }, '다음 파이프라인 실행/발행부터 반영'),
     ),
     el('div', { class: 'hint', style: { marginTop: '4px' } }, `FAB raw 열: ${fabCols}`),
+  );
+}
+
+// ⚙ function step 추천 컨텍스트 — 신규 step 의 앞뒤 이웃 step 이 최근 며칠간
+// 어떤 ppid/eqp 로 돌았는지를 알람에 실어 보낸다 (flow 가 이걸로 추천).
+// 저장은 pipeline.yaml unmatched_scan.hint.
+function alAlertHintEditor(cfg) {
+  const h = (cfg.unmatched_scan || {}).hint || {};
+  const on = el('input', Object.assign({ type: 'checkbox' },
+    h.enabled === false ? {} : { checked: '' }));
+  const days = el('input', { type: 'number', value: String(h.days || 7), min: '1', max: '90', style: { width: '54px' } });
+  const nb = el('input', { type: 'number', value: String(h.neighbors || 3), min: '1', max: '10', style: { width: '48px' } });
+  const cols = el('input', { type: 'text', style: { width: '260px' },
+    value: (Array.isArray(h.cols) && h.cols.length ? h.cols : ['ppid', 'eqp_id', 'eqp_model', 'area']).join(', ') });
+  const lim = el('input', { type: 'number', value: String(h.value_limit || 12), min: '1', max: '50', style: { width: '48px' } });
+  const fabCols = (((cfg.sources || {}).FAB || {}).columns || []);
+  return el('div', { style: { borderTop: AL_HAIR, marginTop: '20px', paddingTop: '12px' } },
+    alSub('⚙ function step 추천 컨텍스트',
+      'AA100002 의 앞뒤(AA100000·AA100006) 이웃 step 이 최근 며칠간 쓴 ppid·설비를 같이 실어 보낸다 '
+      + '— flow 가 ppid 가 같은 step 을 1순위, 새 ppid 면 eqp_id·eqp_model·area 가 겹치는 step 을 후보로 추천'),
+    el('div', { style: { fontSize: '12px', display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' } },
+      el('label', { style: { display: 'flex', gap: '4px', alignItems: 'center' } }, on, '사용'),
+      '최근', days, '일', '앞뒤 각', nb, '개',
+      '비교 열', cols, '값 상한', lim,
+      el('button', { class: 'btn', onclick: async (ev) => {
+        ev.target.disabled = true;
+        try {
+          await api.put('/api/pipeline/config/alert-hint', {
+            enabled: on.checked,
+            days: Number(days.value) || 7,
+            neighbors: Number(nb.value) || 3,
+            cols: cols.value.split(',').map((s) => s.trim()).filter(Boolean),
+            value_limit: Number(lim.value) || 12,
+          });
+        } catch (e) { alert(e.message); }
+        loadAlerts();
+      } }, '저장'),
+      el('span', { class: 'hint' }, '다음 파이프라인 실행/발행부터 반영'),
+    ),
+    !fabCols.includes('area') ? el('div', { class: 'hint', style: { marginTop: '4px' } },
+      'FAB 조회 컬럼에 area 가 없습니다 — area 로 비교하려면 위 ⚙ 조회 컬럼에 먼저 추가하세요 '
+      + '(없는 열은 조용히 빠집니다).') : null,
   );
 }
 

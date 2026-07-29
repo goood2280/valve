@@ -14,7 +14,8 @@ _settings: dict = None
 _api = None
 _s3 = None
 
-MASKED_KEYS = {"secret_key", "access_key", "api_key"}
+# 마스킹 대상 = S3 자격증명. 사내 Lake API 는 user_name 만 쓰므로 비밀값이 없다.
+MASKED_KEYS = {"secret_key", "access_key"}
 
 
 def deps(root: Path, settings: dict, api, s3):
@@ -32,6 +33,8 @@ def _mask(cfg: dict) -> dict:
         for k in MASKED_KEYS:
             if cfg_sec.get(k):
                 cfg_sec[k] = "****"
+        # 구버전 설치에 남아 있는 사용하지 않는 키 (사내 API 는 user_name 만 쓴다)
+        cfg_sec.pop("api_key", None)
     return out
 
 
@@ -76,9 +79,11 @@ def get_schema():
     return {
         "lake_api": {
             "mode": ["mock", "real"],
-            "module": "str (예: mycorp.datalake:query)",
-            "user": "str (사내 query 함수 호출 시 user 파라미터)",
-            "api_key": "str (write-only, 사내 API 인증 키가 있는 경우)",
+            "module": "str '패키지.모듈:함수' (real 모드에서만). 함수 시그니처는 "
+                      "query(params, custom_col, user) — 사내 getData 는 keyword 형이라 "
+                      "getData(params, custom_columns=custom_col, user_name=user) 로 넘기는 "
+                      "얇은 어댑터를 만들고 그 경로를 적는다",
+            "user": "str (사내 getData 의 user_name — 이 API 의 인증 정보는 이것뿐이다)",
             "timeout_sec": "int (<300)",
             "min_interval_sec": "float",
             "max_concurrent": "int (1~5 권장)",

@@ -9,8 +9,22 @@ Mock 모드:
   - custom_col 기반 가짜 DataFrame 생성 (실제 shard key 분포 흉내)
 
 Real 모드:
-  - settings.lake_api.module = "mycorp.datalake:query" 형태로 importlib 동적 로드
-  - 시그니처: query(params: dict, custom_col: list, user: str) -> pandas.DataFrame
+  - settings.lake_api.module = "패키지.모듈:함수" 형태로 importlib 동적 로드
+  - Valve 가 기대하는 시그니처:
+        query(params: dict, custom_col: list, user: str) -> DataFrame
+  - **인증 정보는 user_name 하나뿐이다.** 사내 DataLake query API 는 별도 키/토큰을
+    받지 않는다 — 계정(user)만 넘기면 된다. (v0.3.9 이전에는 쓰지도 않는 api_key
+    필드가 설정에 있었다. 지금은 없다.)
+  - 사내 getData 는 keyword 시그니처라 그대로 못 꽂는다. 얇은 어댑터를 하나 두고
+    그 경로를 module 에 적는다 (reference/Ref_raw_query.py 참조):
+
+        # mycorp/valve_adapter.py  →  module: "mycorp.valve_adapter:query"
+        from bigdataquery import getData
+
+        def query(params, custom_col, user):
+            if custom_col:                      # 빈 리스트면 전체 컬럼 (인자 자체를 뺀다)
+                return getData(params, custom_columns=custom_col, user_name=user)
+            return getData(params, user_name=user)
 
 공통 보증:
   - rate limit (min_interval_sec, 전역 lock)
@@ -139,7 +153,6 @@ class LakeAPI:
         self.settings = settings
         lk = settings["lake_api"]
         self.user = lk["user"]
-        self.api_key = lk.get("api_key") or ""
         self.timeout_sec = int(lk["timeout_sec"])
         self.min_interval = float(lk["min_interval_sec"])
         self.retry_attempts = int(lk["retry"]["attempts"])
@@ -155,16 +168,18 @@ class LakeAPI:
         self._last_call_time = 0.0
         self._rate_lock = asyncio.Lock()
 
-    async def query(self, params: dict, custom_col: list) -> pl.DataFrame:
+    async def query(self, params: dict, custom_col: list, user: str | None = None) -> pl.DataFrame:
         """결과는 항상 polars.DataFrame. pandas 반환한 real 어댑터도 내부에서 변환.
-        사내 query 시그니처: query(params, custom_col, user, api_key=None).
-        api_key 를 받지 않는 old-style 함수를 위해 TypeError 발생 시 3-인자로 폴백."""
+        사내 query 시그니처: query(params, custom_col, user) — 인증은 user 하나뿐이다.
+
+        user 를 주면 그 계정으로 호출한다 (사내 getData 의 user_name).
+        None 이면 settings.lake_api.user 기본값."""
         last_err: Exception | None = None
         for attempt in range(self.retry_attempts):
             try:
                 await self._wait_min_interval()
                 df = await asyncio.wait_for(
-                    asyncio.to_thread(self._invoke, params, custom_col),
+                    asyncio.to_thread(self._invoke, params, custom_col, user),
                     timeout=self.timeout_sec,
                 )
                 return self._to_polars(df)
@@ -183,15 +198,9 @@ class LakeAPI:
         assert last_err is not None
         raise last_err
 
-    def _invoke(self, params: dict, custom_col: list):
-        """실제 함수 호출 — api_key 가 있으면 kwarg 로 전달, 없으면 3-인자."""
-        if self.api_key:
-            try:
-                return self._fn(params, custom_col, self.user, api_key=self.api_key)
-            except TypeError:
-                # 어댑터가 api_key kwarg 를 안 받는 구버전
-                return self._fn(params, custom_col, self.user)
-        return self._fn(params, custom_col, self.user)
+    def _invoke(self, params: dict, custom_col: list, user: str | None = None):
+        """실제 함수 호출. user 가 None 이면 settings 기본 계정(user_name)."""
+        return self._fn(params, custom_col, user or self.user)
 
     @staticmethod
     def _to_polars(df) -> pl.DataFrame:
