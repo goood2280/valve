@@ -19,6 +19,9 @@ Output: overwrites setup.py at the repo root (flow 의 _build_setup.py 와 동�
 import base64
 import gzip
 import json
+import py_compile
+import subprocess
+import sys
 import textwrap
 from pathlib import Path
 
@@ -361,6 +364,25 @@ def extract() -> int:
     return 0
 
 
+def verify_bundle() -> int:
+    """Decode every payload and compile embedded Python before extraction."""
+    checked = python_files = 0
+    for group in (FILES, CONFIG_FILES):
+        for rel, payload in group.items():
+            b64 = ''.join(payload) if isinstance(payload, (list, tuple)) else payload
+            try:
+                data = gzip.decompress(base64.b64decode(b64, validate=True))
+                if rel.endswith('.py'):
+                    compile(data, rel, 'exec')
+                    python_files += 1
+            except Exception as e:
+                print(f'[verify] invalid embedded file {rel}: {e}', file=sys.stderr)
+                return 4
+            checked += 1
+    print(f'[verify] bundle OK: {checked} files ({python_files} Python)')
+    return 0
+
+
 def install_deps() -> int:
     req = ROOT / 'requirements.txt'
     if req.exists():
@@ -390,7 +412,7 @@ def sync_version_json() -> int:
 
 
 def all_steps() -> int:
-    rc = extract() or install_deps()
+    rc = verify_bundle() or extract() or install_deps()
     if rc == 0:
         print(f'\\n[done] uvicorn app:app --host 0.0.0.0 --port 8090   (run from {ROOT})')
     return rc
@@ -401,6 +423,7 @@ COMMANDS = {
     'install-deps': install_deps,
     'version': print_version,
     'sync-version': sync_version_json,
+    'verify': verify_bundle,
     'all': all_steps,
     'restore': restore,
     'snapshots': list_snapshots,
@@ -478,6 +501,8 @@ def main():
     out = build()
     dst = ROOT / "setup.py"
     dst.write_text(out, encoding="utf-8")
+    py_compile.compile(str(dst), doraise=True)
+    subprocess.run([sys.executable, str(dst), "verify"], cwd=str(ROOT), check=True)
     print(f"wrote {dst} ({dst.stat().st_size:,} bytes, "
           f"{len(gather_code())} code + {len(gather_config())} config files)")
 
