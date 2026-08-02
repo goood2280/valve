@@ -19,9 +19,15 @@ step 이 최근 며칠간 어떤 ppid/eqp_id/eqp_model/area 로 돌았는지. fl
 function step 을 추천한다(GPT OSS 120B). 만드는 곳은 feature_pipeline._step_match_hints,
 설정은 pipeline.yaml unmatched_scan.hint (알람 탭 ⚙).
 
+단계 정체(stage_stall)도 같은 채널로 나간다 — 제품별 raw/event/feature/wide 가
+임계(기본 1일)를 넘게 안 늘면 알람 행 + payload 의 `health` 블록으로 실린다.
+flow 는 이걸로 "Valve 가 언제까지의 데이터를 넘겨줬는지" 를 자기 화면에서 본다.
+계산은 backend/core/stage_health.py, 설정은 pipeline.yaml stall_alert.
+
 알람 id (억제 단위 — split 이 바뀌어도 같은 건은 재알람 금지):
   미매칭 step : um|{vehicle}|{step_id}
   RO ppid     : ro|{vehicle}|{step_id}|{ppid}
+  단계 정체   : stall|{vehicle}|{stage}|{source}
 
 ack.json: { "<id>": {"status": "미확인예정"|"반영불필요", "note": str, "by": str, "ts": float} }
 status 를 지우면(또는 "active") 다시 활성. S3 미가용 시 로컬 캐시(logs/alerts_ack.json) 사용.
@@ -35,13 +41,15 @@ import time
 from pathlib import Path
 
 from backend.core.feature_pipeline import alert_scan_cols
+from backend.core.stage_health import stage_health, stall_alerts
 
 SUPPRESS_STATUSES = ("미확인예정", "반영불필요")
 
 # 발행 payload 의 형식 버전 — 지문(fp)에 섞어 두면 Valve 를 올렸을 때 알람 구성이
 # 그대로여도 한 번은 다시 발행된다 (새 필드가 flow 에 전달되도록).
 #   1: 초기  2: unmatched_step 에 match_hint(앞뒤 이웃 step 컨텍스트) 추가
-ALERT_SCHEMA_VERSION = 2
+#   3: stage_stall 알람 + payload.health (단계별 정체 현황)
+ALERT_SCHEMA_VERSION = 3
 
 
 class AlertStore:
@@ -59,7 +67,9 @@ class AlertStore:
 
     def _s3_enabled(self) -> bool:
         """alerts.s3_enabled — 알람 JSON/ack 의 S3 업로드·다운로드 사용 여부."""
-        return bool((self.settings.get("alerts") or {}).get("s3_enabled", True))
+        requested = bool((self.settings.get("alerts") or {}).get("s3_enabled", True))
+        configured = not hasattr(self.s3, "is_configured") or self.s3.is_configured()
+        return requested and configured
 
     def alert_cols(self) -> list[str]:
         """⚙ 로 설정한 알람 전송 열 (pipeline.yaml unmatched_scan.alert_cols)."""
@@ -142,7 +152,8 @@ class AlertStore:
         return info
 
     # ── 알람 생성 (vehicle 별 통합 행) ──
-    def build(self, vehicle: str) -> list[dict]:
+    def build(self, vehicle: str, health: dict | None = None) -> list[dict]:
+        """health 를 넘기면 단계 현황을 다시 계산하지 않는다 (목록/발행이 같은 값을 쓴다)."""
         rows: list[dict] = []
         try:
             unm = self.pipe.scan_unmatched(vehicle)
@@ -200,7 +211,32 @@ class AlertStore:
         for g in by_ppid.values():
             g["split"] = ", ".join(sorted(set(g["split"])))
             rows.append(g)
+
+        # 단계 정체 — raw 가 안 들어오면 미매칭 step 도 같이 사라져서 화면이 조용해진다.
+        # 그 조용함이 정상인지 고장인지 구분해 주는 게 이 알람이다.
+        rows.extend(self.stall_rows(vehicle, health))
         return rows
+
+    def stall_rows(self, vehicle: str, health: dict | None = None) -> list[dict]:
+        """단계 정체 알람 행. 계산 실패가 알람 목록 전체를 막지 않는다."""
+        try:
+            return stall_alerts(self.pipe, vehicle, health=health,
+                                s3_jobs=getattr(self, "s3_jobs", None))
+        except Exception:
+            return []
+
+    def health(self, vehicle: str) -> dict:
+        """단계별 진행 현황 (정체 여부와 무관하게 항상 전달) — flow 가 '언제까지의
+        데이터를 받았는지' 를 알람이 없을 때도 볼 수 있어야 한다.
+
+        s3_jobs 는 app.py 가 나중에 꽂는다 (pipeline_router.attach_s3_jobs) —
+        없으면 전송 단계만 빠지고 나머지는 그대로 계산된다."""
+        try:
+            return stage_health(self.pipe, vehicle,
+                                s3_jobs=getattr(self, "s3_jobs", None))
+        except Exception as e:
+            return {"vehicle": vehicle, "error": str(e)[:200], "stages": [],
+                    "stalled": [], "stalled_count": 0}
 
     # ── ack (S3 ↔ 로컬 캐시) ──
     def load_ack(self) -> dict:
@@ -238,8 +274,18 @@ class AlertStore:
         """모든 vehicle 알람 + ack 상태 병합. suppressed 도 status 만 달고 포함."""
         ack = self.load_ack()
         alerts = []
+        health = {}
+        seen: set[str] = set()
         for v in self.pipe.vehicles():
-            alerts.extend(self.build(v))
+            health[v] = self.health(v)
+            for a in self.build(v, health[v]):
+                # 전 제품 합산 산출물(SEND_FORM) 알람은 제품마다 같은 id 로 나온다 —
+                # 목록에서는 한 번만 보여준다 (발행 파일은 제품별로 자족해야 하므로
+                # 각 vehicle.json 에는 그대로 실린다).
+                if a["id"] in seen:
+                    continue
+                seen.add(a["id"])
+                alerts.append(a)
         for a in alerts:
             a["status"] = (ack.get(a["id"]) or {}).get("status") or "active"
             a["note"] = (ack.get(a["id"]) or {}).get("note") or ""
@@ -247,7 +293,7 @@ class AlertStore:
         active = sum(1 for a in alerts if a["status"] == "active")
         return {"alerts": alerts, "active": active,
                 "suppressed": len(alerts) - active, "ack_key": self._ack_key(),
-                "alert_cols": self.alert_cols()}
+                "alert_cols": self.alert_cols(), "health": health}
 
     # ── 발행 스냅샷 메타 (직전 발행 = 상태. event DB 갱신/재알람 판단 근거) ──
     def _pub_meta_path(self, vehicle: str) -> Path:
@@ -262,7 +308,7 @@ class AlertStore:
                 pass
         return {}
 
-    def publish(self, vehicle: str):
+    def publish(self, vehicle: str, health: dict | None = None):
         """알람을 S3 로 발행 + 발행 스냅샷을 메타로 저장.
 
         억제(미확인예정/반영불필요) 건도 status 를 달아 포함한다 — flow 화면에서
@@ -271,7 +317,9 @@ class AlertStore:
         룰북/매칭테이블은 flow 가 버전관리하고, Valve 는 이 메타로
         'event DB 갱신 시 무엇이 새로/해소됐는지'를 참고한다."""
         ack = self.load_ack()
-        cur = self.build(vehicle)
+        if health is None:
+            health = self.health(vehicle)
+        cur = self.build(vehicle, health)
         for a in cur:
             info = ack.get(a["id"]) or {}
             a["status"] = info.get("status") or "active"
@@ -291,6 +339,9 @@ class AlertStore:
             "schema": ALERT_SCHEMA_VERSION,
             "suppressed": len(cur) - len(active_ids),
             "alert_cols": self.alert_cols(),   # flow 가 동적 열 렌더링에 사용
+            # 단계별 진행 현황 — 정체가 없어도 항상 싣는다. flow 가 "raw 는 어제까지,
+            # feature 는 3시간 전 산출" 을 알람 유무와 무관하게 표시할 수 있어야 한다.
+            "health": health,
             "fp": self._fingerprint(cur, ack),
             "delta": {"new": sorted(active_ids - prev_active),
                       "resolved": sorted(prev_active - active_ids)},
@@ -325,10 +376,15 @@ class AlertStore:
     @staticmethod
     def _fingerprint(cur: list[dict], ack: dict) -> str:
         """알람 id + ack 상태의 지문 — 주기 발행에서 '변경 없음' 판단 기준.
-        (rows/n_lots 등 수치는 파이프라인 재실행 시 on_vehicle_done 발행이 갱신)"""
+        (rows/n_lots 등 수치는 파이프라인 재실행 시 on_vehicle_done 발행이 갱신)
+
+        정체 알람만 사유까지 지문에 넣는다 — 파이프라인이 아예 죽어 재실행 발행이
+        없는 상황이 정확히 이 알람이 필요한 상황인데, id 만 보면 '3일째 정체' 가
+        첫날 문구 그대로 굳는다. 사유는 하루 단위로만 바뀌므로 발행도 하루 1회다."""
         import hashlib
         parts = sorted(
             f"{a.get('id')}|{(ack.get(a.get('id')) or {}).get('status') or 'active'}"
+            + (f"|{a.get('reason')}" if a.get("type") == "stage_stall" else "")
             for a in cur)
         parts.append(f"schema={ALERT_SCHEMA_VERSION}")
         return hashlib.sha1("\n".join(parts).encode("utf-8")).hexdigest()[:16]
@@ -339,13 +395,14 @@ class AlertStore:
         업로드 폴더에 파일이 아직 없으면 지문이 같아도 발행한다 — 폴더를 지웠거나
         outbox 도입 전 스냅샷만 있는 경우에도 첫 사이클에 채워지도록."""
         ack = self.load_ack()
-        cur = self.build(vehicle)
+        health = self.health(vehicle)
+        cur = self.build(vehicle, health)
         fp = self._fingerprint(cur, ack)
         prev_fp = self.load_pub_meta(vehicle).get("fp")
         out = self._outbox_path(f"{self.prefix}/pipeline/{vehicle}.json")
         if prev_fp == fp and (out is None or out.exists()):
             return {"vehicle": vehicle, "skipped": True, "fp": fp}
-        r = self.publish(vehicle)
+        r = self.publish(vehicle, health)
         return {"vehicle": vehicle, "skipped": False, "published": bool(r), "fp": fp}
 
     def publish_all_if_changed(self) -> list[dict]:

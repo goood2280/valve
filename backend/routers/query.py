@@ -63,3 +63,28 @@ def view(root: str = Query(...), file: str = Query(...), sql: str = Query(""),
         "n_rows": df.height,
         "dtypes": {c: str(t) for c, t in zip(df.columns, df.dtypes)},
     }
+
+
+@router.get("/combined")
+def combined(root: str = Query("db"), sql: str = Query(""),
+             rows: int = Query(200, ge=1, le=MAX_ROWS)):
+    """4.WIDE_FORM의 vehicle 테이블을 세로 병합해 모든 feature를 한 번에 조회."""
+    wide = resolve(root, "4.WIDE_FORM")
+    files = sorted(wide.glob("ML_TABLE_*.parquet")) if wide.is_dir() else []
+    if not files:
+        raise HTTPException(404, "통합 조회할 4.WIDE_FORM/ML_TABLE_*.parquet 파일이 없습니다")
+    try:
+        lf = pl.concat([pl.scan_parquet(str(p)) for p in files], how="diagonal_relaxed")
+        if sql:
+            try:
+                lf = _apply_sql(lf, sql)
+            except Exception as e:
+                raise HTTPException(400, f"sql_error: {e}")
+        df = lf.limit(rows).collect()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"read_error: {e}")
+    return {"kind": "table", "files": [p.name for p in files],
+            "columns": df.columns, "rows": df.to_dicts(), "n_rows": df.height,
+            "dtypes": {c: str(t) for c, t in zip(df.columns, df.dtypes)}}

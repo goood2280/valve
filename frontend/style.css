@@ -1,65 +1,144 @@
-/* Valve · style.css — flow 디자인 DNA 계승 (#FF5E00 · #1e293b · Pretendard) */
+/* Valve · style.css — Flow/IBM Carbon design language */
 
+@font-face {
+  font-family: "Pretendard Variable";
+  src: url("/fonts/PretendardVariable.woff2") format("woff2-variations");
+  font-weight: 45 920;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/fonts/JetBrainsMono-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/fonts/JetBrainsMono-Bold.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* 색 토큰은 flow 의 frontend/src/app/useFlowShell.js (lightV/darkV) 와 **값까지 동일**하다.
+   두 앱을 나란히 띄우고 쓰는 화면이라 회색 한 단계가 달라도 다른 앱처럼 보인다.
+   flow 쪽을 바꾸면 여기도 같이 바꿀 것. Valve 전용 토큰(--brand-orange · --bg-header ·
+   --err · --stale · --bg-code)만 뒤에 덧붙인다. */
 :root, html[data-theme="light"] {
-  --brand-orange:  #FF5E00;
-  --brand-slate:   #1e293b;
-  --accent:        #f97316;
-  --accent-dim:    #ea580c;
-  --accent-glow:   rgba(249,115,22,0.12);
+  --font-sans: "Pretendard Variable", "Pretendard", "Inter", system-ui, -apple-system,
+               "Segoe UI", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
+  --font-mono: "JetBrains Mono", "SFMono-Regular", Consolas,
+               "Liberation Mono", "D2Coding", monospace;
 
   --bg-primary:    #fafafa;
-  --bg-secondary:  #ffffff;
-  --bg-card:       #ffffff;
+  --bg-secondary:  #fff;
+  --bg-card:       #fff;
   --bg-hover:      #f5f5f5;
-  --bg-header:     #0f172a;
-  --bg-code:       #1a1a1a;
-
+  --bg-tertiary:   #f5f5f5;
   --text-primary:  #171717;
   --text-secondary:#737373;
+  --border:        #e5e5e5;
+  --ink:           #171717;
+  --muted:         #737373;
+  --line:          #e5e5e5;
+  --brand:         #E25822;
+  --brand-50:      #FDF2EB;
+  --brand-line:    #F4C4A8;
+  --accent:        #E25822;
+  --accent-dim:    #B94418;
+  --accent-glow:   rgba(226,88,34,0.10);
+  --ok:            #16a34a;
+  --ok-50:         #ECFDF3;
+  --ok-line:       #BBF7D0;
+  --info:          #2563eb;
+  --info-50:       #EFF6FF;
+  --info-line:     #BFDBFE;
+  --warn:          #d97706;
+  --warn-50:       #FFFBEB;
+  --warn-line:     #FDE68A;
+  --danger:        #dc2626;
+  --danger-50:     #FEF2F2;
+  --danger-line:   #FECACA;
+  --bad:           #dc2626;
+  --shadow-sm:     0 1px 2px rgba(15,23,42,0.06);
+  --shadow-md:     0 8px 20px rgba(15,23,42,0.08);
+  --shadow-lg:     0 18px 44px rgba(15,23,42,0.12);
+
+  /* Valve 전용 */
+  --brand-orange:  #E25822;
+  --brand-slate:   #1e293b;
+  --bg-header:     #0f172a;
+  --bg-code:       #1a1a1a;
   --text-muted:    #a3a3a3;
   --text-invert:   #e5e5e5;
-
-  --border:        #e5e5e5;
   --border-strong: #d4d4d4;
+  --err:           #dc2626;
+  --stale:         #a3a3a3;
 
-  --ok:     #16a34a;
-  --warn:   #f59e0b;
-  --err:    #ef4444;
-  --info:   #2563eb;
-  --stale:  #a3a3a3;
-
-  --radius: 6px;
+  /* Carbon 밀도 — 각진 모서리, 32px 행/컨트롤 (flow styles/carbon.css 와 동일) */
+  --radius: 0px;
+  --cds-control: 32px;
+  --cds-row: 32px;
 }
 
 html[data-theme="dark"] {
-  --accent:        #f97316;
-  --accent-dim:    #ea580c;
-  --accent-glow:   rgba(249,115,22,0.2);
-
   --bg-primary:    #1a1a1a;
   --bg-secondary:  #262626;
   --bg-card:       #2a2a2a;
-  --bg-hover:      #333333;
-  --bg-header:     #0f172a;
-
+  --bg-hover:      #333;
+  --bg-tertiary:   #1a1a1a;
   --text-primary:  #e5e5e5;
   --text-secondary:#a3a3a3;
+  --border:        #333;
+  --ink:           #e5e5e5;
+  --muted:         #a3a3a3;
+  --line:          #333;
+  --brand:         #E25822;
+  --brand-50:      rgba(226,88,34,0.16);
+  --brand-line:    rgba(239,107,58,0.42);
+  --accent:        #EF6B3A;
+  --accent-dim:    #E25822;
+  --accent-glow:   rgba(226,88,34,0.16);
+  --ok:            #22c55e;
+  --ok-50:         rgba(34,197,94,0.14);
+  --ok-line:       rgba(34,197,94,0.38);
+  --info:          #3b82f6;
+  --info-50:       rgba(59,130,246,0.16);
+  --info-line:     rgba(59,130,246,0.42);
+  --warn:          #f59e0b;
+  --warn-50:       rgba(245,158,11,0.16);
+  --warn-line:     rgba(245,158,11,0.42);
+  --danger:        #ef4444;
+  --danger-50:     rgba(239,68,68,0.16);
+  --danger-line:   rgba(239,68,68,0.42);
+  --bad:           #ef4444;
+  --shadow-sm:     0 8px 18px rgba(0,0,0,0.18);
+  --shadow-md:     0 14px 30px rgba(0,0,0,0.24);
+  --shadow-lg:     0 24px 54px rgba(0,0,0,0.32);
+
+  /* Valve 전용 */
+  --brand-orange:  #E25822;
+  --bg-header:     #0f172a;
   --text-muted:    #737373;
   --text-invert:   #171717;
-
-  --border:        #333333;
   --border-strong: #444444;
+  --err:           #ef4444;
+  --stale:         #737373;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
 html, body {
   height: 100%;
-  font-family: 'Pretendard','Apple SD Gothic Neo','맑은 고딕','Malgun Gothic',system-ui,-apple-system,sans-serif;
+  font-family: var(--font-sans);
   color: var(--text-primary);
   background: var(--bg-primary);
-  font-size: 13px;
-  line-height: 1.5;
+  font-size: 14px;
+  line-height: 18px;
 }
 
 body {
@@ -72,7 +151,7 @@ a { color: var(--accent-dim); text-decoration: none; }
 a:hover { color: var(--accent); text-decoration: underline; }
 
 code, pre, .mono {
-  font-family: 'JetBrains Mono','Fira Code',Menlo,Consolas,monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
 }
 
@@ -90,7 +169,7 @@ code, pre, .mono {
 }
 
 .brand {
-  font-family: 'Outfit','Pretendard','Inter','Segoe UI',sans-serif;
+  font-family: var(--font-sans);
   font-size: 22px;
   font-weight: 900;
   letter-spacing: -0.05em;
@@ -123,7 +202,7 @@ code, pre, .mono {
   border: none;
   font-size: 11px;
   font-weight: 400;
-  font-family: 'JetBrains Mono','Fira Code',Menlo,Consolas,monospace;
+  font-family: var(--font-mono);
   letter-spacing: -0.01em;
   cursor: pointer;
   transition: background 0.15s, color 0.15s;
@@ -153,8 +232,8 @@ code, pre, .mono {
   align-items: center;
   gap: 6px;
   font-size: 11px;
-  font-family: 'JetBrains Mono',monospace;
-  color: #cbd5e1;
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
 }
 
 .theme-toggle {
@@ -207,7 +286,7 @@ main {
   text-align: center;
   padding: 80px 0;
   color: var(--text-muted);
-  font-family: 'JetBrains Mono',monospace;
+  font-family: var(--font-mono);
   font-size: 14px;
 }
 
@@ -230,7 +309,7 @@ main {
   gap: 8px;
 }
 .card-title .count {
-  font-family: 'JetBrains Mono',monospace;
+  font-family: var(--font-mono);
   font-weight: 500;
   color: var(--text-muted);
   font-size: 11px;
@@ -345,7 +424,7 @@ main {
   border-radius: 3px;
   font-size: 10px;
   color: var(--text-primary);
-  font-family: 'JetBrains Mono',monospace;
+  font-family: var(--font-mono);
 }
 .source-head {
   display: flex;
@@ -366,7 +445,7 @@ main {
 .hint {
   font-size: 10px;
   color: var(--text-muted);
-  font-family: 'JetBrains Mono',monospace;
+  font-family: var(--font-mono);
 }
 
 .form-label.small { font-size: 10px; display: flex; align-items: baseline; gap: 6px; margin-bottom: 4px; }
@@ -387,7 +466,7 @@ main {
   background: rgba(255,94,0,0.08);
   color: var(--brand-orange);
   border: 1px solid rgba(255,94,0,0.25);
-  font-family: 'JetBrains Mono',monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   font-weight: 600;
 }
@@ -433,41 +512,55 @@ main {
 
 .logs-tbl { font-size: 11px; }
 .logs-tbl th { font-size: 10px; color: var(--text-muted); font-weight: 600; }
-.logs-tbl td { padding: 5px 6px; vertical-align: top; }
+.logs-tbl td { padding: 5px 6px; vertical-align: middle; white-space: nowrap; }
 .logs-tbl tr.row-err { background: rgba(239,68,68,0.04); }
 .logs-tbl tr.row-err:hover { background: rgba(239,68,68,0.09); }
 .logs-tbl tr.row-warn { background: rgba(245,158,11,0.06); }
 .logs-tbl tr.row-warn:hover { background: rgba(245,158,11,0.12); }
 
-.logs-highlight-card {
-  margin-bottom: 12px;
-  border-color: rgba(245,158,11,0.35);
+/* ─── 로그 행: 한 줄 + 클릭하면 아래로 상세 ─── */
+.logs-row { cursor: pointer; }
+.logs-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.logs-caret-cell { width: 24px; text-align: center; }
+.logs-caret {
+  display: inline-block;
+  color: var(--text-muted);
+  font-weight: 400;   /* 펼친 행의 굵기(아래)가 caret 까지 번지지 않게 */
+  transition: transform 120ms ease-out;
 }
-.logs-highlight-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-  gap: 8px;
-}
-.logs-highlight {
-  min-width: 0;
-  padding: 10px 12px;
+.logs-row.open .logs-caret { transform: rotate(90deg); color: var(--text-primary); }
+.logs-row.open > td { font-weight: 600; }
+.logs-ts .hint { margin-left: 4px; }
+
+.logs-detail-row > td { padding: 0 6px 10px 24px; white-space: normal; background: var(--bg-hover); }
+.log-detail { display: flex; flex-direction: column; gap: 10px; padding-top: 8px; }
+.log-detail-kv { margin-top: 0; }
+.log-detail-block { display: flex; flex-direction: column; gap: 4px; }
+.log-detail-title { font-size: 11px; font-weight: 700; color: var(--text-secondary); }
+.log-detail-line { font-family: var(--font-mono); font-size: 11px; color: var(--text-primary); }
+.log-detail-pre {
+  margin: 0;
+  padding: 8px 10px;
+  background: var(--bg-secondary);
   border: 1px solid var(--border);
-  border-left-width: 4px;
-  border-radius: var(--radius);
-  background: var(--bg-hover);
-}
-.logs-highlight.sev-warning { border-left-color: #f59e0b; background: rgba(245,158,11,0.07); }
-.logs-highlight.sev-critical { border-left-color: #ef4444; background: rgba(239,68,68,0.08); }
-.logs-highlight-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.logs-highlight-head .hint { margin-left: auto; white-space: nowrap; }
-.logs-highlight-reason {
-  margin-top: 7px;
-  color: var(--text-secondary);
+  font-family: var(--font-mono);
   font-size: 11px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
+.log-detail-scroll { max-height: 260px; overflow: auto; border: 1px solid var(--border); }
+.log-detail-tbl { font-size: 11px; }
+.log-detail-tbl td { white-space: nowrap; }
+.log-detail-chips summary { cursor: pointer; font-size: 11px; color: var(--text-secondary); }
+.log-detail-chips > div { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.log-detail-raw summary { cursor: pointer; font-size: 11px; color: var(--text-secondary); }
+.log-detail-raw .text-view {
+  max-height: 320px;
+  margin-top: 6px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+}
+
 .severity-pill {
   display: inline-block;
   padding: 2px 6px;
@@ -480,15 +573,6 @@ main {
 .severity-pill.sev-info { color: #1d4ed8; background: rgba(59,130,246,0.12); }
 .severity-pill.sev-warning { color: #92400e; background: rgba(245,158,11,0.18); }
 .severity-pill.sev-critical { color: #991b1b; background: rgba(239,68,68,0.18); }
-.logs-all-clear {
-  grid-column: 1 / -1;
-  padding: 12px;
-  color: #166534;
-  background: rgba(34,197,94,0.08);
-  border-radius: var(--radius);
-  font-weight: 700;
-}
-
 /* ─── browser SQL guide (접기) ─── */
 .sql-guide {
   background: var(--bg-card);
@@ -538,7 +622,7 @@ main {
   border-radius: 3px;
   font-size: 10px;
   color: var(--brand-orange);
-  font-family: 'JetBrains Mono',monospace;
+  font-family: var(--font-mono);
 }
 .sql-snips { display: flex; flex-direction: column; gap: 3px; }
 .sql-snip {
@@ -559,7 +643,7 @@ main {
   min-width: 150px;
 }
 .sql-snip code {
-  font-family: 'JetBrains Mono',monospace;
+  font-family: var(--font-mono);
   font-size: 10px;
   color: var(--text-secondary);
   overflow: hidden;
@@ -645,7 +729,7 @@ main {
   font-size: 11px;
   font-weight: 700;
   color: var(--brand-orange);
-  font-family: 'JetBrains Mono',monospace;
+  font-family: var(--font-mono);
   display: flex;
   align-items: baseline;
   gap: 6px;
@@ -695,7 +779,7 @@ main {
 .query-sql {
   padding: 10px 14px;
   margin: 0;
-  font-family: 'JetBrains Mono','Fira Code',Menlo,Consolas,monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   line-height: 1.55;
   color: var(--text-primary);
@@ -751,12 +835,12 @@ main {
   font-size: 13px;
   font-weight: 700;
   color: var(--brand-orange);
-  font-family: 'JetBrains Mono',monospace;
+  font-family: var(--font-mono);
 }
 .prod-item-sub {
   font-size: 10px;
   color: var(--text-muted);
-  font-family: 'JetBrains Mono',monospace;
+  font-family: var(--font-mono);
   margin-bottom: 4px;
 }
 .prod-item-sources {
@@ -766,7 +850,7 @@ main {
 }
 .prod-item-srcchip {
   font-size: 9px;
-  font-family: 'JetBrains Mono',monospace;
+  font-family: var(--font-mono);
   padding: 1px 5px;
   border-radius: 3px;
   background: var(--bg-hover);
@@ -801,7 +885,7 @@ main {
   color: var(--text-secondary);
   font-size: 11px;
   font-weight: 600;
-  font-family: 'JetBrains Mono',monospace;
+  font-family: var(--font-mono);
   cursor: pointer;
   transition: all 0.15s;
 }
@@ -846,14 +930,37 @@ main {
   .products-list { position: static; }
 }
 .logs-tbl tr:hover { background: rgba(0,0,0,0.02); }
+/* 사유는 한 줄로만 — 넘치면 …, 전문은 행을 눌러 펼친 상세에서 본다.
+   max-width 로 열 폭을 묶어야 nowrap 텍스트가 표를 가로로 밀지 않는다. */
 .logs-reason {
-  font-family: 'JetBrains Mono',monospace;
+  font-family: var(--font-mono);
   font-size: 10px;
   color: var(--text-secondary);
-  max-width: 520px;
+  min-width: 220px;
+  max-width: min(560px, 34vw);
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+}
+.failure-full {
+  color: #991b1b;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* 소스(DB 종류) 배지 — 색만 인라인(source_types.yaml accent), 모양은 여기.
+   진단 검사명·로그 소스 열에서 "어느 DB 얘기인지" 를 색 하나로 잡기 위한 것. */
+.src-badge {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  vertical-align: baseline;
 }
 
 /* ─── pill / status dot ─── */
@@ -862,7 +969,7 @@ main {
   padding: 1px 8px;
   border-radius: 10px;
   font-size: 11px;
-  font-family: 'JetBrains Mono',monospace;
+  font-family: var(--font-mono);
   font-weight: 600;
   background: var(--bg-hover);
   color: var(--text-secondary);
@@ -900,10 +1007,10 @@ main {
 .rt-line { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .rt-line + .rt-line { border-top: 1px dashed var(--border); padding-top: 8px; }
 .rt-cap { font-size: 11px; font-weight: 700; color: var(--text-muted); white-space: nowrap; }
-.rt-info { font-family: 'JetBrains Mono',monospace; color: var(--text-secondary); }
+.rt-info { font-family: var(--font-mono); color: var(--text-secondary); }
 .rt-sched { display: inline-flex; align-items: center; gap: 5px; color: var(--text-secondary); font-size: 11px; }
-.rt-panel .rt-hours { width: 46px; padding: 2px 4px; border: 1px solid var(--border); border-radius: 4px;
-  background: var(--bg-secondary); color: var(--text-primary); font-family: 'JetBrains Mono',monospace; }
+.rt-panel .rt-hours { width: 58px; padding: 2px 4px; border: 1px solid var(--border); border-radius: 4px;
+  background: var(--bg-secondary); color: var(--text-primary); font-family: var(--font-mono); }
 .btn.small { padding: 4px 10px; font-size: 11px; }
 .rt-loop.on { background: #16a34a; color: #fff; border-color: #15803d; }
 
@@ -912,7 +1019,7 @@ main {
 .rt-quiet.on { color: #b45309; font-weight: 600; }
 .rt-panel .rt-time { padding: 2px 4px; border: 1px solid var(--border); border-radius: 4px;
   background: var(--bg-secondary); color: var(--text-primary);
-  font-family: 'JetBrains Mono',monospace; font-size: 11px; }
+  font-family: var(--font-mono); font-size: 11px; }
 .rt-quiet-now { padding: 1px 6px; border-radius: 4px; color: #b45309;
   background: rgba(245,158,11,0.12); border: 1px solid rgba(245,158,11,0.3); }
 
@@ -923,7 +1030,7 @@ main {
   padding: 2px 9px; border: 1px solid var(--border); border-radius: 999px;
   background: var(--bg-secondary); color: var(--text-secondary);
 }
-.rt-veh b { color: var(--text-primary); font-family: 'JetBrains Mono',monospace; }
+.rt-veh b { color: var(--text-primary); font-family: var(--font-mono); }
 .rt-veh.due { border-color: #f5a524; }
 .rt-veh.off { opacity: 0.55; }
 
@@ -933,7 +1040,7 @@ main {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   margin-bottom: 12px; padding: 7px 12px; border-radius: 8px;
   background: rgba(34,197,94,0.08); border: 1px solid rgba(34,197,94,0.25);
-  font-family: 'JetBrains Mono',monospace; font-size: 11px;
+  font-family: var(--font-mono); font-size: 11px;
 }
 .dbhm-prog .prog-head { font-weight: 700; color: #16a34a; }
 .dbhm-prog .prog-veh { padding: 1px 8px; border-radius: 10px; background: var(--bg-secondary);
@@ -947,7 +1054,7 @@ main {
 /* DB heatmap 기간 선택 세그먼트 + 가로 스크롤 래퍼 */
 .dbhm-period { display: flex; gap: 4px; margin-bottom: 12px; }
 .dbhm-period .seg {
-  font-family: 'JetBrains Mono',monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   padding: 4px 12px;
   border: 1px solid var(--border);
@@ -970,7 +1077,7 @@ main {
   width: 100%;
   border-collapse: separate;
   border-spacing: 2px;
-  font-family: 'JetBrains Mono',monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
 }
 .heatmap th {
@@ -1054,7 +1161,7 @@ main {
 .prod-head-count {
   font-size: 10px;
   color: var(--text-muted);
-  font-family: 'JetBrains Mono',monospace;
+  font-family: var(--font-mono);
 }
 .backfill-pill {
   color: var(--brand-orange) !important;
@@ -1069,7 +1176,7 @@ main {
   padding-left: 22px;
   font-weight: 500;
   color: var(--text-primary);
-  font-family: 'JetBrains Mono',monospace;
+  font-family: var(--font-mono);
 }
 .heatmap tr.src-row.src-off td.src-label {
   color: var(--text-muted);
@@ -1095,7 +1202,7 @@ main {
 }
 .chunk-row:hover { background: var(--bg-hover); }
 .chunk-row:last-child { border-bottom: none; }
-.chunk-id { font-family: 'JetBrains Mono',monospace; color: var(--text-secondary); }
+.chunk-id { font-family: var(--font-mono); color: var(--text-secondary); }
 
 .progress {
   height: 6px;
@@ -1149,7 +1256,7 @@ input:focus, select:focus, textarea:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-glow);
 }
-textarea { resize: vertical; min-height: 60px; font-family: 'JetBrains Mono',monospace; }
+textarea { resize: vertical; min-height: 60px; font-family: var(--font-mono); }
 
 .check {
   display: inline-flex;
@@ -1184,7 +1291,7 @@ textarea { resize: vertical; min-height: 60px; font-family: 'JetBrains Mono',mon
 .text-view {
   margin: 0;
   padding: 12px 14px;
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.55;
   color: var(--text-primary);
@@ -1193,7 +1300,95 @@ textarea { resize: vertical; min-height: 60px; font-family: 'JetBrains Mono',mon
   tab-size: 2;
 }
 
-/* ─── browser split ─── */
+/* ─── 파일 탐색기 (flow 파일탐색기와 같은 규격) ───
+   좌 260px 사이드바(범위 칩 → 루트 → 현재 폴더) + 우 본문(SQL 바 · 가이드 · 결과).
+   S3 편집기는 전부 ⚙ 모달로 뺐다 — 사이드바에 폼이 섞이면 "지금 어느 폴더인지"가 안 읽힌다. */
+.fb-shell {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  height: calc(100vh - 150px);
+  min-height: 420px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--bg-card);
+}
+.fb-side {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border-right: 1px solid var(--border);
+  background: var(--bg-secondary);
+  overflow: hidden;
+}
+.fb-side-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px; font-weight: 700;
+}
+.fb-side-head .fb-count { font-weight: 400; font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); }
+.fb-side-head .gear-btn { margin-left: auto; }
+.fb-scope { display: flex; gap: 4px; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+.fb-chip {
+  flex: 1; min-width: 0; text-align: center;
+  padding: 5px 8px; border-radius: 5px; font-size: 11px; cursor: pointer;
+  border: 1px solid var(--border); background: var(--bg-hover); color: var(--text-primary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.fb-chip.on { background: var(--accent-glow); border-color: var(--accent-dim); color: var(--accent-dim); font-weight: 700; }
+.fb-chip.off { opacity: 0.4; cursor: not-allowed; }
+.fb-side-body { flex: 1; overflow: auto; padding: 4px 6px 10px; }
+.fb-sec-title {
+  display: flex; align-items: baseline; gap: 6px;
+  padding: 8px 8px 4px;
+  font-size: 10px; font-weight: 700; letter-spacing: 0.04em;
+  text-transform: uppercase; color: var(--text-muted);
+}
+.fb-crumb {
+  font-size: 10px; font-family: var(--font-mono); font-weight: 400; text-transform: none;
+  letter-spacing: 0; color: var(--text-secondary);
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.fb-crumb-seg { cursor: pointer; }
+.fb-crumb-seg:hover { color: var(--accent-dim); text-decoration: underline; }
+.fb-crumb-sep { color: var(--text-muted); margin: 0 2px; }
+.fb-row {
+  display: flex; align-items: flex-start; gap: 6px;
+  padding: 5px 8px; margin-bottom: 1px;
+  border-radius: 5px; cursor: pointer; font-size: 12px;
+}
+.fb-row:hover { background: var(--bg-hover); }
+.fb-row.sel { background: var(--accent-glow); color: var(--accent-dim); font-weight: 600; }
+.fb-row .fb-ic { flex: 0 0 auto; line-height: 1.4; }
+.fb-stack { display: flex; flex-direction: column; gap: 1px; flex: 1; min-width: 0; }
+.fb-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fb-meta { display: flex; align-items: center; gap: 5px; min-width: 0; line-height: 1.2; }
+.fb-ext {
+  flex: 0 0 auto; font-size: 9px; font-weight: 700; font-family: var(--font-mono);
+  padding: 0 4px; border-radius: 3px; background: var(--bg-hover); color: var(--text-muted);
+}
+.fb-size {
+  font-size: 10px; font-family: var(--font-mono); color: var(--text-muted);
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.fb-side-foot { border-top: 1px solid var(--border); padding: 8px 10px; }
+.fb-legend { display: flex; flex-wrap: wrap; gap: 6px 10px; font-size: 10px; color: var(--text-muted); }
+.fb-legend-item { display: inline-flex; align-items: center; gap: 3px; }
+.fb-empty { padding: 10px 8px; font-size: 11px; color: var(--text-muted); }
+.fb-main { display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
+.fb-sqlbar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-hover);
+}
+.fb-sqlbar-label { font-size: 11px; font-family: var(--font-mono); color: var(--text-muted); flex: 0 0 auto; }
+.fb-sqlbar input { flex: 1; min-width: 0; font-family: var(--font-mono); font-size: 12px; }
+.fb-main > .sql-guide { margin: 10px 14px 0; }
+.fb-content { flex: 1; overflow: auto; }
+
+/* ─── browser split (진단 탭 등 다른 화면에서 계속 쓰인다) ─── */
 .split {
   display: grid;
   grid-template-columns: 320px 1fr;
@@ -1227,6 +1422,21 @@ textarea { resize: vertical; min-height: 60px; font-family: 'JetBrains Mono',mon
 }
 .tree-item:hover { background: var(--bg-hover); }
 .tree-item.sel { background: var(--accent-glow); color: var(--accent-dim); font-weight: 600; }
+.browser-root-list { margin-bottom: 8px; }
+.browser-db-hdr { margin-top: 12px; color: var(--accent-dim); }
+.browser-current-hdr { margin-top: 8px; font-size: 11px; color: var(--text-muted); }
+.root-entry { font-weight: 700; align-items: flex-start; }
+.root-label { flex: 0 0 72px; }
+.root-path, .config-root-path {
+  min-width: 0;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+.root-path { flex: 1; }
+.config-root-path { font-weight: 400; }
 
 /* 설정파일 → S3 전송 섹션 (Roots 최상위) */
 .cfg-sec { margin-bottom: 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-secondary); }
@@ -1234,13 +1444,13 @@ textarea { resize: vertical; min-height: 60px; font-family: 'JetBrains Mono',mon
   display: flex; align-items: center; gap: 6px; list-style: none; }
 .cfg-sec > summary::-webkit-details-marker { display: none; }
 .cfg-mode { display: inline-flex; gap: 3px; }
-.cfg-mode .seg { font-family: 'JetBrains Mono',monospace; font-size: 10px; padding: 2px 7px;
+.cfg-mode .seg { font-family: var(--font-mono); font-size: 10px; padding: 2px 7px;
   border: 1px solid var(--border); border-radius: 5px; background: var(--bg-card);
   color: var(--text-secondary); cursor: pointer; }
 .cfg-mode .seg.on { background: var(--accent-glow); color: var(--accent-dim); border-color: var(--accent-dim); font-weight: 700; }
 .cfg-list { padding: 2px 6px 6px; max-height: 220px; overflow: auto; }
 .cfg-row { display: flex; align-items: center; gap: 5px; padding: 3px 4px; font-size: 11px;
-  font-family: 'JetBrains Mono',monospace; border-radius: 4px; }
+  font-family: var(--font-mono); border-radius: 4px; }
 .cfg-row:hover { background: var(--bg-hover); }
 .cfg-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   cursor: pointer; color: var(--text-secondary); }
@@ -1285,7 +1495,7 @@ textarea { resize: vertical; min-height: 60px; font-family: 'JetBrains Mono',mon
 .s3-modal .clickable:hover { background: rgba(59,130,246,0.12); }
 
 .tree-item .ic { font-size: 11px; opacity: 0.6; }
-.tree-item .sz { margin-left: auto; font-family: 'JetBrains Mono',monospace; color: var(--text-muted); font-size: 11px; }
+.tree-item .sz { margin-left: auto; font-family: var(--font-mono); color: var(--text-muted); font-size: 11px; }
 
 /* ─── flex helpers ─── */
 .row { display: flex; align-items: center; gap: 8px; }
@@ -1302,7 +1512,7 @@ textarea { resize: vertical; min-height: 60px; font-family: 'JetBrains Mono',mon
   background: var(--bg-hover);
 }
 .sql-bar input {
-  font-family: 'JetBrains Mono',monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
 }
 
@@ -1320,7 +1530,7 @@ textarea { resize: vertical; min-height: 60px; font-family: 'JetBrains Mono',mon
 }
 .foot-sep { color: var(--border-strong); }
 .flow-mark {
-  font-family: 'Outfit',sans-serif;
+  font-family: var(--font-sans);
   font-weight: 900;
   color: var(--brand-orange);
   letter-spacing: -0.05em;
@@ -1337,6 +1547,7 @@ textarea { resize: vertical; min-height: 60px; font-family: 'JetBrains Mono',mon
 .alert.info { background: #eff6ff; color: #1e40af; border-color: #bfdbfe; }
 .alert.warn { background: #fef3c7; color: #92400e; border-color: #fde68a; }
 .alert.err  { background: #fee2e2; color: #991b1b; border-color: #fecaca; }
+.alert.ok   { background: #dcfce7; color: #166534; border-color: #bbf7d0; }
 
 .kv {
   display: grid;
@@ -1346,12 +1557,492 @@ textarea { resize: vertical; min-height: 60px; font-family: 'JetBrains Mono',mon
   margin-top: 8px;
 }
 .kv dt { color: var(--text-secondary); font-weight: 600; }
-.kv dd { color: var(--text-primary); font-family: 'JetBrains Mono',monospace; font-size: 11px; word-break: break-all; }
+.kv dd { color: var(--text-primary); font-family: var(--font-mono); font-size: 11px; word-break: break-all; }
 
 .empty {
   text-align: center;
   padding: 36px 12px;
   color: var(--text-muted);
-  font-family: 'JetBrains Mono',monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
+}
+
+/* ==========================================================================
+   Flow Carbon compatibility layer
+   Mirrors flow/docs/FLOW_DESIGN_LANGUAGE.md without changing Valve behavior.
+   ========================================================================== */
+
+.valve-carbon,
+.valve-carbon button,
+.valve-carbon input,
+.valve-carbon select,
+.valve-carbon textarea {
+  font-family: var(--font-sans);
+}
+
+.valve-carbon code,
+.valve-carbon pre,
+.valve-carbon .mono,
+.valve-carbon .chunk-id,
+.valve-carbon .rt-info,
+.valve-carbon .query-sql,
+.valve-carbon .text-view,
+.valve-carbon .sql-bar input,
+.valve-carbon .tree-item .sz,
+.valve-carbon .root-path,
+.valve-carbon .config-root-path,
+.valve-carbon .kv dd {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 16px;
+  letter-spacing: 0.32px;
+}
+
+.valve-carbon button,
+.valve-carbon input,
+.valve-carbon select,
+.valve-carbon textarea,
+.valve-carbon [role="button"] {
+  transition: background-color 150ms ease-out, border-color 150ms ease-out,
+              color 150ms ease-out, opacity 150ms ease-out;
+}
+
+.valve-carbon button:focus-visible,
+.valve-carbon input:focus-visible,
+.valve-carbon select:focus-visible,
+.valve-carbon textarea:focus-visible,
+.valve-carbon [tabindex]:focus-visible,
+.valve-carbon [role="button"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  box-shadow: none;
+}
+
+.valve-carbon .nav {
+  height: 48px;
+  padding: 0 16px;
+  gap: 8px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--line);
+}
+
+.valve-carbon .brand {
+  height: 32px;
+  margin-right: 0;
+  padding-right: 16px;
+  border-right: 1px solid var(--line);
+  color: var(--brand);
+  font-family: var(--font-sans);
+  font-size: 20px;
+  line-height: 28px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.valve-carbon .tabs {
+  gap: 4px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.valve-carbon .tabs::-webkit-scrollbar { display: none; }
+
+.valve-carbon .tab {
+  height: var(--cds-control);
+  padding: 0 12px;
+  border: 0;
+  border-radius: 0;
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 18px;
+  font-weight: 400;
+  letter-spacing: 0.16px;
+}
+
+.valve-carbon .tab.active {
+  color: var(--brand);
+  background: var(--brand-50);
+  box-shadow: inset 0 -2px 0 var(--brand);
+  font-weight: 600;
+}
+
+.valve-carbon .tab-ico { font-size: 14px; }
+.valve-carbon .status { gap: 12px; }
+.valve-carbon .status-item { color: var(--text-secondary); }
+
+.valve-carbon .theme-toggle,
+.valve-carbon .mode-badge {
+  min-height: 24px;
+  padding: 2px 8px;
+  border-radius: 0;
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 400;
+  letter-spacing: 0.32px;
+}
+
+.valve-carbon .mode-badge {
+  border-color: var(--brand-line);
+  background: var(--brand-50);
+  color: var(--brand);
+}
+
+.valve-carbon main { padding: 24px; }
+
+.valve-carbon .section-title {
+  margin-bottom: 4px;
+  color: var(--text-primary);
+  font-size: 20px;
+  line-height: 28px;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+
+.valve-carbon .section-desc {
+  margin-bottom: 16px;
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 18px;
+  letter-spacing: 0.16px;
+}
+
+.valve-carbon .card,
+.valve-carbon .product-detail,
+.valve-carbon .split .pane,
+.valve-carbon .fb-shell,
+.valve-carbon .sql-guide,
+.valve-carbon .cfg-sec,
+.valve-carbon .s3-modal {
+  border: 1px solid var(--line);
+  border-radius: 0;
+  background: var(--bg-card);
+  box-shadow: none;
+}
+
+/* 탐색기 — Carbon 은 모서리 각지고 선택 표시는 왼쪽 3px 바 */
+.valve-carbon .fb-side { border-right: 1px solid var(--line); }
+.valve-carbon .fb-side-head,
+.valve-carbon .fb-scope,
+.valve-carbon .fb-side-foot,
+.valve-carbon .fb-sqlbar { border-color: var(--line); }
+.valve-carbon .fb-chip { border-radius: 0; }
+.valve-carbon .fb-chip.on { background: var(--brand-50); border-color: var(--brand); color: var(--brand); }
+.valve-carbon .fb-row { border-radius: 0; min-height: 32px; }
+.valve-carbon .fb-row.sel {
+  background: var(--brand-50);
+  color: var(--brand);
+  box-shadow: inset 3px 0 0 var(--brand);
+}
+.valve-carbon .fb-ext { border-radius: 0; }
+
+.valve-carbon .card {
+  margin-bottom: 16px;
+  padding: 16px;
+}
+
+.valve-carbon .card-title {
+  margin-bottom: 12px;
+  color: var(--text-primary);
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.valve-carbon .card-title .count,
+.valve-carbon .form-label,
+.valve-carbon .hint,
+.valve-carbon .subsection-title,
+.valve-carbon .list-title,
+.valve-carbon .sql-rule-title,
+.valve-carbon .sql-rules ul,
+.valve-carbon .tree-item,
+.valve-carbon .foot,
+.valve-carbon .empty {
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 400;
+  letter-spacing: 0.32px;
+}
+
+.valve-carbon .subsection-title,
+.valve-carbon .list-title,
+.valve-carbon .sql-rule-title {
+  text-transform: none;
+  font-weight: 600;
+}
+
+.valve-carbon .btn {
+  min-height: var(--cds-control);
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 0;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 14px;
+  line-height: 18px;
+  font-weight: 400;
+  letter-spacing: 0.16px;
+}
+
+.valve-carbon .btn:hover {
+  border-color: var(--text-secondary);
+  background: var(--bg-hover);
+}
+
+.valve-carbon .btn.primary {
+  border-color: var(--brand);
+  background: var(--brand);
+  color: #fff;
+}
+
+.valve-carbon .btn.primary:hover {
+  border-color: var(--accent-dim);
+  background: var(--accent-dim);
+}
+
+.valve-carbon .btn.small,
+.valve-carbon .btn.xsmall,
+.valve-carbon .btn.ghost.xsmall {
+  min-height: 24px;
+  padding: 0 8px;
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.valve-carbon input[type="text"],
+.valve-carbon input[type="number"],
+.valve-carbon input[type="password"],
+.valve-carbon select {
+  min-height: var(--cds-control);
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-bottom: 1px solid var(--text-secondary);
+  border-radius: 0;
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  font-size: 14px;
+  line-height: 18px;
+  letter-spacing: 0.16px;
+}
+
+/* 좁은 인라인 숫자 입력 — 위의 carbon 기본값(padding 0 12px · 14px)은 46~64px 폭
+   안에서 값을 잘라먹는다. 여백·글자 크기를 폭에 맞추고 스피너 자리를 남긴다. */
+.valve-carbon .rt-panel .rt-hours,
+.valve-carbon .inline-input.narrow {
+  padding: 0 2px 0 6px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 16px;
+  letter-spacing: 0.32px;
+}
+.valve-carbon .rt-panel .rt-hours { width: 58px; }
+
+.valve-carbon textarea {
+  padding: 8px 12px;
+  border: 1px solid transparent;
+  border-bottom: 1px solid var(--text-secondary);
+  border-radius: 0;
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 16px;
+  letter-spacing: 0.32px;
+}
+
+.valve-carbon .tbl {
+  font-size: 14px;
+  line-height: 18px;
+}
+
+.valve-carbon .tbl th,
+.valve-carbon .tbl td {
+  min-height: var(--cds-row);
+  height: var(--cds-row);
+  padding: 0 16px;
+  border-bottom: 1px solid var(--line);
+  font-size: 14px;
+  line-height: 18px;
+  font-weight: 400;
+  letter-spacing: 0.16px;
+  vertical-align: middle;
+}
+
+.valve-carbon .tbl th {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.valve-carbon .tbl .mono { font-size: 12px; }
+
+.valve-carbon .pill,
+.valve-carbon .chip,
+.valve-carbon .severity-pill,
+.valve-carbon .feat-badge,
+.valve-carbon .backfill-pill,
+.valve-carbon .rt-quiet-now {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 0;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 400;
+  letter-spacing: 0.32px;
+}
+
+.valve-carbon .pill.ok { background: var(--ok-50); color: var(--ok); border-color: var(--ok-line); }
+.valve-carbon .pill.run { background: var(--info-50); color: var(--info); border-color: var(--info-line); }
+.valve-carbon .pill.warn { background: var(--warn-50); color: var(--warn); border-color: var(--warn-line); }
+.valve-carbon .pill.err { background: var(--danger-50); color: var(--danger); border-color: var(--danger-line); }
+.valve-carbon .pill.brand,
+.valve-carbon .chip { background: var(--brand-50); color: var(--brand); border-color: var(--brand-line); }
+
+.valve-carbon .alert {
+  padding: 12px 16px;
+  border-radius: 0;
+  font-size: 14px;
+  line-height: 18px;
+}
+
+.valve-carbon .alert.info { background: var(--info-50); color: var(--info); border-color: var(--info-line); }
+.valve-carbon .alert.warn { background: var(--warn-50); color: var(--warn); border-color: var(--warn-line); }
+.valve-carbon .alert.err { background: var(--danger-50); color: var(--danger); border-color: var(--danger-line); }
+.valve-carbon .alert.ok { background: var(--ok-50); color: var(--ok); border-color: var(--ok-line); }
+
+.valve-carbon .logs-filter,
+.valve-carbon .source-card,
+.valve-carbon .source-type-row,
+.valve-carbon .subsection-collapsible,
+.valve-carbon .keyfield-grid,
+.valve-carbon .rt-panel,
+.valve-carbon .dbhm-prog {
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.valve-carbon .source-card,
+.valve-carbon .source-type-row,
+.valve-carbon .subsection-collapsible,
+.valve-carbon .keyfield-grid {
+  background: var(--bg-secondary);
+  border: 1px solid var(--line);
+}
+
+.valve-carbon .prod-item,
+.valve-carbon .source-tab,
+.valve-carbon .dbhm-period .seg,
+.valve-carbon .cfg-mode .seg,
+.valve-carbon .query-preview,
+.valve-carbon .sql-snip,
+.valve-carbon .tree-item,
+.valve-carbon .progress {
+  border-radius: 0;
+}
+
+.valve-carbon .prod-item.active,
+.valve-carbon .source-tab.active,
+.valve-carbon .dbhm-period .seg.on,
+.valve-carbon .cfg-mode .seg.on {
+  border-color: var(--brand-line);
+  background: var(--brand-50);
+  color: var(--brand);
+}
+
+.valve-carbon .heatmap tr.prod-head-row td.prod-head-cell {
+  border-color: var(--brand-line);
+  border-radius: 0;
+  background: var(--brand-50);
+}
+
+.valve-carbon .product-head .prod-name,
+.valve-carbon .prod-item-name,
+.valve-carbon .prod-head-name,
+.valve-carbon .keyfield-label {
+  color: var(--brand);
+}
+
+.valve-carbon .product-head .prod-name,
+.valve-carbon .prod-item.active .prod-item-srcchip,
+.valve-carbon .sql-guide[open] > summary,
+.valve-carbon .query-preview[open] > summary {
+  border-color: var(--brand-line);
+  background: var(--brand-50);
+  color: var(--brand);
+}
+
+.valve-carbon .sql-guide[open],
+.valve-carbon .query-preview[open] {
+  border-color: var(--brand-line);
+}
+
+.valve-carbon .source-tab,
+.valve-carbon .sql-guide > summary,
+.valve-carbon .query-preview > summary,
+.valve-carbon .sql-snip-label,
+.valve-carbon .prod-item-name {
+  font-size: 14px;
+  line-height: 18px;
+  letter-spacing: 0.16px;
+}
+
+.valve-carbon .prod-item-sub,
+.valve-carbon .prod-item-srcchip,
+.valve-carbon .logs-tbl,
+.valve-carbon .logs-tbl th,
+.valve-carbon .sql-snip code,
+.valve-carbon .root-path,
+.valve-carbon .config-root-path,
+.valve-carbon .cfg-row {
+  font-size: 12px;
+  line-height: 16px;
+  letter-spacing: 0.32px;
+}
+
+.valve-carbon .split .pane > .hdr {
+  min-height: 40px;
+  padding: 12px 16px;
+  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--line);
+  font-size: 14px;
+  line-height: 18px;
+  font-weight: 600;
+}
+
+.valve-carbon .tree-item {
+  min-height: 32px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.valve-carbon .tree-item.sel {
+  background: var(--brand-50);
+  color: var(--brand);
+  box-shadow: inset 3px 0 0 var(--brand);
+}
+
+.valve-carbon .foot {
+  min-height: 40px;
+  padding: 8px 20px;
+  border-top: 1px solid var(--line);
+  background: var(--bg-secondary);
+}
+
+.valve-carbon .flow-mark {
+  color: var(--brand);
+  font-family: var(--font-sans);
+  font-weight: 700;
+}
+
+@media (max-width: 900px) {
+  .valve-carbon main { padding: 16px; }
+  .valve-carbon .status { gap: 8px; }
+  .valve-carbon .sse-label { display: none; }
 }

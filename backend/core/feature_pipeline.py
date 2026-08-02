@@ -38,12 +38,14 @@ mock 모드에서는 결정적(seed) 합성 데이터를 생성해 전체 흐름
 from __future__ import annotations
 
 import fnmatch
+import asyncio
 import hashlib
 import json
 import os
 import random
 import re
 import shutil
+import threading
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -379,9 +381,46 @@ def numeric_agg_expr(agg: str, col: str, name: str, custom_aggs: dict | None = N
 # Pipeline
 # ─────────────────────────────────────────────
 class FeaturePipeline:
-    def __init__(self, root: Path, settings: dict):
+    def __init__(self, root: Path, settings: dict, lake_api=None):
         self.root = Path(root)
         self.settings = settings
+        self.lake_api = lake_api
+
+    def product_source_cfg(self, product: str, source: str) -> dict:
+        """products.yaml의 제품별 실제 테이블 설정을 읽는다."""
+        data = yaml.safe_load(
+            (self.root / "config" / "products.yaml").read_text(encoding="utf-8")) or {}
+        prod = next((p for p in data.get("products", []) if p.get("product") == product), None)
+        src = next((s for s in (prod or {}).get("sources", []) if s.get("name") == source), None)
+        if not src:
+            raise ValueError(f"product/source config not found: {product}/{source}")
+        table = src.get("table_name") or src.get("table")
+        if not isinstance(table, str) or not table.strip():
+            raise ValueError(f"table_name is required for product={product!r}, source={source!r}")
+        return src
+
+    def _query_raw(self, cfg: dict, source: str, q_from: date, q_to: date) -> pl.DataFrame:
+        src = self.product_source_cfg(str(cfg["product"]), source)
+        params = {
+            "table_name": src.get("table_name") or src.get("table"),
+            "datefrom": q_from.isoformat(),
+            "dateto": q_to.isoformat(),
+        }
+        for key in ("process_id", "line_id"):
+            value = cfg.get(key)
+            if value is not None and value != "" and value != []:
+                params[key] = value
+
+        async def invoke():
+            return await self.lake_api.query(params, [])
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(invoke())
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, invoke()).result()
 
     # ── config loaders (호출 시점마다 fresh 로드 → 웹에서 수정 즉시 반영) ──
     def global_cfg(self) -> dict:
@@ -641,6 +680,13 @@ class FeaturePipeline:
         p = Path(raw).expanduser()
         return p if p.is_absolute() else (self.root / p)
 
+    def display_path(self, path: Path) -> str:
+        """프로젝트 내부는 상대경로, 외부 DB 루트는 안전하게 절대경로로 표시."""
+        try:
+            return str(path.relative_to(self.root))
+        except ValueError:
+            return str(path)
+
     def raw_dir(self, vehicle: str, source: str) -> Path:
         # raw 는 소스 > vehicle > date=hive 파티션 (FAB/{vehicle}/date=…).
         # event/feature 와 동일하게 vehicle 기준으로 통일.
@@ -690,10 +736,16 @@ class FeaturePipeline:
         """event 생성에 영향을 주는 설정 전체의 버전 —
         매칭 파일 내용(sha) + vehicle 의 event_lot_startwith + 소스 match 규칙.
         어느 하나라도 바뀌면 해당 소스 event DB 전체 재생성 대상(stale)."""
+        source_cfg = ((self.global_cfg().get("sources") or {}).get(source) or {})
         payload = {
             "matching_sha": self.matching_sha(source),
             "prefix": str(self.vehicle_cfg(vehicle).get("event_lot_startwith") or ""),
             "match": self.source_match(source),
+            # EVENT의 물리 schema도 버전에 포함한다. 조회 컬럼을 바꾼 뒤 예전
+            # 파티션을 그대로 두면 날짜별 parquet 폭이 달라져 feature 단계의 concat이
+            # 반복 실패한다. table/time_col도 파티션 의미에 영향을 주므로 함께 묶는다.
+            "source": {k: source_cfg.get(k) for k in
+                       ("table", "columns", "time_col", "event")},
         }
         return hashlib.sha1(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:12]
 
@@ -843,16 +895,44 @@ class FeaturePipeline:
             return 0  # reformatter 설정됐으나 이 vehicle 의 파일/REAL 항목 없음
         # 쿼리 구간은 반열림 [q_from, q_to) — 마지막 (today, today) 유닛도 하루가 된다
         q_from, q_to = raw_query_window(start, end)
-        gen = self._mock_for(source)
-        df = (gen(cfg, q_from, q_to, split) if gen
-              else self._mock_generic(cfg, q_from, q_to, split, source, sc["columns"],
-                                      items=items))
+        if self.lake_api is not None:
+            df = self._query_raw(cfg, source, q_from, q_to)
+        else:
+            gen = self._mock_for(source)
+            df = (gen(cfg, q_from, q_to, split) if gen
+                  else self._mock_generic(cfg, q_from, q_to, split, source, sc["columns"],
+                                          items=items))
         if items and "item_id" in df.columns:
             df = df.filter(pl.col("item_id").is_in(items))  # 실 어댑터 교체 대비 안전망
-        keep = [c for c in sc["columns"] if c in df.columns] + ["split"]
-        df = df.select(keep)
+        df = self._normalize_raw(df, source, split)
+        if df.height == 0:
+            # 그 구간에 lot 이 없으면 조회 결과가 빈다 — 에러가 아니라 정상이다.
+            # **파티션을 쓰지 않는다**: (1) 0행 파티션이 '최신' 이 되면 진단이 빈 날을
+            # 실패로 읽고, (2) 일시적인 빈 응답이 이미 받아 둔 그 날 데이터를 덮어쓴다.
+            return 0
         self._write_raw_partitions(cfg["vehicle"], source, df, fallback_date=start)
         return df.height
+
+    def _normalize_raw(self, df: pl.DataFrame | None, source: str, split: str) -> pl.DataFrame:
+        """조회 결과를 저장 가능한 모양으로 맞춘다.
+
+        사내 어댑터는 '해당 조건 데이터 없음' 을 None·빈 list 로 주고 lake_api 가
+        0행 0열 DataFrame 으로 바꾼다. 여기에 split 리터럴을 그냥 붙이면
+        **없는 행이 하나 생긴다** — polars 는 열이 없는 프레임에 리터럴을 붙이면
+        길이 1이 된다. 그래서 빈 결과는 리터럴 대신 설정된 조회 컬럼 스키마를 가진
+        0행 프레임으로 만든다 (컬럼 없는 parquet 이 저장되면 event 단계가
+        root_lot_id 를 못 찾아 그 제품 전체가 죽는다)."""
+        if df is None:
+            df = pl.DataFrame()
+        if df.height:
+            if "split" not in df.columns:
+                df = df.with_columns(pl.lit(split).alias("split"))
+            return df
+        cols = list(self.sources_cfg()[source].get("columns") or [])
+        ordered = list(dict.fromkeys(list(df.columns) + cols + ["split"]))
+        schema = df.schema
+        return pl.DataFrame({c: pl.Series(c, [], dtype=schema.get(c, pl.Utf8))
+                             for c in ordered})
 
     def _time_col(self, source: str) -> str | None:
         """raw 를 date= 파티션으로 나누는 **기준 열**.
@@ -908,7 +988,43 @@ class FeaturePipeline:
         구 파일명(part-000)이 남아있으면 제거 (중복 로드 방지)."""
         pdir.mkdir(parents=True, exist_ok=True)
         (pdir / "part-000.parquet").unlink(missing_ok=True)
-        df.write_parquet(pdir / "data.parquet", compression="zstd", compression_level=3)
+        FeaturePipeline._write_parquet_atomic(
+            df, pdir / "data.parquet", compression="zstd", compression_level=3)
+
+    @staticmethod
+    def _write_parquet_atomic(df: pl.DataFrame, path: Path, **kwargs):
+        """완성된 parquet만 최종 이름에 노출한다.
+
+        파이프라인과 S3/file browser는 서로 다른 worker에서 파일을 읽을 수 있다.
+        최종 경로에 직접 쓰면 reader가 footer가 아직 없는 parquet을 집을 수 있으므로
+        같은 디렉터리의 임시 파일을 쓴 뒤 os.replace로 교체한다.
+        """
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(
+            f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        try:
+            df.write_parquet(tmp, **kwargs)
+            os.replace(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    @staticmethod
+    def _replace_dir_snapshot(build_dir: Path, final_dir: Path):
+        """build_dir의 완성된 세대를 final_dir로 교체하고 실패 시 이전 세대를 복원."""
+        stamp = f"{os.getpid()}-{time.time_ns()}"
+        backup = final_dir.parent / f".{final_dir.name}.backup-{stamp}"
+        had_old = final_dir.exists()
+        if had_old:
+            os.replace(final_dir, backup)
+        try:
+            os.replace(build_dir, final_dir)
+        except Exception:
+            if had_old and backup.exists() and not final_dir.exists():
+                os.replace(backup, final_dir)
+            raise
+        if backup.exists():
+            shutil.rmtree(backup, ignore_errors=True)
 
     def _write_raw_partitions(self, vehicle: str, source: str, df: pl.DataFrame, fallback_date):
         """raw 를 auto report daily DB 와 같은 hive partitioning 으로 저장 —
@@ -928,6 +1044,34 @@ class FeaturePipeline:
         else:
             self._write_partition(df, root / f"date={fallback_date}")
 
+    @staticmethod
+    def _prune_date_partitions(root: Path, keep_days: int,
+                               today: date | None = None) -> list[str]:
+        """최근 keep_days개 달력일 밖의 date=YYYY-MM-DD 파티션을 제거."""
+        if keep_days <= 0:
+            return []
+        cutoff = (today or datetime.today().date()) - timedelta(days=keep_days - 1)
+        removed = []
+        for p in root.glob("date=*"):
+            try:
+                day = date.fromisoformat(p.name[5:])
+            except ValueError:
+                continue
+            if day < cutoff:
+                shutil.rmtree(p, ignore_errors=True)
+                removed.append(p.name[5:])
+        return sorted(removed)
+
+    def retention_days(self, vehicle: str) -> int:
+        cfg = self.vehicle_cfg(vehicle)
+        rt = self.global_cfg().get("runtime") or {}
+        return max(1, int(cfg.get("event_days_back") or rt.get("raw_days") or 7))
+
+    def prune_raw(self, vehicle: str) -> dict[str, list[str]]:
+        days = self.retention_days(vehicle)
+        return {source: self._prune_date_partitions(self.raw_dir(vehicle, source), days)
+                for source in self.sources_cfg()}
+
     def run_raw_query(self, vehicle: str) -> dict:
         """전 (source, 날짜) 유닛을 순차 실행 (병렬은 pipeline_runner 가 담당)."""
         cfg = self.vehicle_cfg(vehicle)
@@ -939,7 +1083,7 @@ class FeaturePipeline:
             if it is not None:
                 p = self.reformatter_path(vehicle, name)
                 stats.setdefault("reformatter", {})[name] = {
-                    "file": str(p.relative_to(self.root)), "found": p.exists(), "items": len(it)}
+                    "file": self.display_path(p), "found": p.exists(), "items": len(it)}
         seen = set()
         for source, start, end, split in self._raw_units(cfg):
             stats["rows"][source] += self._run_raw_unit(cfg, source, start, end, split)
@@ -1126,7 +1270,18 @@ class FeaturePipeline:
     def run_event(self, vehicle: str) -> dict:
         cfg = self.vehicle_cfg(vehicle)
         prefix = str(cfg.get("event_lot_startwith") or "")
-        step_ids = set(self.step_map(vehicle)["step_id"].to_list())
+        step_map = (self.step_map(vehicle)
+                    .select(
+                        pl.col("step_id").cast(pl.Utf8).str.strip_chars(),
+                        pl.col("step_desc").cast(pl.Utf8).str.strip_chars())
+                    .filter((pl.col("step_id") != "") & (pl.col("step_desc") != "")))
+        conflicts = (step_map.group_by("step_id")
+                     .agg(pl.col("step_desc").n_unique().alias("_n"))
+                     .filter(pl.col("_n") > 1))
+        if conflicts.height:
+            ids = ", ".join(conflicts["step_id"].head(10).to_list())
+            raise ValueError(f"vehicle_matching에 서로 다른 step_desc가 중복됨: {ids}")
+        step_map = step_map.unique(subset=["step_id"], keep="last")
 
         # 구 레이아웃(vehicle 바로 아래 date=*) 잔재 제거
         legacy_root = self.db_root() / "2.EVENT_DB" / vehicle
@@ -1160,24 +1315,45 @@ class FeaturePipeline:
                     shutil.rmtree(d, ignore_errors=True)
 
             rows_in = rows_out = parts = 0
+            skipped: list[str] = []      # 빈/스키마 없는 raw 파티션 (현황에 남긴다)
             for date_dir in sorted(self.raw_dir(vehicle, source).glob("date=*")):
                 raw_files = sorted(date_dir.glob("*.parquet"))  # data.parquet (구 part-000 호환)
                 out_dir = edir / date_dir.name
                 if not raw_files or (not rebuild
                                      and self._event_partition_fresh(raw_files, out_dir)):
                     continue
-                raw = pl.concat([pl.read_parquet(f) for f in raw_files])
+                # 파티션마다 열이 다를 수 있다 — 사내 조회는 전부 null 인 열을 생략하기도
+                # 하고, 예전 빌드가 남긴 컬럼 없는 빈 parquet 이 섞여 있을 수도 있다.
+                raw = pl.concat([pl.read_parquet(f) for f in raw_files],
+                                how="diagonal_relaxed")
                 rows_in += raw.height
+                if raw.height == 0 or "root_lot_id" not in raw.columns:
+                    # 빈 날(그 구간에 lot 이 없음)이거나 KEY 열이 없는 파티션.
+                    # 여기서 예외를 올리면 그 제품의 event 단계가 통째로 멈춘다 —
+                    # 한 날짜의 빈 조각이 나머지 날짜까지 못 만들게 하지 않는다.
+                    skipped.append(date_dir.name[5:])
+                    continue
                 event = raw.filter(pl.col("root_lot_id").cast(pl.Utf8).str.starts_with(prefix))
                 if match["kind"] == "item" and match["id_col"] in event.columns:
                     event = event.filter(pl.col(match["id_col"]).is_in(sorted(item_ids)))
                 elif match["kind"] == "step" and "step_id" in event.columns:
-                    event = event.with_columns(pl.col("step_id").cast(pl.Utf8)) \
-                                 .filter(pl.col("step_id").is_in(sorted(step_ids)))
+                    # vehicle_matching은 단순 허용 목록이 아니라
+                    # step_id → function step(step_desc) 계약이다. raw step_desc를
+                    # 그대로 두면 flow에서 승인한 신규 step이 FAB 룰과 연결되지 않는다.
+                    event = (event.with_columns(pl.col("step_id").cast(pl.Utf8).str.strip_chars())
+                             .join(step_map.rename({"step_desc": "_matched_step_desc"}),
+                                   on="step_id", how="inner"))
+                    if "step_desc" in event.columns:
+                        event = event.drop("step_desc")
+                    event = event.rename({"_matched_step_desc": "step_desc"})
                 # kind == "none" → root_lot prefix 필터만 적용
+                configured = self.sources_cfg()[source].get("columns") or []
+                keep = [c for c in configured if c in event.columns]
+                if "split" in event.columns and "split" not in keep:
+                    keep.append("split")
+                event = event.select(keep)
                 if source == "FAB":
-                    keep = [c for c in EVENT_KEEP_COLS if c in event.columns]
-                    event = event.select(keep).select(pl.all().cast(pl.String))
+                    event = event.select(pl.all().cast(pl.String))
                 self._write_partition(event, out_dir)
                 rows_out += event.height
                 parts += 1
@@ -1186,11 +1362,14 @@ class FeaturePipeline:
             mf = self.matching_file(source)
             meta_path.write_text(json.dumps({
                 "ver": ver, "sha": self.matching_sha(source), "ts": time.time(),
-                "file": str(mf.relative_to(self.root)) if mf else None,
+                "file": self.display_path(mf) if mf else None,
                 "prefix": prefix, "match": self.source_match(source),
             }, ensure_ascii=False), encoding="utf-8")
             results[source] = {"raw_rows": rows_in, "event_rows": rows_out,
-                               "partitions": parts, "rebuilt": rebuild}
+                               "partitions": parts, "rebuilt": rebuild,
+                               "empty_partitions": skipped,
+                               "pruned": self._prune_date_partitions(
+                                   edir, self.retention_days(vehicle))}
         return results
 
     @staticmethod
@@ -1222,13 +1401,16 @@ class FeaturePipeline:
         files = self._partition_files(self.event_dir(vehicle, source))
         if not files:
             return None
-        return pl.concat([pl.read_parquet(f) for f in files])
+        # 사내 조회 결과는 전부 null인 열을 날짜에 따라 생략할 수 있고, 설정 변경
+        # 직후에는 이전/새 schema 파티션이 잠시 공존할 수 있다. 열 이름 기준 union과
+        # 공통 dtype 승격으로 읽어 누락 열은 null로 채운다.
+        return pl.concat([pl.read_parquet(f) for f in files], how="diagonal_relaxed")
 
     def _load_raw(self, vehicle: str, source: str) -> pl.DataFrame | None:
         files = self._partition_files(self.raw_dir(vehicle, source))
         if not files:
             return None
-        return pl.concat([pl.read_parquet(f) for f in files])
+        return pl.concat([pl.read_parquet(f) for f in files], how="diagonal_relaxed")
 
     def event_dates(self, vehicle: str, source: str = "FAB") -> list[str]:
         """소스 event DB 의 날짜 파티션 목록 (오름차순). feature 커버 구간의 근거."""
@@ -1250,8 +1432,21 @@ class FeaturePipeline:
         event = self._load_event(vehicle, "FAB")
         if event is None:
             raise RuntimeError("event DB 없음 — raw/event 단계를 먼저 실행하세요")
-        fdir = self.feature_dir(vehicle)
-        fdir.mkdir(parents=True, exist_ok=True)
+        final_fdir = self.feature_dir(vehicle)
+        final_fdir.parent.mkdir(parents=True, exist_ok=True)
+        backups = sorted(final_fdir.parent.glob(f".{final_fdir.name}.backup-*"),
+                         key=lambda p: p.stat().st_mtime, reverse=True)
+        if not final_fdir.exists() and backups:
+            os.replace(backups[0], final_fdir)
+            backups = backups[1:]
+        for stale in backups:
+            shutil.rmtree(stale, ignore_errors=True)
+        # 이전 실패가 남긴 비공개 build 디렉터리는 산출물이 아니므로 제거한다.
+        for stale in final_fdir.parent.glob(f".{final_fdir.name}.build-*"):
+            shutil.rmtree(stale, ignore_errors=True)
+        fdir = final_fdir.parent / (
+            f".{final_fdir.name}.build-{os.getpid()}-{time.time_ns()}")
+        fdir.mkdir(parents=True, exist_ok=False)
 
         features: dict[str, list[str]] = {"fab": [], "knob": [], "mask": [], "inline": [], "vm": []}
         skipped: list[dict] = []  # 컬럼 미추출 등으로 건너뛴 feature (사유 포함)
@@ -1428,6 +1623,11 @@ class FeaturePipeline:
         (rdir / "knob_skip.json").write_text(
             json.dumps(knob_skip_rows, ensure_ascii=False, indent=2), encoding="utf-8")
 
+        # 이 실행에서 생성된 파일만 feature store의 최신 세대로 승격한다.
+        # 삭제된 룰, 이름이 바뀐 룰, 이번 실행에서 값이 없어진 feature의 구 parquet은
+        # 이전 디렉터리와 함께 제거되어 run_wide에 다시 섞이지 않는다.
+        self._replace_dir_snapshot(fdir, final_fdir)
+
         return {
             "features": {k: len(v) for k, v in features.items()},
             "files": features,
@@ -1588,7 +1788,7 @@ class FeaturePipeline:
         if not has_val:
             return
         fname = f"{safe_filename(col)}.parquet"
-        feat.write_parquet(fdir / fname)
+        FeaturePipeline._write_parquet_atomic(feat, fdir / fname)
         bucket.append(fname)
 
     # ─────────────────────────────────────────
@@ -1631,12 +1831,70 @@ class FeaturePipeline:
         ordered += [c for c in cols if c not in ordered]
         wide = wide.select(ordered)
 
+        if wide.height == 0:
+            raise RuntimeError("wide 검증 실패: row가 0건입니다")
+        null_keys = wide.select(
+            pl.any_horizontal([pl.col(c).is_null() for c in WIDE_KEY]).sum()).item()
+        if null_keys:
+            raise RuntimeError(f"wide 검증 실패: KEY null {null_keys}건")
+        if wide.unique(subset=WIDE_KEY).height != wide.height:
+            raise RuntimeError("wide 검증 실패: PRODUCT/root_lot/wafer KEY 중복")
+
         wdir = self.wide_dir()
         wdir.mkdir(parents=True, exist_ok=True)
         out = wdir / f"ML_TABLE_{vehicle}.parquet"
-        wide.write_parquet(out, compression="zstd", statistics=True)
+        self._write_parquet_atomic(wide, out, compression="zstd", statistics=True)
         return {"rows": wide.height, "features": wide.width - len(WIDE_KEY),
-                "path": str(out.relative_to(self.root))}
+                "path": self.display_path(out)}
+
+    def run_flow_tables(self) -> dict:
+        """vehicle별 내부 wide를 PRODUCT별 canonical ML_TABLE로 DB 루트에 발행.
+
+        Flow는 db_root 직하의 ``ML_TABLE_*.parquet``만 제품으로 인식한다. 내부
+        ``4.WIDE_FORM/ML_TABLE_{vehicle}`` 구조는 유지하되, 전달 계약은
+        ``db_root/ML_TABLE_{product}.parquet``로 고정한다. 같은 product에 vehicle이
+        여러 개면 diagonal concat 후 wafer KEY 중복은 마지막 vehicle 산출을 사용한다.
+        """
+        files = sorted(self.wide_dir().glob("ML_TABLE_*.parquet"))
+        by_product: dict[str, list[pl.DataFrame]] = {}
+        for f in files:
+            df = pl.read_parquet(f)
+            if not set(WIDE_KEY) <= set(df.columns):
+                raise RuntimeError(f"Flow 발행 검증 실패: {f.name} KEY 컬럼 누락")
+            for (product,), part in df.partition_by("PRODUCT", as_dict=True).items():
+                product = str(product or "").strip()
+                if product:
+                    by_product.setdefault(product, []).append(part)
+        if not by_product:
+            raise RuntimeError("Flow 발행할 PRODUCT wide table이 없습니다")
+
+        root = self.db_root()
+        manifest_path = root / ".valve_ml_tables.json"
+        previous: set[str] = set()
+        if manifest_path.exists():
+            try:
+                previous = set(json.loads(manifest_path.read_text(encoding="utf-8")).get("files") or [])
+            except Exception:
+                previous = set()
+        published = []
+        for product, frames in sorted(by_product.items()):
+            out_df = (pl.concat(frames, how="diagonal_relaxed")
+                      .unique(subset=WIDE_KEY, keep="last")
+                      .sort(WIDE_KEY))
+            name = f"ML_TABLE_{safe_filename(product)}.parquet"
+            self._write_parquet_atomic(out_df, root / name,
+                                       compression="zstd", statistics=True)
+            published.append(name)
+
+        # Valve가 이전에 관리하던 product만 정리한다. 운영자가 둔 다른 ML_TABLE은
+        # manifest에 없으므로 건드리지 않는다.
+        for name in previous - set(published):
+            (root / name).unlink(missing_ok=True)
+        meta = {"schema": 1, "ts": time.time(), "files": published}
+        tmp = manifest_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, manifest_path)
+        return {"files": published, "products": len(published)}
 
     # ─────────────────────────────────────────
     # 5) SEND FORM — 전 vehicle ML_TABLE 병합 후 prefix 그룹별 분리 저장.
@@ -1663,9 +1921,17 @@ class FeaturePipeline:
             gdir.mkdir(parents=True, exist_ok=True)
             name = group.split(".", 1)[-1]
             gdf = df.select(WIDE_KEY + gcols).collect()
-            gdf.write_csv(gdir / f"{name}_ML_TABLE.csv")
-            gdf.write_parquet(gdir / f"{name}_ML_TABLE.parquet",
-                              compression="zstd", statistics=True)
+            csv_out = gdir / f"{name}_ML_TABLE.csv"
+            csv_tmp = csv_out.with_name(
+                f".{csv_out.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+            try:
+                gdf.write_csv(csv_tmp)
+                os.replace(csv_tmp, csv_out)
+            finally:
+                csv_tmp.unlink(missing_ok=True)
+            self._write_parquet_atomic(
+                gdf, gdir / f"{name}_ML_TABLE.parquet",
+                compression="zstd", statistics=True)
             groups[group] = {"rows": gdf.height, "cols": len(gcols)}
         return {"tables": [f.name for f in files], "groups": groups}
 

@@ -33,6 +33,7 @@ Valve 의 S3 계층은 aws CLI 가 아니라 S3Uploader(boto3 / fake_local) 다.
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 import time
@@ -66,6 +67,7 @@ class S3Jobs:
         self._status_path = self.root / "logs" / "s3_jobs_status.json"
         self._history_path = self.root / "logs" / "s3_jobs_history.jsonl"
         self._sched_task = None
+        self._download_touched: list[str] = []
 
     # ── config ────────────────────────────────────────────
     def load(self) -> dict:
@@ -216,13 +218,18 @@ class S3Jobs:
             interval = float(it.get("interval_min") or 0) * 60
             auto_on = cfg["auto_download_enabled"] if it["direction"] == "download" \
                 else cfg["auto_upload_enabled"]
-            sched = bool(it.get("enabled") and interval > 0 and auto_on)
+            try:
+                up = self.uploader_for(it.get("dest") or "default")
+                connected = not hasattr(up, "is_configured") or up.is_configured()
+            except Exception:
+                connected = False
+            sched = bool(it.get("enabled") and interval > 0 and auto_on and connected)
             next_due = (last + interval) if (last and interval > 0) else (now if sched else None)
             out.append({**it, "status": s,
                         "is_running": it["id"] in running,
                         "is_queued": it["id"] in queued,
                         "progress": running.get(it["id"]),
-                        "scheduled": sched,
+                        "scheduled": sched, "s3_configured": connected,
                         "next_due": next_due,
                         "due": bool(sched and (last is None or now - last >= interval))})
         return {"items": out, "auto_download_enabled": cfg["auto_download_enabled"],
@@ -247,6 +254,9 @@ class S3Jobs:
         it = self.item(item_id)
         if not it:
             raise ValueError(f"알 수 없는 항목: {item_id}")
+        up = self.uploader_for(it.get("dest") or "default")
+        if hasattr(up, "is_configured") and not up.is_configured():
+            return {"ok": True, "skipped": "s3_disabled"}
         with _cond:
             if item_id in _running:
                 return {"ok": False, "already": "running"}
@@ -292,8 +302,20 @@ class S3Jobs:
             except Exception as e:
                 self._finish(item_id, "error", error=str(e)[:400])
             finally:
+                notify_paths = []
                 with _cond:
                     _running.pop(item_id, None)
+                    # 같은 poll에서 내려온 matching 파일 묶음을 모두 교체한 뒤 한 번만
+                    # 재생성한다. 파일마다 rebuild하면 새/구 룰북의 중간 조합으로 최대
+                    # N번 ML_TABLE을 만들게 된다.
+                    if not _queued and self._download_touched:
+                        notify_paths = list(dict.fromkeys(self._download_touched))
+                        self._download_touched.clear()
+                if notify_paths and self.on_downloaded:
+                    try:
+                        self.on_downloaded(notify_paths)
+                    except Exception:
+                        pass
 
     def _progress(self, item_id: str, **kw) -> bool:
         """진행률 갱신 + 취소 여부 반환 (True = 계속)."""
@@ -321,16 +343,16 @@ class S3Jobs:
         self._write_status(item_id, {"last_start": time.time(), "last_status": "running",
                                      "direction": it["direction"]})
         up = self.uploader_for(it["dest"])
+        if hasattr(up, "is_configured") and not up.is_configured():
+            self._finish(item_id, "skipped", reason="s3_disabled", direction=it["direction"])
+            return
         fn = self._do_upload if it["direction"] == "upload" else self._do_download
         moved, skipped, failed, cancelled, touched = fn(item_id, it, up)
         status = "cancelled" if cancelled else ("error" if failed else "ok")
         self._finish(item_id, status, moved=moved, skipped=skipped, failed=failed,
                      direction=it["direction"])
-        if touched and it["direction"] == "download" and self.on_downloaded:
-            try:
-                self.on_downloaded(touched)
-            except Exception:
-                pass
+        if touched and it["direction"] == "download":
+            self._download_touched.extend(touched)
 
     @staticmethod
     def _is_text(p: Path) -> bool:
@@ -347,7 +369,8 @@ class S3Jobs:
             # .tmp 는 원자적 저장의 중간 파일 — 올리면 S3 에 쓰레기가 남는다
             files = [(str(p.relative_to(base)).replace("\\", "/"), p)
                      for p in sorted(base.rglob("*"))
-                     if p.is_file() and p.suffix != ".tmp"]
+                     if (p.is_file() and p.suffix != ".tmp"
+                         and not any(part.startswith(".") for part in p.relative_to(base).parts))]
         moved = skipped = failed = 0
         cancelled = False
         self._progress(item_id, total=len(files), done=0)
@@ -390,22 +413,73 @@ class S3Jobs:
             if it["mode"] == "sync" and dst.exists() and self._same(up, k, dst):
                 skipped += 1
                 continue
-            if up.get_file(k, dst):
-                moved += 1
-                touched.append(str(dst))
-            else:
-                failed += 1
+            candidate = dst.with_name(
+                f".{dst.name}.{os.getpid()}.{threading.get_ident()}.download")
+            try:
+                if up.get_file(k, candidate):
+                    self._validate_download(candidate, dst)
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(candidate, dst)
+                    moved += 1
+                    touched.append(str(dst))
+                else:
+                    failed += 1
+            finally:
+                candidate.unlink(missing_ok=True)
         self._progress(item_id, done=len(keys) if not cancelled else None)
         return moved, skipped, failed, cancelled, touched
 
+    @staticmethod
+    def _validate_download(candidate: Path, destination: Path):
+        """flow 소유 룰북은 schema를 통과한 경우에만 운영 파일로 승격."""
+        suffix = destination.suffix.lower()
+        if suffix == ".json":
+            json.loads(candidate.read_text(encoding="utf-8"))
+            return
+        if suffix not in {".csv", ".yaml", ".yml"}:
+            return
+        if suffix in {".yaml", ".yml"}:
+            yaml.safe_load(candidate.read_text(encoding="utf-8"))
+            return
+        import csv
+        with open(candidate, newline="", encoding="utf-8-sig") as f:
+            cols = set(next(csv.reader(f), []))
+        name = destination.name.lower()
+        required = None
+        if name == "vehicle_matching.csv":
+            required = {"vehicle", "step_id", "step_desc"}
+        elif name == "fab.csv":
+            required = {"step_desc", "feature_name", "agg"}
+        elif name == "inline.csv":
+            required = {"item_id", "agg"}
+        elif name == "mask.csv":
+            required = {"step_desc", "agg"}
+        elif name == "vm.csv":
+            required = {"sensor_id", "agg"}
+        elif name == "ppid_knob.csv":
+            legacy = {"vehicle", "step_id", "step_desc", "ppid", "knob"}
+            rule = {"feature_name", "rule_order", "value", "category"}
+            if not (legacy <= cols or rule <= cols):
+                raise ValueError("ppid_knob.csv schema 오류: legacy 또는 rule 컬럼 집합 필요")
+            return
+        if required and not required <= cols:
+            missing = ", ".join(sorted(required - cols))
+            raise ValueError(f"{destination.name} schema 오류: 필수 컬럼 누락 {missing}")
+
     def _same(self, up, key: str, local: Path) -> bool:
-        """sync 판정 — 텍스트는 내용, 바이너리는 크기 (탐색기 s3-transfer 와 동일 규칙)."""
+        """sync 판정 — 텍스트는 내용, 바이너리는 SHA-256.
+
+        parquet은 값이 바뀌어도 압축 크기가 같을 수 있다. 크기만 비교하면 새
+        ML_TABLE을 영구히 건너뛰므로, uploader가 head metadata로 돌려주는 hash와
+        로컬 내용을 비교한다. 구 object(hash 없음)는 한 번 다시 올려 metadata를 심는다.
+        """
         try:
             if self._is_text(local):
                 remote = up.get_text(key)
                 return remote is not None and remote == local.read_text(encoding="utf-8")
             head = up.head(key)
-            return head is not None and head.get("size") == local.stat().st_size
+            remote_sha = str((head or {}).get("sha256") or "")
+            return bool(remote_sha and remote_sha == up.file_sha256(local))
         except Exception:
             return False
 
@@ -461,6 +535,35 @@ class S3Jobs:
             "mode": "sync", "interval_min": 10, "enabled": True, "note": note}))
         self.save(cfg)
         return True
+
+    def ensure_ml_table_items(self, products: list[str],
+                              key_prefix: str = "flow/artifacts/ml-tables") -> int:
+        """Flow 소비용 canonical ML_TABLE 파일의 주기 업로드 항목을 보장한다.
+
+        사용자가 같은 id를 편집한 경우 그 설정은 건드리지 않고, 없는 product만
+        추가한다. S3 자체가 disabled면 항목은 보이되 scheduler가 실행하지 않는다.
+        """
+        cfg = self.load()
+        existing = {str(i.get("id") or "") for i in cfg.get("items") or []}
+        added = 0
+        for product in sorted({str(p or "").strip() for p in products if str(p or "").strip()}):
+            slug = re.sub(r"[^A-Za-z0-9_-]", "_", product)[:40] or "product"
+            iid = f"up_ml_table_{slug}"[:64]
+            if iid in existing:
+                continue
+            name = f"ML_TABLE_{product}.parquet"
+            cfg["items"].append(self.validate({
+                "id": iid, "direction": "upload", "root": "db", "target": name,
+                "dest": "default", "key": f"{key_prefix.strip('/')}/{name}",
+                "mode": "sync", "interval_min": 10, "enabled": True,
+                "note": "Valve canonical ML_TABLE → flow DB root ingest",
+            }))
+            existing.add(iid)
+            added += 1
+        if added:
+            cfg["items"] = sorted(cfg["items"], key=lambda x: (x["direction"], x["id"]))
+            self.save(cfg)
+        return added
 
     # ── csv_sync.yaml / s3_transfer.yaml → 항목 1회 이관 ────
     def migrate_if_empty(self, csv_sync=None, transfer_rules: dict | None = None) -> int:

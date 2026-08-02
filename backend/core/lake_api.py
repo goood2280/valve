@@ -1,14 +1,9 @@
 """
 Valve · lake_api
 ----------------
-사내 DataLake 의 query(params, custom_col, user) 함수를 감싸는 어댑터.
+사내 DataLake 의 query(params, custom_col, user) 함수를 감싸는 실 API 전용 어댑터.
 
-Mock 모드:
-  - HY000 에러 5% 확률 주입
-  - 지연 시뮬레이션 (probe 0.3~1.5s · 실쿼리 3~15s · 가끔 6분 timeout)
-  - custom_col 기반 가짜 DataFrame 생성 (실제 shard key 분포 흉내)
-
-Real 모드:
+실 API:
   - settings.lake_api.module = "패키지.모듈:함수" 형태로 importlib 동적 로드
   - Valve 가 기대하는 시그니처:
         query(params: dict, custom_col: list, user: str) -> DataFrame
@@ -35,106 +30,16 @@ from __future__ import annotations
 
 import asyncio
 import importlib
-import random
+import threading
 import time
-from datetime import datetime, timedelta
-from typing import Any, Callable
+from typing import Callable
 
 import pandas as pd
 import polars as pl
 
 
 class HY000Error(Exception):
-    """사내 ODBC 드라이버 간헐 장애 모사"""
-
-
-# ─────────────────────────────────────────────
-# Mock engine
-# ─────────────────────────────────────────────
-class _MockQueryEngine:
-    """실제 query() 시그니처를 흉내낸 가짜 엔진. 개발/데모용."""
-
-    HY000_RATE = 0.05
-    SLOW_RATE = 0.01  # 1% 확률로 > timeout 시뮬
-    SLOW_SECONDS = 360  # 6분
-
-    def __call__(self, params: dict, custom_col: list, user: str) -> pd.DataFrame:
-        try:
-            t0 = datetime.fromisoformat(params["dateFrom"])
-            t1 = datetime.fromisoformat(params["dateTo"])
-            span = t1 - t0
-        except Exception:
-            span = timedelta(hours=24)
-
-        is_probe = span <= timedelta(hours=1, minutes=10)
-
-        # Slow (timeout 시뮬)
-        if not is_probe and random.random() < self.SLOW_RATE:
-            time.sleep(self.SLOW_SECONDS)
-
-        # Normal delay
-        if is_probe:
-            time.sleep(random.uniform(0.3, 1.5))
-        else:
-            time.sleep(random.uniform(3.0, 15.0))
-
-        # HY000
-        if random.random() < self.HY000_RATE:
-            raise HY000Error("[HY000] simulated ODBC driver error (Valve mock)")
-
-        return self._build_df(params, custom_col, is_probe, span)
-
-    def _build_df(self, params, custom_col, is_probe, span):
-        # row count: probe 면 1시간치, 실쿼리면 하루치 총량
-        hours = max(span.total_seconds() / 3600.0, 0.25)
-
-        table = params.get("table", "")
-        base_per_hour = {
-            "RAW_FAB_DATA": 3000,
-            "RAW_INLINE_DATA": 25000,
-            "RAW_ET_DATA": 40000,
-        }.get(table, 5000)
-
-        # shard filter 가 걸리면 row 축소 — IN 연산자 걸린 모든 컬럼을 shard 로 간주
-        shard_factor = 1.0
-        for key, sv in params.items():
-            if key in ("table", "dateFrom", "dateTo"):
-                continue
-            if isinstance(sv, dict) and sv.get("op") == "in":
-                n = len(sv.get("value") or [])
-                if n:
-                    shard_factor *= min(1.0, n / 30.0)  # 30 shard 중 n 개 선택 가정
-
-        row_count = int(base_per_hour * hours * shard_factor)
-        row_count = max(10, min(row_count, 1_500_000))
-
-        data = {}
-        try:
-            t_base = datetime.fromisoformat(params["dateFrom"])
-        except Exception:
-            t_base = datetime.now()
-
-        for col in custom_col:
-            if col == "root_lot_id":
-                data[col] = [f"R{random.randint(0, 29):03d}" for _ in range(row_count)]
-            elif col == "lot_id":
-                data[col] = [f"L{random.randint(0, 499):04d}" for _ in range(row_count)]
-            elif col == "wafer_id":
-                data[col] = [random.randint(1, 25) for _ in range(row_count)]
-            elif col == "item_id":
-                data[col] = [f"ITEM_{random.randint(0, 99):03d}" for _ in range(row_count)]
-            elif col == "time":
-                data[col] = [t_base + timedelta(seconds=random.randint(0, int(span.total_seconds()) or 1))
-                             for _ in range(row_count)]
-            elif col == "value":
-                data[col] = [round(random.gauss(100, 10), 4) for _ in range(row_count)]
-            else:
-                data[col] = [f"{col}_{random.randint(0, 9)}" for _ in range(row_count)]
-
-        return pd.DataFrame(data)
-
-
-_mock_engine = _MockQueryEngine()
+    """사내 ODBC 계층의 HY000 오류를 분류할 때 사용하는 예외."""
 
 
 def _get_real_query_fn(module_path: str) -> Callable:
@@ -159,14 +64,13 @@ class LakeAPI:
         self.backoff = list(lk["retry"]["backoff_sec"])
         self.retryable_tokens = tuple(lk.get("retryable_errors") or [])
 
-        mode = lk.get("mode", "mock")
-        if mode == "mock":
-            self._fn: Callable[..., pd.DataFrame] = _mock_engine
-        else:
-            self._fn = _get_real_query_fn(lk["module"])
+        self._fn: Callable[..., pd.DataFrame] = _get_real_query_fn(lk["module"])
 
         self._last_call_time = 0.0
-        self._rate_lock = asyncio.Lock()
+        # FeaturePipeline의 raw worker마다 별도 asyncio.run loop가 생긴다. asyncio.Lock은
+        # 첫 loop에 귀속되어 다른 worker에서 "bound to a different event loop"가 날 수
+        # 있으므로 프로세스 공용 rate limit은 threading.Lock으로 직렬화한다.
+        self._rate_lock = threading.Lock()
 
     async def query(self, params: dict, custom_col: list, user: str | None = None) -> pl.DataFrame:
         """결과는 항상 polars.DataFrame. pandas 반환한 real 어댑터도 내부에서 변환.
@@ -174,6 +78,18 @@ class LakeAPI:
 
         user 를 주면 그 계정으로 호출한다 (사내 getData 의 user_name).
         None 이면 settings.lake_api.user 기본값."""
+        # 모든 어댑터와 조회 경로가 동일한 사내 API 규약을 사용하게 한다.
+        # 구 코드의 ``table``은 받아주되 외부 함수에는 ``table_name``만 전달한다.
+        params = dict(params or {})
+        table_name = params.get("table_name") or params.pop("table", None)
+        if table_name:
+            params["table_name"] = table_name
+        if not str(params.get("table_name") or "").strip():
+            raise ValueError(
+                "table_name could not be resolved; set a source name/table or use the "
+                "RAW_{SOURCE}_DATA default"
+            )
+
         last_err: Exception | None = None
         for attempt in range(self.retry_attempts):
             try:
@@ -227,11 +143,14 @@ class LakeAPI:
         raise TypeError(f"unsupported df type: {type(df).__name__}")
 
     async def _wait_min_interval(self):
-        async with self._rate_lock:
+        await asyncio.to_thread(self._wait_min_interval_blocking)
+
+    def _wait_min_interval_blocking(self):
+        with self._rate_lock:
             now = time.monotonic()
             gap = now - self._last_call_time
             if gap < self.min_interval:
-                await asyncio.sleep(self.min_interval - gap)
+                time.sleep(self.min_interval - gap)
             self._last_call_time = time.monotonic()
 
     def _is_retryable(self, e: Exception) -> bool:
@@ -245,5 +164,5 @@ class LakeAPI:
         return False
 
     def reload(self, settings: dict):
-        """settings 가 웹에서 바뀐 뒤 호출. mode/module 전환 지원."""
+        """settings 가 웹에서 바뀐 뒤 실제 API 어댑터를 다시 로드."""
         self.__init__(settings)

@@ -9,6 +9,7 @@ S3 업로드 어댑터.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import shutil
 from pathlib import Path
 from typing import Any
@@ -24,9 +25,15 @@ class S3Uploader:
         self.fake_local = (s3.get("fake_local_path") or "").strip()
         self.access_key = s3.get("access_key") or None
         self.secret_key = s3.get("secret_key") or None
+        # enabled가 없는 구 설정은 기존처럼 연결 정보로 추론한다. 새 설정에서는
+        # enabled=false로 명시하면 boto 초기화와 모든 자동 전송을 건너뛴다.
+        inferred = bool(self.fake_local or self.endpoint_url or self.access_key or self.secret_key)
+        self.enabled = bool(s3.get("enabled", inferred))
 
         self._s3_client = None
         self.fake_error = ""
+        if not self.enabled:
+            return
         if self._is_fake():
             # 없는 드라이브·권한 없는 경로여도 기동은 막지 않는다 (설정 탭에서 고칠 수 있어야 함)
             try:
@@ -50,7 +57,11 @@ class S3Uploader:
             self._boto_error = str(e)
 
     def _is_fake(self) -> bool:
-        return bool(self.fake_local) and not self.endpoint_url
+        return self.enabled and bool(self.fake_local) and not self.endpoint_url
+
+    def is_configured(self) -> bool:
+        """명시적으로 활성화됐고 실제/로컬 전송 수단이 준비됐는지 반환."""
+        return bool(self.enabled and (self._is_fake() or self._s3_client is not None))
 
     def _full_key(self, key: str) -> str:
         key = key.lstrip("/")
@@ -59,6 +70,14 @@ class S3Uploader:
     def _fake_path(self, key: str) -> Path:
         root = Path(self.fake_local).resolve() / self.bucket / self._full_key(key)
         return root
+
+    @staticmethod
+    def file_sha256(path) -> str:
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for block in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(block)
+        return h.hexdigest()
 
     async def put_atomic(self, local_path: Path, key: str):
         full = self._full_key(key)
@@ -76,7 +95,8 @@ class S3Uploader:
 
         tmp_key = full + ".tmp"
         await asyncio.to_thread(
-            self._s3_client.upload_file, str(local_path), self.bucket, tmp_key
+            self._s3_client.upload_file, str(local_path), self.bucket, tmp_key,
+            ExtraArgs={"Metadata": {"sha256": self.file_sha256(local_path)}}
         )
         await asyncio.to_thread(
             self._s3_client.copy_object,
@@ -106,8 +126,9 @@ class S3Uploader:
         if self._s3_client is None:
             return []
         try:
-            resp = self._s3_client.list_objects_v2(Bucket=self.bucket, Prefix=full_prefix)
-            return [o["Key"] for o in resp.get("Contents", [])]
+            pages = self._s3_client.get_paginator("list_objects_v2").paginate(
+                Bucket=self.bucket, Prefix=full_prefix)
+            return [o["Key"] for page in pages for o in page.get("Contents", [])]
         except Exception:
             return []
 
@@ -160,15 +181,20 @@ class S3Uploader:
         if self._is_fake():
             dst = Path(self.fake_local).resolve() / self.bucket / full
             dst.parent.mkdir(parents=True, exist_ok=True)
+            tmp = dst.with_name(f".{dst.name}.upload.tmp")
             try:
-                shutil.copy2(p, dst)
+                shutil.copy2(p, tmp)
+                tmp.replace(dst)
                 return True
             except Exception:
+                tmp.unlink(missing_ok=True)
                 return False
         if self._s3_client is None:
             return False
         try:
-            self._s3_client.upload_file(str(p), self.bucket, full)
+            self._s3_client.upload_file(
+                str(p), self.bucket, full,
+                ExtraArgs={"Metadata": {"sha256": self.file_sha256(p)}})
             return True
         except Exception:
             return False
@@ -182,12 +208,13 @@ class S3Uploader:
             # exists() 만 보면 prefix 가 object 로 잡힌다 (sync 비교·단일키 판정이 깨짐)
             if not path.is_file():
                 return None
-            return {"size": path.stat().st_size}
+            return {"size": path.stat().st_size, "sha256": self.file_sha256(path)}
         if self._s3_client is None:
             return None
         try:
             resp = self._s3_client.head_object(Bucket=self.bucket, Key=full)
-            return {"size": int(resp.get("ContentLength") or 0)}
+            return {"size": int(resp.get("ContentLength") or 0),
+                    "sha256": str((resp.get("Metadata") or {}).get("sha256") or "")}
         except Exception:
             return None
 

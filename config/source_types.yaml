@@ -8,6 +8,14 @@
 #   · 가이드 문구(hint) 가 소스 카드 상단에 표시
 # Settings › Source types 탭에서도 웹으로 관리 가능 (저장 시 이 파일에 기록).
 #
+# 웹에서 저장하면 products.yaml 에도 전파된다 (이 파일을 손으로 고칠 때는 전파 없음):
+#   · name 변경   → 제품 sources[].name 도 함께 rename
+#   · table_template 변경 → 제품 sources[].table 갱신.
+#     단 제품에서 직접 다르게 적은 table 은 유지하고 화면에서 한 번 더 확인받는다.
+#   · default_shard 변경  → 제품 shard_hierarchy 가 '이전 기본값 그대로'일 때만 갱신
+#   · 소스를 지워도 그 소스를 쓰던 제품 설정은 지우지 않고 경고만 (이미 쌓인 파티션 때문)
+# ※ rename 해도 db/S3 에 이미 쌓인 옛 이름 파티션 폴더는 옮기지 않는다.
+#
 # 필드:
 #   name           소스명(대문자). 파티션 폴더/S3 prefix 에 그대로 쓰임.
 #   table_template 기본 테이블명 템플릿. {name} 은 실행 시 name 으로 치환.
@@ -35,3 +43,9 @@ source_types:
     default_shard: []
     accent: "#3b82f6"
     hint: "VM (virtual metrology) — `recipe_id`·`step_id` 로 필터, `residual`(pred-actual) 을 핵심 지표로."
+  - name: ET
+    table_template: "f_et_test"
+    columns: [root_lot_id, wafer_id, item_id, et_value, chip_x_pos, chip_y_pos, eqp_id, step_seq, tkout_time, process_id, line_id, product_code]
+    default_shard: [root_lot_id]
+    accent: "#f59e0b"
+    hint: "ET는 vehicle별 reformatter의 CATEGORY=REAL ITEMID만 저장한다."

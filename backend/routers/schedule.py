@@ -26,6 +26,14 @@ def _products_file() -> Path:
     return _root / "config" / "products.yaml"
 
 
+def _write_products() -> None:
+    _products_file().parent.mkdir(parents=True, exist_ok=True)
+    _products_file().write_text(
+        yaml.safe_dump(_products, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+
 @router.get("")
 def get_schedule():
     """rolling backfill 창 내의 모든 (제품·소스·날짜) 예정 목록.
@@ -73,10 +81,7 @@ def save_products(req: dict):
         raise HTTPException(400, "expected {products: [...]}")
     _products.clear()
     _products.update(req)
-    _products_file().write_text(
-        yaml.safe_dump(_products, allow_unicode=True, sort_keys=False),
-        encoding="utf-8",
-    )
+    _write_products()
     return {"ok": True, "count": len(_products.get("products") or [])}
 
 
@@ -117,6 +122,77 @@ def _source_types_by_name() -> dict[str, dict]:
     return {(s.get("name") or "").upper(): s for s in _load_source_types()}
 
 
+def _render_table(st: dict, name: str) -> str:
+    """table_template 의 {name} 토큰을 소스명으로 치환 — 제품 source.table 의 기본값."""
+    tpl = (st.get("table_template") or "").strip()
+    return tpl.replace("{name}", name) if tpl else ""
+
+
+def _apply_source_types_to_products(old_by_name: dict, items: list[dict],
+                                    force_table: bool = False) -> dict:
+    """source type 저장 내용을 products.yaml 의 같은 이름 소스에 전파.
+
+    - name 변경(prev_name) → 제품 소스명도 함께 rename
+    - table_template 변경 → 제품 source.table 갱신.
+      단 제품에서 손으로 바꾼 table(=이전 템플릿 결과와 다른 값)은 건드리지 않고
+      conflicts 로 보고한다. force_table=True 면 그것까지 덮어쓴다.
+    - default_shard 변경 → 제품 shard_hierarchy 가 '이전 기본값 그대로'인 경우에만 갱신
+    - 레지스트리에서 사라진 소스를 아직 쓰는 제품은 orphans 로 보고 (자동 삭제 안 함)
+
+    리턴: {"changes": [...], "conflicts": [...], "orphans": [...]}
+    """
+    changes: list[dict] = []
+    conflicts: list[dict] = []
+    products = _products.get("products") or []
+
+    live_names = set()
+    for it in items:
+        new_name = (it.get("name") or "").strip().upper()
+        prev = (it.get("prev_name") or "").strip().upper() or new_name
+        live_names.add(prev)
+        live_names.add(new_name)
+        old = old_by_name.get(prev) or old_by_name.get(new_name) or {}
+        old_table = _render_table(old, prev) if old else ""
+        new_table = _render_table(it, new_name)
+        old_shard = [c for c in (old.get("default_shard") or [])]
+        new_shard = [c for c in (it.get("default_shard") or [])]
+
+        for p in products:
+            for s in p.get("sources") or []:
+                if (s.get("name") or "").strip().upper() != prev:
+                    continue
+                who = {"product": p.get("product"), "source": new_name}
+                if new_name != prev:
+                    s["name"] = new_name
+                    changes.append({**who, "field": "name", "from": prev, "to": new_name})
+                if new_table:
+                    cur = (s.get("table") or "").strip()
+                    if cur == new_table:
+                        pass
+                    elif not cur or cur == old_table or force_table:
+                        s["table"] = new_table
+                        changes.append({**who, "field": "table", "from": cur, "to": new_table})
+                    else:
+                        conflicts.append({**who, "current": cur, "template": new_table})
+                if old and new_shard != old_shard:
+                    cur_shard = [c for c in (s.get("shard_hierarchy") or [])]
+                    if cur_shard == old_shard:
+                        s["shard_hierarchy"] = list(new_shard)
+                        changes.append({**who, "field": "shard_hierarchy",
+                                        "from": old_shard, "to": list(new_shard)})
+
+    orphans = []
+    for p in products:
+        for s in p.get("sources") or []:
+            nm = (s.get("name") or "").strip().upper()
+            if nm and nm not in live_names:
+                orphans.append({"product": p.get("product"), "source": nm})
+
+    if changes:
+        _write_products()
+    return {"changes": changes, "conflicts": conflicts, "orphans": orphans}
+
+
 @router.get("/source-types")
 def source_types():
     """등록된 source type 전체 — FE 가 boot 시 1회 받아 SOURCE_NAMES·SOURCE_HINTS 구성."""
@@ -125,7 +201,13 @@ def source_types():
 
 @router.post("/source-types")
 def save_source_types(req: dict):
-    """source_types 전체 replace — 웹 편집 저장. 저장 후 즉시 /columns 에도 반영."""
+    """source_types 전체 replace — 웹 편집 저장. 저장 후 즉시 /columns 에도 반영.
+
+    옵션:
+      apply_to_products (기본 True) — 저장 내용을 products.yaml 의 같은 소스에 전파
+                                      (rename · table · 손대지 않은 shard).
+      force_table       (기본 False) — 제품에서 손으로 바꾼 table 도 템플릿으로 덮어씀.
+    """
     if not isinstance(req, dict) or "source_types" not in req:
         raise HTTPException(400, "expected {source_types: [...]}")
     items = req["source_types"]
@@ -141,12 +223,21 @@ def save_source_types(req: dict):
             raise HTTPException(400, f"duplicate source type: {nm}")
         seen.add(nm)
         it["name"] = nm
+
+    old_by_name = _source_types_by_name()   # 파일 갱신 전 스냅샷 (rename·이전 템플릿 비교용)
+    applied = {"changes": [], "conflicts": [], "orphans": []}
+    if req.get("apply_to_products", True):
+        applied = _apply_source_types_to_products(
+            old_by_name, items, force_table=bool(req.get("force_table")))
+
+    # prev_name 은 전파용 힌트일 뿐 — yaml 에는 남기지 않는다.
+    items = [{k: v for k, v in it.items() if k != "prev_name"} for it in items]
     _source_types_file().parent.mkdir(parents=True, exist_ok=True)
     _source_types_file().write_text(
         yaml.safe_dump({"source_types": items}, allow_unicode=True, sort_keys=False),
         encoding="utf-8",
     )
-    return {"ok": True, "count": len(items)}
+    return {"ok": True, "count": len(items), "products": applied}
 
 
 @router.get("/columns")

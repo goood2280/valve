@@ -101,7 +101,8 @@ def test_upload_single_file_uses_key_as_is(env):
 # ── 다운로드 ─────────────────────────────────────────────
 def test_download_single_key_to_target(env):
     jobs, up, root = env["jobs"], env["up"], env["root"]
-    up.put_text("flow/artifacts/matching/Vehicle_matching.csv", "vehicle,step_id\nV,S\n")
+    up.put_text("flow/artifacts/matching/Vehicle_matching.csv",
+                "vehicle,step_id,step_desc\nV,S,FUNC\n")
     jobs.upsert({"id": "dl1", "direction": "download", "root": "config",
                  "target": "step_matching/vehicle_matching.csv",
                  "key": "flow/artifacts/matching/Vehicle_matching.csv"})
@@ -139,7 +140,55 @@ def test_download_fires_hook_with_written_paths(env):
     jobs.upsert({"id": "dl4", "direction": "download", "root": "config",
                  "target": "feature_rules/fab.csv", "key": "flow/artifacts/matching/fab.csv"})
     _run_sync(jobs, "dl4")
+    # 실제 worker는 같은 poll의 여러 파일을 모은 뒤 queue 경계에서 한 번 호출한다.
+    jobs.on_downloaded(list(jobs._download_touched))
+    jobs._download_touched.clear()
     assert seen and seen[0].endswith("fab.csv")
+
+
+def test_invalid_matching_download_preserves_last_good_file(env):
+    jobs, up, root = env["jobs"], env["up"], env["root"]
+    dst = root / "config" / "step_matching" / "vehicle_matching.csv"
+    dst.parent.mkdir(parents=True)
+    dst.write_text("vehicle,step_id,step_desc\nV,S,GOOD\n", encoding="utf-8")
+    up.put_text("flow/artifacts/matching/Vehicle_matching.csv", "vehicle,bad\nV,X\n")
+    jobs.upsert({"id": "bad_schema", "direction": "download", "root": "config",
+                 "target": "step_matching/vehicle_matching.csv",
+                 "key": "flow/artifacts/matching/Vehicle_matching.csv", "mode": "cp"})
+
+    with pytest.raises(ValueError, match="필수 컬럼 누락"):
+        _run_sync(jobs, "bad_schema")
+    assert dst.read_text(encoding="utf-8").endswith("V,S,GOOD\n")
+
+
+def test_binary_sync_detects_same_size_content_change(env):
+    jobs, up, root = env["jobs"], env["up"], env["root"]
+    local = root / "config" / "table.parquet"
+    local.write_bytes(b"AAAA")
+    jobs.upsert({"id": "bin", "direction": "upload", "root": "config",
+                 "target": "table.parquet", "key": "ml/table.parquet", "mode": "sync"})
+    _run_sync(jobs, "bin")
+    local.write_bytes(b"BBBB")                 # 크기는 같고 내용만 변경
+    _run_sync(jobs, "bin")
+    remote = Path(up.fake_local) / up.bucket / "ml" / "table.parquet"
+    assert remote.read_bytes() == b"BBBB"
+    assert jobs.status_all()["bin"]["moved"] == 1
+
+
+def test_ml_table_items_are_seeded_per_product(tmp_path):
+    root = tmp_path / "valve"
+    db = tmp_path / "db"
+    (root / "config").mkdir(parents=True)
+    db.mkdir()
+    up = S3Uploader({"s3": {"bucket": "b", "fake_local_path": str(tmp_path / "s3")}})
+    jobs = S3Jobs(root=root, uploader_for=lambda _d: up, roots={"db": db})
+
+    assert jobs.ensure_ml_table_items(["PRODA", "PRODB", "PRODA"]) == 2
+    assert jobs.ensure_ml_table_items(["PRODA", "PRODB"]) == 0
+    items = {i["id"]: i for i in jobs.items()}
+    assert items["up_ml_table_PRODA"]["target"] == "ML_TABLE_PRODA.parquet"
+    assert items["up_ml_table_PRODA"]["key"] == \
+        "flow/artifacts/ml-tables/ML_TABLE_PRODA.parquet"
 
 
 # ── 중지 ─────────────────────────────────────────────────
@@ -227,6 +276,20 @@ def test_history_records_each_run(env):
     hist = jobs.history("h1")
     assert len(hist) == 2 and all(h["status"] == "ok" for h in hist)
     assert all("duration_sec" in h for h in hist)
+
+
+def test_disabled_destination_is_not_scheduled_or_queued(tmp_path):
+    root = tmp_path / "valve"
+    (root / "config").mkdir(parents=True)
+    up = S3Uploader({"s3": {"enabled": False, "fake_local_path": str(tmp_path / "s3")}})
+    jobs = S3Jobs(root=root, uploader_for=lambda _d: up,
+                  roots={"config": root / "config"})
+    jobs.upsert({"id": "off", "direction": "upload", "root": "config", "target": "",
+                 "key": "disabled", "interval_min": 1, "enabled": True})
+    item = jobs.list_with_status()["items"][0]
+    assert item["s3_configured"] is False
+    assert item["scheduled"] is False
+    assert jobs.run("off") == {"ok": True, "skipped": "s3_disabled"}
 
 
 def test_browse_keys_lists_folders_and_files(env):

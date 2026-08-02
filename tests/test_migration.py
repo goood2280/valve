@@ -34,7 +34,7 @@ def test_migration_converts_old_params_template(tmp_path):
     (tmp_path / "config" / "products.yaml").write_text(
         yaml.safe_dump(old_products, allow_unicode=True, sort_keys=False), encoding="utf-8")
     (tmp_path / "config" / "settings.json").write_text(json.dumps({
-        "lake_api": {"mode": "mock", "module": "", "user": "t", "api_key": "",
+        "lake_api": {"module": "backend.core.real_lake_adapter:query", "user": "t", "api_key": "",
                      "timeout_sec": 10, "min_interval_sec": 0, "max_concurrent": 1,
                      "retry": {"attempts": 1, "backoff_sec": [0]},
                      "retryable_errors": []},

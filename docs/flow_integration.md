@@ -1,5 +1,13 @@
 # Valve ↔ flow 연결성 평가 (2026-04-24)
 
+> **2026-08-01 ML_TABLE 전달 계약:** Valve의 내부 vehicle 산출물은
+> `{db_root}/4.WIDE_FORM/ML_TABLE_{vehicle}.parquet`에 유지한다. Flow가 소비하는
+> canonical 산출물은 `{db_root}/ML_TABLE_{product}.parquet`이며, 성공한 전체
+> 파이프라인 회차에서만 원자적으로 교체한다. S3 key는
+> `flow/artifacts/ml-tables/ML_TABLE_{product}.parquet`이고 Flow s3_ingest의
+> `root_parquet` 항목으로 DB root 직하에 내려받는다. raw 일부 실패 회차는 이전
+> canonical 파일을 보존한다.
+
 **결론: 90% 는 그대로 맞물림. 남은 10%는 1줄 설정 또는 prefix 하나로 정렬 가능.**
 
 ## 1. 데이터 경로 비교

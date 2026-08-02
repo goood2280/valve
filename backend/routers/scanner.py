@@ -28,12 +28,10 @@ scanner: FabScanner | None = None
 def deps(root, settings, s3_uploader, pipe: FeaturePipeline, lake_api=None):
     """Initialize scanner.
 
-    Default: LocalFabDbClient -- scans local parquet DB from pipeline.
-    Lake used only when lake_api.mode != "mock" and lake_api is provided.
+    The application is real-API-only, so use the Lake client whenever it is provided.
     """
     global scanner
-    mode = (settings.get("lake_api") or {}).get("mode", "mock")
-    if mode != "mock" and lake_api is not None:
+    if lake_api is not None:
         db_client = LakeFabDbClient(lake_api, pipe)
     else:
         db_client = LocalFabDbClient(pipe)

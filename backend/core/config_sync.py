@@ -120,6 +120,8 @@ class ConfigSync:
 
     def _fetch_s3(self, name: str) -> Optional[str]:
         """S3 에서 config 파일 텍스트를 가져옴. 실패 시 None."""
+        if hasattr(self.s3, "is_configured") and not self.s3.is_configured():
+            return None
         key = self._key(name)
         try:
             return self.s3.get_text(key) if hasattr(self.s3, "get_text") else None

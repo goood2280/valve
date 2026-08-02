@@ -1,0 +1,1790 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>Valve v0.3.9 — 기능 리포트</title>
+<style>
+  @page { size: A4; margin: 13mm 12mm 14mm 12mm; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  :root{
+    --orange:#FF5E00; --slate:#1e293b; --accent:#f97316;
+    --ink:#171717; --sec:#525252; --mute:#8a8a8a;
+    --line:#e5e5e5; --line2:#d4d4d4;
+    --ok:#16a34a; --warn:#f59e0b; --err:#ef4444; --info:#2563eb;
+    --wash:#fff7f0; --wash2:#f8fafc;
+  }
+  html{ -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+  body{
+    font-family:'Malgun Gothic','맑은 고딕','Apple SD Gothic Neo',system-ui,sans-serif;
+    color:var(--ink); font-size:9.7pt; line-height:1.62; letter-spacing:-0.1px;
+  }
+  code,.mono{ font-family:Consolas,'D2Coding',monospace; font-size:8.6pt; }
+  code{ background:#f4f4f5; border:1px solid #e7e7ea; border-radius:3px; padding:0 3px; color:#334155; }
+
+  /* ── cover ── */
+  .cover{ height:264mm; display:flex; flex-direction:column; justify-content:space-between; }
+  .cover-top{ padding-top:26mm; }
+  .cover .kicker{ font-size:10pt; color:var(--orange); font-weight:700; letter-spacing:2px; }
+  .cover h1{ font-size:46pt; line-height:1.05; margin:6mm 0 2mm; color:var(--slate); letter-spacing:-2px; }
+  .cover h1 .dot{ color:var(--orange); }
+  .cover .sub{ font-size:13pt; color:var(--sec); margin-bottom:8mm; }
+  .cover .tag{ font-size:9.5pt; color:var(--mute); }
+  .cover-meta{ display:flex; gap:0; border-top:2px solid var(--orange); padding-top:4mm; }
+  .cover-meta div{ flex:1; }
+  .cover-meta .k{ font-size:8pt; color:var(--mute); }
+  .cover-meta .v{ font-size:12pt; font-weight:700; color:var(--slate); }
+
+  /* ── section ── */
+  .sec{ break-before:page; }
+  .sec-h{ display:flex; align-items:baseline; gap:8px; border-bottom:2px solid var(--orange);
+          padding-bottom:2mm; margin-bottom:4mm; }
+  .sec-n{ font-size:20pt; font-weight:800; color:var(--orange); line-height:1; }
+  .sec-t{ font-size:15pt; font-weight:800; color:var(--slate); }
+  .sec-s{ font-size:8.6pt; color:var(--mute); margin-left:auto; text-align:right; }
+  h3{ font-size:11pt; color:var(--slate); margin:5mm 0 2mm; padding-left:6px;
+      border-left:3px solid var(--orange); break-after:avoid; }
+  h4{ font-size:9.6pt; color:var(--slate); margin:3.5mm 0 1.5mm; }
+  p{ margin:1.6mm 0; }
+  ul{ margin:1.5mm 0 1.5mm 4.5mm; } li{ margin:0.9mm 0; }
+  .lead{ color:var(--sec); font-size:10pt; background:var(--wash); border-left:3px solid var(--orange);
+         padding:2.5mm 3mm; margin-bottom:3mm; }
+  .note{ background:var(--wash2); border:1px solid var(--line); border-radius:5px;
+         padding:2.5mm 3mm; margin:2.5mm 0; font-size:9.2pt; }
+  .warnbox{ background:#fffbeb; border:1px solid #fde68a; border-left:3px solid var(--warn);
+            border-radius:5px; padding:2.5mm 3mm; margin:2.5mm 0; font-size:9.2pt; }
+  .okbox{ background:#f0fdf4; border:1px solid #bbf7d0; border-left:3px solid var(--ok);
+          border-radius:5px; padding:2.5mm 3mm; margin:2.5mm 0; font-size:9.2pt; }
+  .errbox{ background:#fef2f2; border:1px solid #fecaca; border-left:3px solid var(--err);
+           border-radius:5px; padding:2.5mm 3mm; margin:2.5mm 0; font-size:9.2pt; }
+  b.hl{ color:var(--orange); }
+  .src{ font-size:8.2pt; color:var(--mute); font-family:Consolas,monospace; }
+
+  table{ width:100%; border-collapse:collapse; margin:2.5mm 0; font-size:8.8pt; break-inside:avoid; }
+  th{ background:var(--orange); color:#fff; text-align:left; padding:1.6mm 2mm; font-weight:700; }
+  td{ border-bottom:1px solid var(--line); padding:1.5mm 2mm; vertical-align:top; }
+  tr:nth-child(even) td{ background:#fafafa; }
+  td.k{ font-family:Consolas,monospace; font-size:8.2pt; color:#334155; white-space:nowrap; }
+  .tbl-tight td, .tbl-tight th{ padding:1.2mm 1.6mm; font-size:8.4pt; }
+
+  figure{ margin:3mm 0; break-inside:avoid; }
+  figure svg{ width:100%; height:auto; display:block; }
+  figcaption{ font-size:8.2pt; color:var(--mute); margin-top:1.2mm; text-align:center; }
+
+  /* svg shared */
+  .bx{ fill:#fff; stroke:#cbd5e1; stroke-width:1.2; }
+  .bx-o{ fill:#fff7f0; stroke:var(--orange); stroke-width:1.4; }
+  .bx-s{ fill:#f1f5f9; stroke:#94a3b8; stroke-width:1.2; }
+  .bx-g{ fill:#f0fdf4; stroke:#86efac; stroke-width:1.2; }
+  .bx-y{ fill:#fffbeb; stroke:#fcd34d; stroke-width:1.2; }
+  .bx-r{ fill:#fef2f2; stroke:#fca5a5; stroke-width:1.2; }
+  .bx-d{ fill:#0f172a; stroke:#0f172a; }
+  .t{ font-family:'Malgun Gothic',sans-serif; font-size:9px; fill:#171717; }
+  .t-b{ font-family:'Malgun Gothic',sans-serif; font-size:9.5px; font-weight:700; fill:#1e293b; }
+  .t-s{ font-family:'Malgun Gothic',sans-serif; font-size:7.6px; fill:#64748b; }
+  .t-o{ font-family:'Malgun Gothic',sans-serif; font-size:9.5px; font-weight:700; fill:#FF5E00; }
+  .t-w{ font-family:'Malgun Gothic',sans-serif; font-size:9px; font-weight:700; fill:#fff; }
+  .t-m{ font-family:Consolas,monospace; font-size:7.6px; fill:#475569; }
+  .ln{ stroke:#94a3b8; stroke-width:1.2; fill:none; }
+  .ln-o{ stroke:var(--orange); stroke-width:1.6; fill:none; }
+  .ln-d{ stroke:#94a3b8; stroke-width:1.1; fill:none; stroke-dasharray:3 2.5; }
+  .ln-r{ stroke:#ef4444; stroke-width:1.3; fill:none; stroke-dasharray:3 2.5; }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <marker id="ar" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 z" fill="#94a3b8"/></marker>
+    <marker id="aro" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 z" fill="#FF5E00"/></marker>
+    <marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 z" fill="#ef4444"/></marker>
+  </defs>
+</svg>
+
+<!-- ═══════════ COVER ═══════════ -->
+<div class="cover">
+  <div class="cover-top">
+    <div class="kicker">FEATURE REPORT · 기능 리포트</div>
+    <h1>valve<span class="dot">.</span></h1>
+    <div class="sub">DataLake 의 수도꼭지 — 사내 API 에서 데이터를 뽑아<br>parquet 으로 정리하고 S3 로 흘려 <b>flow</b> 에 공급한다.</div>
+    <div class="tag">turn the valve · feed the flow</div>
+
+    <figure style="margin-top:10mm">
+      <svg viewBox="0 0 640 210">
+        <!-- DataLake -->
+        <rect class="bx-s" x="8" y="70" width="96" height="52" rx="5"/>
+        <text class="t-b" x="56" y="92" text-anchor="middle">사내 DataLake</text>
+        <text class="t-s" x="56" y="106" text-anchor="middle">query(params,col,user)</text>
+        <!-- valve -->
+        <rect class="bx-d" x="150" y="26" width="184" height="146" rx="7"/>
+        <text class="t-w" x="242" y="48" text-anchor="middle" style="font-size:13px">valve</text>
+        <text x="242" y="66" text-anchor="middle" style="font-size:7.6px;fill:#fdba74">6 탭 운영 대시보드</text>
+        <rect x="164" y="76" width="156" height="20" rx="3" fill="#1e293b" stroke="#334155"/>
+        <text x="242" y="90" text-anchor="middle" style="font-size:8px;fill:#e2e8f0">probe → chunk plan → execute ×3</text>
+        <rect x="164" y="100" width="156" height="20" rx="3" fill="#1e293b" stroke="#334155"/>
+        <text x="242" y="114" text-anchor="middle" style="font-size:8px;fill:#e2e8f0">raw → event → feature → wide → send</text>
+        <rect x="164" y="124" width="156" height="20" rx="3" fill="#1e293b" stroke="#334155"/>
+        <text x="242" y="138" text-anchor="middle" style="font-size:8px;fill:#e2e8f0">스케줄 · 락/큐 · 재시도 · 알람</text>
+        <rect x="164" y="148" width="156" height="16" rx="3" fill="#7c2d12" stroke="#9a3412"/>
+        <text x="242" y="159.5" text-anchor="middle" style="font-size:7.6px;fill:#fed7aa">v0.3.9 · 187 tests · Python 3.10+</text>
+        <!-- S3 -->
+        <rect class="bx-o" x="380" y="70" width="96" height="52" rx="5"/>
+        <text class="t-o" x="428" y="92" text-anchor="middle">S3 bucket</text>
+        <text class="t-s" x="428" y="106" text-anchor="middle">hive date=YYYY-MM-DD</text>
+        <!-- flow -->
+        <rect class="bx-s" x="530" y="70" width="100" height="52" rx="5"/>
+        <text class="t-b" x="580" y="92" text-anchor="middle">flow</text>
+        <text class="t-s" x="580" y="106" text-anchor="middle">대시보드 · 판정 · 룰북</text>
+        <!-- arrows -->
+        <path class="ln-o" d="M104 96 L146 96" marker-end="url(#aro)"/>
+        <path class="ln-o" d="M336 96 L376 96" marker-end="url(#aro)"/>
+        <path class="ln-o" d="M478 96 L526 96" marker-end="url(#aro)"/>
+        <path class="ln-d" d="M580 122 L580 186 L428 186 L428 126" marker-end="url(#ar)"/>
+        <text class="t-s" x="504" y="198" text-anchor="middle">룰북 csv · scan_ignore · ack.json (flow → S3 → Valve)</text>
+        <text class="t-s" x="242" y="196" text-anchor="middle">알람 outbox · 매칭알람 json</text>
+        <path class="ln-d" d="M334 160 L360 160 L360 126" marker-end="url(#ar)"/>
+      </svg>
+    </figure>
+  </div>
+
+  <div class="cover-meta">
+    <div><div class="k">버전</div><div class="v">v0.3.9</div></div>
+    <div><div class="k">작성일</div><div class="v">2026-07-29</div></div>
+    <div><div class="k">기준 커밋</div><div class="v mono" style="font-size:10pt">e3f9e8f</div></div>
+    <div><div class="k">검증</div><div class="v">pytest 187</div></div>
+    <div><div class="k">모드</div><div class="v">mock (기본)</div></div>
+  </div>
+</div>
+
+<!-- ═══════════ 00 · 문서 안내 ═══════════ -->
+<section class="sec">
+  <div class="sec-h"><span class="sec-n">00</span><span class="sec-t">이 문서를 읽는 법</span>
+    <span class="sec-s">범위 · 구성 · 표기</span></div>
+
+  <div class="lead">
+    이 리포트는 <b>2026-07-29 시점의 Valve 소스(v0.3.9, e3f9e8f)를 그대로 읽어</b> 기능 단위로 정리한 것이다.
+    각 기능마다 <b>① 인포그래픽 ② 동작 설명 ③ 폴백·예외 처리</b>를 함께 싣는다.
+    폴백을 강조하는 이유는 단순하다 — Valve 가 다루는 실패는 대부분 <b class="hl">터지는 실패가 아니라
+    조용히 틀린 데이터가 나가는 실패</b>이고, 그걸 막는 장치들이 이 시스템의 실질적인 본체이기 때문이다.
+  </div>
+
+  <h3>구성</h3>
+  <table class="tbl-tight">
+    <tr><th style="width:16mm">장</th><th>내용</th><th style="width:46mm">핵심 폴백 키워드</th></tr>
+    <tr><td class="k">01</td><td>시스템 전경 — 2개의 수집 경로, 5단계 파이프라인, 6탭, 산출물 트리</td><td>—</td></tr>
+    <tr><td class="k">02–04</td><td><b>수집 계층</b> — Lake API 어댑터 · Probe-First 계획 · Chunk 실행/업로드</td><td>재시도·타임아웃·완전성 보류</td></tr>
+    <tr><td class="k">05–09</td><td><b>파이프라인</b> — raw · event · feature · wide/send</td><td>파티션 기준 열·신선도·knob skip 보류</td></tr>
+    <tr><td class="k">10–14</td><td><b>운영 계층</b> — 스케줄/금지시간대 · 실행 락/큐/취소 · 재시도 큐 · 워커 산정 · 로그/용량</td><td>안전 지점 취소·blocked·캐시</td></tr>
+    <tr><td class="k">15–19</td><td><b>연동 계층</b> — 매칭알람 순환 · match_hint · S3 전송 엔진 · 설정 소유권 · FAB 스캐너</td><td>지문 발행·양방향 파일·seed-only</td></tr>
+    <tr><td class="k">20–22</td><td>배포·기동 안전장치 · <b>폴백 총정리표</b> · 알려진 한계와 다음 단계</td><td>스냅샷 복원·버전 가드</td></tr>
+  </table>
+
+  <h3>표기</h3>
+  <ul>
+    <li><code>파일:심볼</code> 형태의 회색 글씨는 그 설명의 <b>구현 위치</b>다. 문서와 코드가 어긋나면 코드가 맞다.</li>
+    <li><b class="hl">주황 강조</b>는 "이걸 모르면 반드시 한 번은 물리는" 함정이다.</li>
+    <li>노란 박스 = 주의 / 초록 박스 = 보증되는 성질 / 빨강 박스 = 현재 한계.</li>
+  </ul>
+
+  <div class="warnbox">
+    <b>먼저 알아야 할 한 가지.</b> Valve 에는 사내 API 로 나가는 경로가 <b>두 개</b> 있다.
+    ① 모니터 탭의 <b>제품 백필</b>(probe → chunk → S3 직접 업로드)은 실 어댑터(<code>lake_api</code>)를 탄다.
+    ② 알람/제품 탭이 돌리는 <b>파이프라인</b>(raw→event→feature→wide→send)의 raw 단계는
+    <b class="hl">현재 결정적 mock 합성 데이터로 동작</b>하며, 실 어댑터 연결이 다음 마일스톤이다
+    (<span class="src">VERSION.json · "다음 — 실사내 API 연결"</span>). 22장에 상세히 적었다.
+  </div>
+</section>
+
+<!-- ═══════════ 01 · 시스템 전경 ═══════════ -->
+<section class="sec">
+  <div class="sec-h"><span class="sec-n">01</span><span class="sec-t">시스템 전경</span>
+    <span class="sec-s">app.py · 6탭 · db/ 트리</span></div>
+
+  <figure>
+    <svg viewBox="0 0 640 330">
+      <!-- lane labels -->
+      <text class="t-o" x="6" y="20">수집 계층</text>
+      <rect class="bx" x="6" y="26" width="628" height="72" rx="5"/>
+      <rect class="bx-o" x="18" y="38" width="122" height="48" rx="4"/>
+      <text class="t-b" x="79" y="56" text-anchor="middle">lake_api</text>
+      <text class="t-s" x="79" y="70" text-anchor="middle">mock / real 어댑터</text>
+      <text class="t-s" x="79" y="80" text-anchor="middle">rate·timeout·retry</text>
+      <rect class="bx-o" x="152" y="38" width="122" height="48" rx="4"/>
+      <text class="t-b" x="213" y="56" text-anchor="middle">planner</text>
+      <text class="t-s" x="213" y="70" text-anchor="middle">probe → chunk plan</text>
+      <text class="t-s" x="213" y="80" text-anchor="middle">7일 캐시</text>
+      <rect class="bx-o" x="286" y="38" width="122" height="48" rx="4"/>
+      <text class="t-b" x="347" y="56" text-anchor="middle">executor</text>
+      <text class="t-s" x="347" y="70" text-anchor="middle">동시 3 · 머지</text>
+      <text class="t-s" x="347" y="80" text-anchor="middle">완전성 검사</text>
+      <rect class="bx-o" x="420" y="38" width="122" height="48" rx="4"/>
+      <text class="t-b" x="481" y="56" text-anchor="middle">s3_up / s3_queue</text>
+      <text class="t-s" x="481" y="70" text-anchor="middle">atomic put</text>
+      <text class="t-s" x="481" y="80" text-anchor="middle">지연 업로드 큐</text>
+      <rect class="bx-s" x="554" y="38" width="68" height="48" rx="4"/>
+      <text class="t-s" x="588" y="58" text-anchor="middle">state.py</text>
+      <text class="t-s" x="588" y="70" text-anchor="middle">SSE ·</text>
+      <text class="t-s" x="588" y="80" text-anchor="middle">crash recovery</text>
+
+      <!-- pipeline lane -->
+      <text class="t-o" x="6" y="120">파이프라인</text>
+      <rect class="bx" x="6" y="126" width="628" height="66" rx="5"/>
+      <g>
+        <rect class="bx-g" x="18" y="140" width="106" height="40" rx="4"/>
+        <text class="t-b" x="71" y="157" text-anchor="middle">1 raw</text>
+        <text class="t-s" x="71" y="170" text-anchor="middle">FAB·INLINE·VM·ET</text>
+        <path class="ln-o" d="M126 160 L140 160" marker-end="url(#aro)"/>
+        <rect class="bx-g" x="142" y="140" width="106" height="40" rx="4"/>
+        <text class="t-b" x="195" y="157" text-anchor="middle">2 event</text>
+        <text class="t-s" x="195" y="170" text-anchor="middle">매칭 필터</text>
+        <path class="ln-o" d="M250 160 L264 160" marker-end="url(#aro)"/>
+        <rect class="bx-g" x="266" y="140" width="106" height="40" rx="4"/>
+        <text class="t-b" x="319" y="157" text-anchor="middle">3 feature</text>
+        <text class="t-s" x="319" y="170" text-anchor="middle">5 카테고리 룰북</text>
+        <path class="ln-o" d="M374 160 L388 160" marker-end="url(#aro)"/>
+        <rect class="bx-g" x="390" y="140" width="106" height="40" rx="4"/>
+        <text class="t-b" x="443" y="157" text-anchor="middle">4 wide</text>
+        <text class="t-s" x="443" y="170" text-anchor="middle">ML_TABLE</text>
+        <path class="ln-o" d="M498 160 L512 160" marker-end="url(#aro)"/>
+        <rect class="bx-g" x="514" y="140" width="108" height="40" rx="4"/>
+        <text class="t-b" x="568" y="157" text-anchor="middle">5 send</text>
+        <text class="t-s" x="568" y="170" text-anchor="middle">KNOB/FAB/VM/INLINE</text>
+      </g>
+
+      <!-- ops lane -->
+      <text class="t-o" x="6" y="214">운영 · 연동</text>
+      <rect class="bx" x="6" y="220" width="628" height="100" rx="5"/>
+      <rect class="bx-y" x="18" y="232" width="146" height="34" rx="4"/>
+      <text class="t-b" x="91" y="246" text-anchor="middle">pipeline_runner</text>
+      <text class="t-s" x="91" y="258" text-anchor="middle">스케줄 · 실행 락 · 작업 큐 · 취소</text>
+      <rect class="bx-y" x="176" y="232" width="146" height="34" rx="4"/>
+      <text class="t-b" x="249" y="246" text-anchor="middle">pipeline_retry</text>
+      <text class="t-s" x="249" y="258" text-anchor="middle">영구 재시도 큐 · blocked</text>
+      <rect class="bx-y" x="334" y="232" width="146" height="34" rx="4"/>
+      <text class="t-b" x="407" y="246" text-anchor="middle">alert_store</text>
+      <text class="t-s" x="407" y="258" text-anchor="middle">알람 발행 · ack 순환 · outbox</text>
+      <rect class="bx-y" x="492" y="232" width="130" height="34" rx="4"/>
+      <text class="t-b" x="557" y="246" text-anchor="middle">s3_jobs</text>
+      <text class="t-s" x="557" y="258" text-anchor="middle">전송 항목 엔진(⚙)</text>
+
+      <rect class="bx-s" x="18" y="276" width="146" height="32" rx="4"/>
+      <text class="t-s" x="91" y="290" text-anchor="middle">run_log · runtime_env</text>
+      <text class="t-s" x="91" y="301" text-anchor="middle">실행 이력 · 워커 산정</text>
+      <rect class="bx-s" x="176" y="276" width="146" height="32" rx="4"/>
+      <text class="t-s" x="249" y="290" text-anchor="middle">fab_scanner</text>
+      <text class="t-s" x="249" y="301" text-anchor="middle">미매칭 step · 미등록 ppid</text>
+      <rect class="bx-s" x="334" y="276" width="146" height="32" rx="4"/>
+      <text class="t-s" x="407" y="290" text-anchor="middle">csv_sync · config_sync</text>
+      <text class="t-s" x="407" y="301" text-anchor="middle">룰북/설정 S3 동기화</text>
+      <rect class="bx-s" x="492" y="276" width="130" height="32" rx="4"/>
+      <text class="t-s" x="557" y="290" text-anchor="middle">s3_link · browser</text>
+      <text class="t-s" x="557" y="301" text-anchor="middle">탐색기 신호등</text>
+    </svg>
+    <figcaption>모듈 지도 — 수집 계층(위)과 파이프라인(가운데)은 서로 다른 진입점이며, 운영·연동 계층(아래)이 둘을 감싼다</figcaption>
+  </figure>
+
+  <h3>화면 6탭</h3>
+  <table class="tbl-tight">
+    <tr><th style="width:20mm">탭</th><th>주 기능</th><th style="width:52mm">이 리포트의 해당 장</th></tr>
+    <tr><td>📊 모니터</td><td>DB heatmap(제품×소스×날짜) · 진행 중 카드 · 실패 카드 · <b>⚙ 실행 관리</b>(전역 주기·금지 시간대·루프·제품별 주기)</td><td>05 · 10 · 14</td></tr>
+    <tr><td>📦 제품</td><td>제품(vehicle) 정의 · 소스 테이블/컬럼 · params 템플릿 · 백필 enqueue</td><td>03 · 04</td></tr>
+    <tr><td>📜 로그</td><td>plan/chunk/partition 이벤트 · severity pill(info/warning/critical) 필터</td><td>04 · 14</td></tr>
+    <tr><td>⚙️ 설정</td><td><code>lake_api</code>(mode·module·user) · s3 · schedule · probe · alerts · Source types</td><td>02 · 20</td></tr>
+    <tr><td>📂 탐색기</td><td>config/db/staging/outbox 파일 열람 · <b>S3 전송 항목 ⚙</b> · 방향 신호등 · parquet SQL 조회</td><td>17 · 18</td></tr>
+    <tr><td>🚨 알람</td><td><b>작업 큐</b> · 파이프라인 현황 · 실행 로그 · 매칭알람/RO ppid · 재시도 큐 · S3 업로드 폴더 · ⚙ 알람 설정 3종</td><td>11 · 12 · 15 · 16</td></tr>
+  </table>
+
+  <h3>산출물 트리</h3>
+  <table class="tbl-tight">
+    <tr><th style="width:62mm">경로</th><th>내용</th></tr>
+    <tr><td class="k">db/1.RAWDATA_DB/{SOURCE}/{vehicle}/date=…/data.parquet</td><td>소스 원본 — 파티션 키는 <b>데이터의 시간 컬럼 날짜</b></td></tr>
+    <tr><td class="k">db/2.EVENT_DB/{vehicle}/{SOURCE}/date=…/data.parquet</td><td>매칭 필터 통과분 (+ <code>_meta.json</code> = 적용된 매칭 버전)</td></tr>
+    <tr><td class="k">db/3.FEATURE_STORE/{vehicle}/{FEATURE}.parquet</td><td>feature 별 파일 (+ <code>_meta.json</code> = 커버 구간)</td></tr>
+    <tr><td class="k">db/4.WIDE_FORM/ML_TABLE_{vehicle}.parquet</td><td>제품 1개의 전체 feature 병합</td></tr>
+    <tr><td class="k">db/5.SEND_FORM/{0.KNOB,1.FAB,2.VM,3.INLINE}/</td><td>전 제품 병합 후 prefix 그룹 분리 (csv + parquet)</td></tr>
+    <tr><td class="k">db/REPORTS/{vehicle}/</td><td>knob_miss · knob_skip · unmatched · scan_result · alerts_published</td></tr>
+    <tr><td class="k">s3_outbox/valve-alerts/pipeline/{vehicle}.json</td><td>flow 매칭알람이 읽는 지점의 로컬 미러 (sync 대상)</td></tr>
+    <tr><td class="k">staging/{product}/{SOURCE}/date=…/</td><td>백필 경로의 chunk parquet · <code>_merged.parquet</code></td></tr>
+    <tr><td class="k">logs/</td><td>pipeline_runs · jobs · pipeline_retries · s3_jobs_status/history · alerts_ack · agent_audit</td></tr>
+  </table>
+  <p class="src">app.py · feature_pipeline.db_root() · pipeline.yaml db_root (절대경로 · VALVE_DB_ROOT 우선)</p>
+</section>
+
+<!-- ═══════════ 02 · Lake API ═══════════ -->
+<section class="sec">
+  <div class="sec-h"><span class="sec-n">02</span><span class="sec-t">Lake API 어댑터</span>
+    <span class="sec-s">backend/core/lake_api.py</span></div>
+
+  <div class="lead">사내 DataLake 의 <code>query(params, custom_col, user)</code> 하나를 감싸는 얇은 어댑터.
+    <b>인증 정보는 <code>user_name</code> 하나뿐</b>이며(키·토큰 없음), 그 위에 rate limit · timeout · 재시도 ·
+    타입 정규화 4가지 보증을 얹는다.</div>
+
+  <figure>
+    <svg viewBox="0 0 640 232">
+      <rect class="bx-o" x="12" y="16" width="120" height="44" rx="4"/>
+      <text class="t-b" x="72" y="34" text-anchor="middle">호출부</text>
+      <text class="t-s" x="72" y="48" text-anchor="middle">executor · fab_scanner</text>
+
+      <path class="ln-o" d="M134 38 L172 38" marker-end="url(#aro)"/>
+
+      <rect class="bx" x="174" y="6" width="290" height="180" rx="6"/>
+      <text class="t-o" x="184" y="22">LakeAPI.query()</text>
+
+      <rect class="bx-s" x="186" y="30" width="266" height="26" rx="3"/>
+      <text class="t-b" x="196" y="47">① rate limit</text>
+      <text class="t-m" x="300" y="47">min_interval_sec · 전역 asyncio.Lock</text>
+
+      <rect class="bx-s" x="186" y="62" width="266" height="26" rx="3"/>
+      <text class="t-b" x="196" y="79">② timeout</text>
+      <text class="t-m" x="300" y="79">asyncio.wait_for(290s) — 5분 제한 안쪽</text>
+
+      <rect class="bx-s" x="186" y="94" width="266" height="26" rx="3"/>
+      <text class="t-b" x="196" y="111">③ retry</text>
+      <text class="t-m" x="300" y="111">3회 · backoff 10s → 30s → 120s</text>
+
+      <rect class="bx-s" x="186" y="126" width="266" height="26" rx="3"/>
+      <text class="t-b" x="196" y="143">④ 정규화</text>
+      <text class="t-m" x="300" y="143">pandas/None/[] → polars.DataFrame</text>
+
+      <rect class="bx-y" x="186" y="158" width="266" height="20" rx="3"/>
+      <text class="t-s" x="196" y="172">재시도 대상: HY000 · ConnectionError · TimeoutError · Timeout · 5xx</text>
+
+      <path class="ln-o" d="M466 96 L504 96" marker-end="url(#aro)"/>
+      <rect class="bx-g" x="506" y="26" width="124" height="60" rx="4"/>
+      <text class="t-b" x="568" y="46" text-anchor="middle">mock 엔진</text>
+      <text class="t-s" x="568" y="60" text-anchor="middle">HY000 5% · 6분 지연 1%</text>
+      <text class="t-s" x="568" y="72" text-anchor="middle">shard 분포 흉내</text>
+      <rect class="bx-o" x="506" y="106" width="124" height="72" rx="4"/>
+      <text class="t-b" x="568" y="126" text-anchor="middle">real 어댑터</text>
+      <text class="t-m" x="568" y="140" text-anchor="middle">"pkg.mod:fn"</text>
+      <text class="t-s" x="568" y="154" text-anchor="middle">importlib 동적 로드</text>
+      <text class="t-s" x="568" y="167" text-anchor="middle">getData(user_name=…)</text>
+      <path class="ln-d" d="M480 60 L504 60"/>
+      <path class="ln-d" d="M480 132 L504 132"/>
+      <text class="t-s" x="486" y="200">mode 는 설정 탭에서 전환 → reload() 로 재시작 없이 반영</text>
+      <text class="t-s" x="12" y="214">폴백: retryable 이 아닌 예외는 재시도 없이 즉시 raise · retryable 목록이 비어 있으면 모든 예외가 즉시 실패</text>
+      <text class="t-s" x="12" y="226">폴백: pl.from_pandas 실패(pyarrow 충돌) 시 컬럼별 list 로 dict 를 만들어 polars 재구성</text>
+    </svg>
+    <figcaption>query() 한 번의 내부 — 4가지 보증과 2가지 백엔드</figcaption>
+  </figure>
+
+  <h3>Mock ↔ Real 전환</h3>
+  <p>기본값은 <b>mock</b>이다. 설정 탭에서 <code>lake_api.mode = real</code> 로 바꾸고 <code>module</code> 에
+    <code>패키지.모듈:함수</code> 를 적으면 <code>importlib</code> 가 그 함수를 불러 쓴다.
+    사내 <code>getData</code> 는 keyword 시그니처라 그대로 꽂히지 않으므로 얇은 어댑터를 하나 둔다.</p>
+  <div class="note mono" style="white-space:pre">mycorp/valve_adapter.py   →   설정 탭 module: mycorp.valve_adapter:query
+
+from bigdataquery import getData
+
+def query(params, custom_col, user):
+    if custom_col:                      # 빈 리스트면 전체 컬럼 (인자 자체를 뺀다)
+        return getData(params, custom_columns=custom_col, user_name=user)
+    return getData(params, user_name=user)</div>
+
+  <div class="warnbox"><b>인증은 <code>user_name</code> 하나뿐이다.</b> v0.3.9 에서 쓰지도 않던
+    <code>lake_api.api_key</code> 를 설정·UI·매뉴얼에서 걷어냈다(구버전 설치에 남은 값은 조회 응답에서 걸러지고
+    저장 시 사라진다). <b class="hl">다시 넣지 말 것</b> — 없는 인증 필드는 "왜 안 되지"의 시간을 만든다.</div>
+
+  <h3>폴백 · 예외 처리</h3>
+  <table>
+    <tr><th style="width:42mm">상황</th><th>동작</th><th style="width:34mm">근거</th></tr>
+    <tr><td>HY000 · 타임아웃 · 커넥션 오류</td><td>backoff 10 → 30 → 120초로 최대 3회 재시도. 마지막 예외를 그대로 올린다</td><td class="k">query()</td></tr>
+    <tr><td>재시도 대상이 아닌 예외</td><td><b>즉시 raise</b> — SQL 오류·권한 오류를 3배로 늘려 두드리지 않는다</td><td class="k">_is_retryable</td></tr>
+    <tr><td>어댑터가 <code>None</code> · 빈 리스트 반환</td><td>빈 <code>DataFrame</code> 으로 변환. <b class="hl">"조회 결과 없음"은 에러가 아니다</b> — 뒷단이 빈 결과로 그대로 흐른다</td><td class="k">_to_polars</td></tr>
+    <tr><td>pandas → polars 변환 실패</td><td>컬럼별 <code>tolist()</code> 로 dict 를 만들어 재구성 (pyarrow 버전 충돌 회피)</td><td class="k">_to_polars</td></tr>
+    <tr><td>timeout 값 초과</td><td>290초에서 끊는다 — 사내 5분 제한에 걸려 서버 쪽에서 죽는 것보다 먼저 잡는다</td><td class="k">settings.timeout_sec</td></tr>
+    <tr><td>동시 호출 폭주</td><td><code>min_interval_sec</code> 전역 락으로 최소 간격 보장 (프로세스 단위)</td><td class="k">_wait_min_interval</td></tr>
+    <tr><td>설정 변경</td><td><code>reload(settings)</code> 로 <code>__init__</code> 재실행 — mode/module/타임아웃이 재시작 없이 반영</td><td class="k">reload</td></tr>
+  </table>
+</section>
+<!-- ═══════════ 03 · Probe-First ═══════════ -->
+<section class="sec">
+  <div class="sec-h"><span class="sec-n">03</span><span class="sec-t">Probe-First 2단계 계획</span>
+    <span class="sec-s">backend/core/planner.py</span></div>
+
+  <div class="lead">하루치를 통째로 쏘기 전에 <b>1시간 샘플</b>로 크기와 shard 분포를 재고, 그 추정으로 chunk 를 나눈다.
+    측정 결과는 <b>(제품::소스) 키로 7일 캐시</b>돼 한 번 재면 일주일 재사용한다.</div>
+
+  <figure>
+    <svg viewBox="0 0 640 250">
+      <!-- strategy switch -->
+      <rect class="bx-o" x="10" y="10" width="130" height="58" rx="4"/>
+      <text class="t-b" x="75" y="30" text-anchor="middle">build_plan()</text>
+      <text class="t-s" x="75" y="44" text-anchor="middle">probe.strategy</text>
+      <text class="t-s" x="75" y="56" text-anchor="middle">+ probe_skip 확인</text>
+
+      <path class="ln" d="M142 26 L186 26" marker-end="url(#ar)"/>
+      <rect class="bx-s" x="188" y="12" width="150" height="28" rx="3"/>
+      <text class="t" x="198" y="30">sample_window (기본)</text>
+      <path class="ln" d="M142 39 L186 52" marker-end="url(#ar)"/>
+      <rect class="bx-s" x="188" y="44" width="150" height="24" rx="3"/>
+      <text class="t" x="198" y="60">projection</text>
+      <path class="ln" d="M142 52 L186 82" marker-end="url(#ar)"/>
+      <rect class="bx-y" x="188" y="72" width="150" height="24" rx="3"/>
+      <text class="t" x="198" y="88">none — probe 생략</text>
+
+      <text class="t-s" x="344" y="30">1시간 조회 → ×24 추정 + shard unique</text>
+      <text class="t-s" x="344" y="60">하루치를 shard 컬럼만 받아 정확 분포</text>
+      <text class="t-s" x="344" y="88">단일 chunk 로 바로 시도</text>
+
+      <!-- cache -->
+      <rect class="bx-g" x="10" y="106" width="180" height="52" rx="4"/>
+      <text class="t-b" x="100" y="124" text-anchor="middle">probe_cache.json</text>
+      <text class="t-s" x="100" y="138" text-anchor="middle">키 = product::source · TTL 7일</text>
+      <text class="t-s" x="100" y="150" text-anchor="middle">서버 재시작 후에도 유지</text>
+      <path class="ln-d" d="M100 104 L100 70"/>
+      <text class="t-s" x="196" y="126">신선하면 재측정 없이 재사용 (_from_cache · _cache_age_sec 표기)</text>
+      <text class="t-s" x="196" y="140" style="fill:#b45309">에러가 난 probe 결과는 캐시하지 않는다 — 실패를 7일 굳히지 않기 위해</text>
+      <text class="t-s" x="196" y="152">POST /api/jobs/probe-invalidate 로 강제 무효화</text>
+
+      <!-- chunking -->
+      <rect class="bx" x="10" y="170" width="620" height="72" rx="5"/>
+      <text class="t-o" x="20" y="186">_plan_chunks — 3가지 분기</text>
+      <rect class="bx-y" x="20" y="192" width="196" height="42" rx="3"/>
+      <text class="t-b" x="118" y="208" text-anchor="middle">A. shard 없음 / probe 실패</text>
+      <text class="t-s" x="118" y="222" text-anchor="middle">단일 chunk 로 시도 → 죽으면 executor 가 기록</text>
+      <rect class="bx-g" x="224" y="192" width="196" height="42" rx="3"/>
+      <text class="t-b" x="322" y="208" text-anchor="middle">B. 추정 ≤ target_chunk_rows</text>
+      <text class="t-s" x="322" y="222" text-anchor="middle">단일 chunk (기본 target 50만 행)</text>
+      <rect class="bx-o" x="428" y="192" width="194" height="42" rx="3"/>
+      <text class="t-b" x="525" y="208" text-anchor="middle">C. 초과 → shard 라운드로빈</text>
+      <text class="t-s" x="525" y="222" text-anchor="middle">n = ceil(추정/target), shard 수로 상한</text>
+    </svg>
+    <figcaption>probe 전략 → 캐시 → chunk 분기. 어느 경로로 가도 "계획을 못 세웠으니 멈춘다"는 없다</figcaption>
+  </figure>
+
+  <h3>동작</h3>
+  <ul>
+    <li><b>sample_window</b> — <code>date T00:00 ~ +1h</code> 을 shard 키 1개 컬럼만 받아 조회하고
+      행 수에 <code>24/hours</code> 를 곱해 하루를 추정한다. 동시에 그 시간대에 등장한 shard(예: root_lot_id) unique 를 최대 1000개까지 담는다.</li>
+    <li><b>projection</b> — 하루 전체를 조회하되 shard 컬럼 1~2개 + time 만 받는다. 정확하지만 비싸다.</li>
+    <li><b>none</b> — probe 를 아예 걸지 않는다. 소스·제품 단위 <code>probe_skip: true</code> 로도 같은 경로가 된다
+      (probe 가 상습 실패하는 소스용).</li>
+  </ul>
+
+  <h3>폴백 · 예외 처리</h3>
+  <table>
+    <tr><th style="width:44mm">상황</th><th>동작</th><th style="width:30mm">근거</th></tr>
+    <tr><td>probe 쿼리 자체가 실패</td><td>예외를 삼키고 <code>{estimated_rows:0, shards:[], error:"…"}</code> 를 반환 → <b>단일 chunk 로 진행</b>. 계획 실패가 수집 실패로 번지지 않는다</td><td class="k">_probe_sample</td></tr>
+    <tr><td>probe 결과에 error 가 있음</td><td><b class="hl">캐시에 저장하지 않는다</b> — 실패를 7일간 재사용하면 회복이 불가능해진다</td><td class="k">build_plan</td></tr>
+    <tr><td>그 날짜에 lot 이 하나도 없음</td><td>shard 목록이 빈 채로 정상 반환 → 단일 chunk. <code>drop_nulls()</code> 로 null shard 제거</td><td class="k">_probe_sample</td></tr>
+    <tr><td>캐시 파일이 깨짐</td><td><code>json.loads</code> 실패 시 빈 캐시로 시작 (지워도 다시 만들어진다 — 다음 실행이 느려질 뿐)</td><td class="k">_load_cache</td></tr>
+    <tr><td>캐시 저장 실패(권한 등)</td><td>조용히 통과 — 계획 자체는 이미 만들어졌다</td><td class="k">_save_cache</td></tr>
+    <tr><td>추정이 실제보다 작아 chunk 가 큼</td><td>실행 단계에서 timeout → <code>timeout_reshard</code> 로 기록하고 다음 사이클에 더 잘게 (adaptive fallback)</td><td class="k">executor</td></tr>
+    <tr><td>shard 수 &lt; 필요한 chunk 수</td><td>chunk 수를 shard 수로 낮춘다 (빈 chunk 를 만들지 않는다)</td><td class="k">_plan_chunks</td></tr>
+  </table>
+</section>
+
+<!-- ═══════════ 04 · Executor ═══════════ -->
+<section class="sec">
+  <div class="sec-h"><span class="sec-n">04</span><span class="sec-t">Chunk 실행 · 완전성 검사 · 업로드</span>
+    <span class="sec-s">backend/core/executor.py · s3_up.py · s3_queue.py</span></div>
+
+  <div class="lead">chunk 를 최대 3개까지 동시에 돌려 staging 에 떨어뜨리고, 전부 끝나면 하나로 머지해
+    <b>예상 행 수와 실제 행 수를 비교</b>한 뒤에야 S3 로 올린다. 어긋나면 <b class="hl">올리지 않고 보류</b>한다.</div>
+
+  <figure>
+    <svg viewBox="0 0 640 300">
+      <rect class="bx-o" x="10" y="10" width="120" height="40" rx="4"/>
+      <text class="t-b" x="70" y="28" text-anchor="middle">run_plan()</text>
+      <text class="t-s" x="70" y="42" text-anchor="middle">staging date 폴더 초기화</text>
+
+      <path class="ln-o" d="M132 30 L166 30" marker-end="url(#aro)"/>
+      <rect class="bx" x="168" y="6" width="196" height="86" rx="5"/>
+      <text class="t-o" x="178" y="22">Semaphore(3)</text>
+      <rect class="bx-s" x="178" y="28" width="176" height="18" rx="3"/><text class="t" x="186" y="41">chunk 00 → staging parquet</text>
+      <rect class="bx-s" x="178" y="48" width="176" height="18" rx="3"/><text class="t" x="186" y="61">chunk 01 → staging parquet</text>
+      <rect class="bx-r" x="178" y="68" width="176" height="18" rx="3"/><text class="t" x="186" y="81">chunk 02 → timeout_reshard</text>
+
+      <path class="ln-o" d="M366 48 L400 48" marker-end="url(#aro)"/>
+      <rect class="bx" x="402" y="6" width="228" height="86" rx="5"/>
+      <text class="t-o" x="412" y="22">_finalize()</text>
+      <text class="t" x="412" y="38">① concat(diagonal_relaxed)</text>
+      <text class="t" x="412" y="54">② 완전성 = |실제−예상| / 예상</text>
+      <text class="t" x="412" y="70">③ 허용치(기본 0.5%) 이내면 업로드</text>
+      <text class="t-s" x="412" y="84">스키마가 달라도 머지된다 (컬럼 합집합)</text>
+
+      <!-- outcomes -->
+      <text class="t-o" x="10" y="118">_finalize 의 5가지 중단 지점 — 하나라도 걸리면 S3 로 나가지 않는다</text>
+      <rect class="bx-r" x="10" y="126" width="120" height="44" rx="4"/>
+      <text class="t-b" x="70" y="143" text-anchor="middle">all_chunks_failed</text>
+      <text class="t-s" x="70" y="157" text-anchor="middle">성공 chunk 0</text>
+      <rect class="bx-r" x="138" y="126" width="120" height="44" rx="4"/>
+      <text class="t-b" x="198" y="143" text-anchor="middle">no_parts</text>
+      <text class="t-s" x="198" y="157" text-anchor="middle">staging 에 parquet 없음</text>
+      <rect class="bx-r" x="266" y="126" width="120" height="44" rx="4"/>
+      <text class="t-b" x="326" y="143" text-anchor="middle">merge_error</text>
+      <text class="t-s" x="326" y="157" text-anchor="middle">읽기/병합 실패</text>
+      <rect class="bx-y" x="394" y="126" width="120" height="44" rx="4"/>
+      <text class="t-b" x="454" y="143" text-anchor="middle">partial_failure</text>
+      <text class="t-s" x="454" y="157" text-anchor="middle">일부 chunk 실패 →</text>
+      <text class="t-s" x="454" y="167" text-anchor="middle">완전성 판단 무의미</text>
+      <rect class="bx-y" x="522" y="126" width="108" height="44" rx="4"/>
+      <text class="t-b" x="576" y="143" text-anchor="middle">completeness_failed</text>
+      <text class="t-s" x="576" y="157" text-anchor="middle">허용치 초과</text>
+
+      <!-- upload -->
+      <text class="t-o" x="10" y="196">업로드 모드 (settings.s3.upload_mode)</text>
+      <rect class="bx-g" x="10" y="204" width="196" height="52" rx="4"/>
+      <text class="t-b" x="108" y="222" text-anchor="middle">immediate (기본)</text>
+      <text class="t-s" x="108" y="236" text-anchor="middle">put_atomic — tmp key 업로드 →</text>
+      <text class="t-s" x="108" y="248" text-anchor="middle">copy → tmp 삭제 (반쪽 파일 0)</text>
+      <rect class="bx-s" x="214" y="204" width="196" height="52" rx="4"/>
+      <text class="t-b" x="312" y="222" text-anchor="middle">interval / manual</text>
+      <text class="t-s" x="312" y="236" text-anchor="middle">s3_queue 에 enqueue</text>
+      <text class="t-s" x="312" y="248" text-anchor="middle">상태 pending_upload</text>
+      <rect class="bx-y" x="418" y="204" width="212" height="52" rx="4"/>
+      <text class="t-b" x="524" y="222" text-anchor="middle">fake_local 모드</text>
+      <text class="t-s" x="524" y="236" text-anchor="middle">endpoint_url 이 비고 fake_local_path 가 있으면</text>
+      <text class="t-s" x="524" y="248" text-anchor="middle">로컬 폴더를 버킷처럼 사용 (개발 즉시 가능)</text>
+
+      <text class="t-s" x="10" y="274">업로드 실패 시 partition 상태 upload_failed + 사유 기록 · staging 의 _merged.parquet 은 남겨 탐색기에서 확인 가능</text>
+      <text class="t-s" x="10" y="288">chunk 실패는 best-effort 로 통합 알람(dispatch_alert)에도 보낸다 — 알람 실패는 파이프라인을 막지 않는다</text>
+    </svg>
+    <figcaption>chunk 실행 → 머지 → 완전성 → 업로드. "부분 성공"을 성공으로 취급하지 않는 것이 이 단계의 핵심</figcaption>
+  </figure>
+
+  <h3>폴백 · 예외 처리</h3>
+  <table>
+    <tr><th style="width:44mm">상황</th><th>동작</th><th style="width:30mm">근거</th></tr>
+    <tr><td>chunk 타임아웃</td><td>상태 <code>timeout_reshard</code> — 실패(failed)와 구분해 기록한다. 다음 사이클에 더 잘게 쪼갤 근거</td><td class="k">_execute_chunk</td></tr>
+    <tr><td>shard 필터 값이 빈 목록</td><td><b class="hl">IN 필터를 아예 주입하지 않는다</b> — <code>in ()</code> 는 사내 API 가 SQL 에러를 낸다</td><td class="k">_build_params</td></tr>
+    <tr><td>일부 chunk 만 성공</td><td>완전성 비교를 하지 않고 <code>partial_failed</code> 로 <b>업로드 보류</b> + 재큐잉 대상</td><td class="k">_finalize</td></tr>
+    <tr><td>예상 행 수가 0 (probe 실패)</td><td>완전성 검사를 건너뛴다 — 근거 없는 수치로 정상 데이터를 막지 않는다</td><td class="k">_finalize</td></tr>
+    <tr><td>chunk 간 스키마 불일치</td><td><code>diagonal_relaxed</code> 로 컬럼 합집합 병합 (없는 값은 null)</td><td class="k">_finalize</td></tr>
+    <tr><td>pandas 프레임이 올라옴</td><td>polars 로 변환해 저장 — <code>pandas.to_parquet</code> 엔진 룩업 버그 회피</td><td class="k">_save_staging</td></tr>
+    <tr><td>재실행(overwrite)</td><td>plan 시작 시 해당 <code>date=</code> staging 폴더를 통째로 지우고 다시 만든다 (idempotent)</td><td class="k">run_plan</td></tr>
+    <tr><td>boto3 미초기화 · 자격증명 없음</td><td>put/get 계열이 예외 대신 <code>False</code>/<code>None</code> 을 반환 (설정 탭에서 고칠 수 있도록 기동은 계속)</td><td class="k">s3_up</td></tr>
+    <tr><td>fake 버킷에서 prefix 를 object 로 오인</td><td><code>head()</code> 가 <code>is_file()</code> 로 판정 — 디렉터리를 object 로 보면 sync 비교가 깨진다 (v0.3.0 수정)</td><td class="k">s3_up.head</td></tr>
+  </table>
+</section>
+
+<!-- ═══════════ 05 · 파이프라인 개요 ═══════════ -->
+<section class="sec">
+  <div class="sec-h"><span class="sec-n">05</span><span class="sec-t">파이프라인 5단계 — 전체 그림</span>
+    <span class="sec-s">feature_pipeline.py · pipeline_runner.py</span></div>
+
+  <div class="lead">제품(vehicle) 하나가 한 번 도는 것이 <b>실행 1회</b>다. 안에서 raw → event → feature → wide 가 순차로 돌고,
+    전 제품이 끝나면 마지막에 send form 이 한 번 돈다. 실행 1회 = 실행 로그 1줄.</div>
+
+  <figure>
+    <svg viewBox="0 0 640 344">
+      <!-- raw -->
+      <rect class="bx-o" x="10" y="10" width="620" height="58" rx="5"/>
+      <text class="t-o" x="20" y="26">1 · RAW</text>
+      <text class="t-s" x="20" y="40">유닛 = (소스 × 1일). 병렬 실행, 전 제품 합쳐 동시 raw ≤ raw_api_max(3)</text>
+      <text class="t-m" x="20" y="56">db/1.RAWDATA_DB/{SOURCE}/{vehicle}/date=YYYY-MM-DD/data.parquet   ← 파티션 키 = 데이터의 tkout_time 날짜</text>
+      <rect class="bx-s" x="452" y="18" width="42" height="42" rx="3"/><text class="t" x="473" y="43" text-anchor="middle">FAB</text>
+      <rect class="bx-s" x="498" y="18" width="42" height="42" rx="3"/><text class="t" x="519" y="43" text-anchor="middle">INLINE</text>
+      <rect class="bx-s" x="544" y="18" width="36" height="42" rx="3"/><text class="t" x="562" y="43" text-anchor="middle">VM</text>
+      <rect class="bx-y" x="584" y="18" width="38" height="42" rx="3"/><text class="t" x="603" y="38" text-anchor="middle">ET</text>
+      <text class="t-s" x="603" y="52" text-anchor="middle">raw만</text>
+
+      <path class="ln-o" d="M320 70 L320 84" marker-end="url(#aro)"/>
+      <!-- event -->
+      <rect class="bx-o" x="10" y="86" width="620" height="58" rx="5"/>
+      <text class="t-o" x="20" y="102">2 · EVENT</text>
+      <text class="t-s" x="20" y="116">root_lot prefix 필터 + 소스별 매칭 필터 (FAB/VM = step_id · INLINE = item_id)</text>
+      <text class="t-m" x="20" y="132">db/2.EVENT_DB/{vehicle}/{SOURCE}/date=…/data.parquet  +  _meta.json(적용 매칭 버전)</text>
+      <rect class="bx-g" x="452" y="94" width="170" height="42" rx="3"/>
+      <text class="t-s" x="537" y="110" text-anchor="middle">매칭 버전이 바뀌면 전체 재생성</text>
+      <text class="t-s" x="537" y="124" text-anchor="middle">raw 가 더 새로우면 그 날짜만 재생성</text>
+
+      <path class="ln-o" d="M320 146 L320 160" marker-end="url(#aro)"/>
+      <!-- feature -->
+      <rect class="bx-o" x="10" y="162" width="620" height="66" rx="5"/>
+      <text class="t-o" x="20" y="178">3 · FEATURE</text>
+      <text class="t-s" x="20" y="192">특정 기간이 아니라 <tspan style="font-weight:700">그때 event DB 에 있던 전체</tspan>가 대상</text>
+      <text class="t-m" x="20" y="208">db/3.FEATURE_STORE/{vehicle}/{FEATURE}.parquet  +  _meta.json(커버 구간)</text>
+      <rect class="bx-s" x="330" y="170" width="56" height="50" rx="3"/><text class="t" x="358" y="192" text-anchor="middle">FAB_</text><text class="t-s" x="358" y="206" text-anchor="middle">fab.csv</text>
+      <rect class="bx-s" x="390" y="170" width="56" height="50" rx="3"/><text class="t" x="418" y="192" text-anchor="middle">KNOB_</text><text class="t-s" x="418" y="206" text-anchor="middle">ppid_knob</text>
+      <rect class="bx-s" x="450" y="170" width="56" height="50" rx="3"/><text class="t" x="478" y="192" text-anchor="middle">MASK_</text><text class="t-s" x="478" y="206" text-anchor="middle">mask.csv</text>
+      <rect class="bx-s" x="510" y="170" width="56" height="50" rx="3"/><text class="t" x="538" y="192" text-anchor="middle">INLINE_</text><text class="t-s" x="538" y="206" text-anchor="middle">inline.csv</text>
+      <rect class="bx-s" x="570" y="170" width="52" height="50" rx="3"/><text class="t" x="596" y="192" text-anchor="middle">VM_</text><text class="t-s" x="596" y="206" text-anchor="middle">vm.csv</text>
+
+      <path class="ln-o" d="M320 230 L320 244" marker-end="url(#aro)"/>
+      <!-- wide -->
+      <rect class="bx-o" x="10" y="246" width="620" height="42" rx="5"/>
+      <text class="t-o" x="20" y="262">4 · WIDE</text>
+      <text class="t-s" x="20" y="276">feature 전부를 (root_lot, wafer) 기준 left join → ML_TABLE_{vehicle}.parquet (PRODUCT 컬럼 부착)</text>
+
+      <path class="ln-o" d="M320 290 L320 304" marker-end="url(#aro)"/>
+      <!-- send -->
+      <rect class="bx-o" x="10" y="306" width="620" height="34" rx="5"/>
+      <text class="t-o" x="20" y="322">5 · SEND</text>
+      <text class="t-s" x="20" y="334">전 제품 ML_TABLE 병합 → prefix 그룹 분리 (0.KNOB · 1.FAB+MASK · 2.VM · 3.INLINE) csv + parquet</text>
+    </svg>
+    <figcaption>제품 1회 실행의 단계 흐름. 1~4 는 제품별, 5 는 전 제품 완료 후 1회</figcaption>
+  </figure>
+
+  <h3>단계별 실패 파급 범위</h3>
+  <table class="tbl-tight">
+    <tr><th style="width:22mm">단계</th><th>실패했을 때</th><th style="width:56mm">다음 실행에서의 회복</th></tr>
+    <tr><td>raw 유닛</td><td>그 (소스×날짜) 하나만 실패 — 나머지 유닛과 이후 단계는 계속 간다</td><td>재시도 큐에 남아 <code>raw_days</code> 윈도우를 벗어나도 재시도 (12장)</td></tr>
+    <tr><td>event</td><td>예외를 올려 그 제품 실행이 중단 (실행 로그에 critical)</td><td>다음 실행이 파티션 신선도 비교로 이어받음</td></tr>
+    <tr><td>feature</td><td>feature <b>하나 단위로</b> skip 하고 사유를 남긴다 — 하나가 죽어도 나머지는 산출</td><td>원인(룰북/컬럼) 수정 후 다음 실행에 자동 반영</td></tr>
+    <tr><td>wide</td><td>feature 가 하나도 없으면 RuntimeError</td><td>feature 단계 선행 필요</td></tr>
+    <tr><td>send</td><td>예외를 잡아 <code>{"error": …}</code> 로 요약에만 남기고 실행 자체는 완료 처리</td><td>알람 탭에서 단독 재실행 가능 (<code>POST /api/pipeline/send-form</code>)</td></tr>
+  </table>
+</section>
+<!-- ═══════════ 06 · RAW ═══════════ -->
+<section class="sec">
+  <div class="sec-h"><span class="sec-n">06</span><span class="sec-t">raw 단계 — 유닛 분할과 파티션 기준 열</span>
+    <span class="sec-s">feature_pipeline._run_raw_unit · _time_col · _write_raw_partitions</span></div>
+
+  <div class="lead">raw 는 <b>(소스 × 하루)</b> 단위로 쪼개 병렬 실행한다. 저장은 쿼리한 날짜가 아니라
+    <b class="hl">데이터 안의 시간 컬럼(tkout_time) 날짜</b>로 파티셔닝한다 — auto report 의 daily DB 와 같은 규약이다.</div>
+
+  <figure>
+    <svg viewBox="0 0 640 208">
+      <text class="t-o" x="10" y="16">유닛 분할 · 쿼리 구간 (반열림)</text>
+      <line class="ln" x1="20" y1="52" x2="600" y2="52"/>
+      <g>
+        <rect class="bx-s" x="20" y="36" width="110" height="32" rx="3"/><text class="t" x="75" y="56" text-anchor="middle">T-5 → T-4</text>
+        <rect class="bx-s" x="134" y="36" width="110" height="32" rx="3"/><text class="t" x="189" y="56" text-anchor="middle">T-4 → T-3</text>
+        <rect class="bx-s" x="248" y="36" width="110" height="32" rx="3"/><text class="t" x="303" y="56" text-anchor="middle">T-3 → T-2</text>
+        <rect class="bx-s" x="362" y="36" width="110" height="32" rx="3"/><text class="t" x="417" y="56" text-anchor="middle">T-2 → T-1</text>
+        <rect class="bx-o" x="476" y="36" width="124" height="32" rx="3"/><text class="t" x="538" y="52" text-anchor="middle">(T, T) → [T, T+1)</text>
+        <text class="t-s" x="538" y="64" text-anchor="middle">폭 0 유닛 교정</text>
+      </g>
+      <text class="t-s" x="20" y="84">get_split_date_ranges(raw_days, split_days) + raw_query_window() — 항상 [from, to) 반열림이라 이웃 유닛과 겹치지 않는다</text>
+      <text class="t-s" x="20" y="96" style="fill:#b45309">v0.3.6 이전에는 마지막 (today, today) 유닛의 폭이 0 이라 실 어댑터에서 당일 데이터가 통째로 빠질 수 있었다</text>
+
+      <text class="t-o" x="10" y="124">파티션 기준 열 해석 순서 — _time_col()</text>
+      <rect class="bx-o" x="20" y="132" width="140" height="34" rx="3"/>
+      <text class="t-b" x="90" y="146" text-anchor="middle">① 명시값 time_col</text>
+      <text class="t-s" x="90" y="159" text-anchor="middle">pipeline.yaml sources.*</text>
+      <path class="ln" d="M162 149 L186 149" marker-end="url(#ar)"/>
+      <rect class="bx-r" x="188" y="132" width="150" height="34" rx="3"/>
+      <text class="t-b" x="263" y="146" text-anchor="middle">columns 에 없으면 ValueError</text>
+      <text class="t-s" x="263" y="159" text-anchor="middle">조용히 틀린 날짜로 저장하지 않는다</text>
+      <path class="ln-d" d="M90 168 L90 184"/>
+      <rect class="bx-g" x="20" y="184" width="140" height="20" rx="3"/>
+      <text class="t-s" x="90" y="197" text-anchor="middle">② 코드 기본값 tkout_time (있을 때만)</text>
+      <path class="ln-d" d="M162 194 L186 194"/>
+      <rect class="bx-y" x="188" y="184" width="150" height="20" rx="3"/>
+      <text class="t-s" x="263" y="197" text-anchor="middle">③ 'time' 포함 첫 열 (예전 방식)</text>
+      <path class="ln-d" d="M340 194 L364 194"/>
+      <rect class="bx-y" x="366" y="184" width="180" height="20" rx="3"/>
+      <text class="t-s" x="456" y="197" text-anchor="middle">④ 없으면 쿼리 시작일 파티션 하나로</text>
+      <text class="t-s" x="366" y="146">기존 설치 보호: config/ 는 seed-only 라 업그레이드해도</text>
+      <text class="t-s" x="366" y="158">pipeline.yaml 에 tkout_time 이 없다 → 강요하지 않고 ③으로 내려간다</text>
+      <text class="t-s" x="366" y="170">(⚙ 에서 컬럼 추가 후 기준 열을 바꾸면 정렬됨)</text>
+    </svg>
+    <figcaption>유닛 구간과 기준 열 해석. ②의 "강요하지 않음"이 무중단 업그레이드를 보장한다</figcaption>
+  </figure>
+
+  <h3>소스별 취급</h3>
+  <table class="tbl-tight">
+    <tr><th style="width:20mm">소스</th><th style="width:30mm">테이블</th><th>특징</th></tr>
+    <tr><td>FAB</td><td class="k">RAW_FAB_DATA</td><td>step_id/step_desc/ppid/eqp/sleuth_order — event·feature·알람·스캔의 뿌리</td></tr>
+    <tr><td>INLINE</td><td class="k">RAW_INLINE_DATA</td><td>item_id/value. v0.3.8 에서 파티션 기준을 <code>time</code> → <code>tkout_time</code> 으로 통일</td></tr>
+    <tr><td>VM</td><td class="k">RAW_VM_DATA</td><td>sensor_id/residual. 위와 동일</td></tr>
+    <tr><td>ET</td><td class="k">f_et_test</td><td><b>raw 전용</b>(<code>event: false</code>) · reformatter 기반 — <code>config/reformatter/{vehicle}_reformatter.csv</code> 의 <code>CATEGORY=REAL</code> ITEMID 만 대상. ADDP 는 파생식이라 제외</td></tr>
+  </table>
+
+  <div class="warnbox"><b>측정 시각과 track-out 시각.</b> INLINE/VM 의 <code>time</code>(측정 시각)은 track-out 보다 늦게 찍혀
+    하루가 밀린다. 전 소스를 <code>tkout_time</code> 으로 통일해 둔 이유는 <b>소스가 달라도 같은 날짜 축</b>에 정렬하기 위해서다.
+    <b class="hl">조회 컬럼에 없는 열을 기준 열로 저장하려 하면 API 가 400 으로 거부</b>한다 — 통과시키면 하루치가 통째로 엉뚱한 파티션에 들어간다.</div>
+
+  <h3>폴백 · 예외 처리</h3>
+  <table>
+    <tr><th style="width:44mm">상황</th><th>동작</th><th style="width:30mm">근거</th></tr>
+    <tr><td>reformatter 파일이 없는 제품</td><td>ET 를 <b>건너뛴다</b> (items=None → 필터 없음이 아니라, 파일 자체가 없으면 그 소스는 대상 아님)</td><td class="k">reformatter_items</td></tr>
+    <tr><td>reformatter 는 있는데 REAL 항목 0</td><td>0행 반환하고 즉시 종료 — 빈 쿼리를 사내 API 로 보내지 않는다</td><td class="k">_run_raw_unit</td></tr>
+    <tr><td>어댑터가 item 필터를 무시</td><td>받은 뒤 <code>item_id.is_in(items)</code> 로 한 번 더 거른다 (실 어댑터 교체 대비 안전망)</td><td class="k">_run_raw_unit</td></tr>
+    <tr><td>시간 컬럼이 비었거나 없음</td><td>쿼리 시작일 파티션 하나로 저장 — 데이터를 버리지 않는다</td><td class="k">_write_raw_partitions</td></tr>
+    <tr><td>구 파일명 <code>part-000.parquet</code> 잔재</td><td>파티션 저장 시 삭제 — 같은 날짜를 두 번 읽는 중복 로드 방지</td><td class="k">_write_partition</td></tr>
+    <tr><td>설정에 없는 컬럼이 응답에 섞임</td><td><code>sources.columns</code> 교집합만 select — 스키마 드리프트가 저장 포맷을 흔들지 않는다</td><td class="k">_run_raw_unit</td></tr>
+    <tr><td>쿼리 구간이 여러 날에 걸침</td><td>행마다 자기 시간 컬럼 날짜의 <code>date=</code> 로 흩어 저장 (<code>partition_by</code>)</td><td class="k">_write_raw_partitions</td></tr>
+  </table>
+
+  <div class="errbox"><b>현재 상태.</b> 이 단계의 데이터 생성기는 <b class="hl">결정적(seed 기반) mock 합성</b>이다
+    (<code>_mock_fab/_mock_inline/_mock_vm/_mock_generic</code>). 새 소스를 추가해도 코드 수정 없이 컬럼 정의만으로
+    합성되도록 만들어져 있으며, 실 어댑터(<code>lake_api</code>) 연결이 다음 마일스톤이다. 22장 참조.</div>
+</section>
+
+<!-- ═══════════ 07 · EVENT ═══════════ -->
+<section class="sec">
+  <div class="sec-h"><span class="sec-n">07</span><span class="sec-t">event 단계 — 매칭 필터와 재생성 판정</span>
+    <span class="sec-s">feature_pipeline.run_event · _event_partition_fresh</span></div>
+
+  <div class="lead">raw 에서 <b>이 제품이 실제로 쓰는 행</b>만 남긴 것이 event DB 다. 필터는 두 겹 —
+    <code>root_lot_id</code> prefix + 소스별 매칭 테이블. 여기서 중요한 건 필터 자체보다
+    <b>"언제 다시 만들 것인가"</b>의 판정이다.</div>
+
+  <figure>
+    <svg viewBox="0 0 640 246">
+      <!-- filters -->
+      <text class="t-o" x="10" y="16">필터 2겹 (소스별 kind)</text>
+      <rect class="bx" x="10" y="24" width="620" height="58" rx="5"/>
+      <rect class="bx-s" x="22" y="34" width="130" height="38" rx="3"/>
+      <text class="t-b" x="87" y="50" text-anchor="middle">prefix 필터</text>
+      <text class="t-s" x="87" y="63" text-anchor="middle">event_lot_startwith</text>
+      <path class="ln-o" d="M154 53 L178 53" marker-end="url(#aro)"/>
+      <rect class="bx-g" x="180" y="34" width="140" height="38" rx="3"/>
+      <text class="t-b" x="250" y="50" text-anchor="middle">step 매칭 (FAB · VM)</text>
+      <text class="t-s" x="250" y="63" text-anchor="middle">vehicle_matching.csv step_id</text>
+      <rect class="bx-g" x="326" y="34" width="140" height="38" rx="3"/>
+      <text class="t-b" x="396" y="50" text-anchor="middle">item 매칭 (INLINE)</text>
+      <text class="t-s" x="396" y="63" text-anchor="middle">inline.csv item_id</text>
+      <rect class="bx-y" x="472" y="34" width="146" height="38" rx="3"/>
+      <text class="t-b" x="545" y="50" text-anchor="middle">kind=none</text>
+      <text class="t-s" x="545" y="63" text-anchor="middle">prefix 만 적용</text>
+
+      <!-- rebuild decision -->
+      <text class="t-o" x="10" y="102">재생성 판정 — 2단 게이트</text>
+      <rect class="bx-o" x="10" y="110" width="176" height="56" rx="4"/>
+      <text class="t-b" x="98" y="128" text-anchor="middle">① event_version 비교</text>
+      <text class="t-s" x="98" y="142" text-anchor="middle">매칭 파일 sha + lot prefix</text>
+      <text class="t-s" x="98" y="154" text-anchor="middle">+ match 규칙</text>
+      <path class="ln-o" d="M188 138 L216 138" marker-end="url(#aro)"/>
+      <rect class="bx-r" x="218" y="110" width="164" height="56" rx="4"/>
+      <text class="t-b" x="300" y="128" text-anchor="middle">다르면 소스 전체 재생성</text>
+      <text class="t-s" x="300" y="142" text-anchor="middle">date=* 전부 삭제 후 재스캔</text>
+      <text class="t-s" x="300" y="154" text-anchor="middle">_meta.json 에 새 ver 기록</text>
+
+      <rect class="bx-o" x="10" y="176" width="176" height="60" rx="4"/>
+      <text class="t-b" x="98" y="194" text-anchor="middle">② 파티션 신선도(mtime)</text>
+      <text class="t-s" x="98" y="208" text-anchor="middle">raw mtime &gt; event mtime ?</text>
+      <text class="t-s" x="98" y="222" text-anchor="middle">→ 그 날짜만 다시 만든다</text>
+      <path class="ln-o" d="M188 206 L216 206" marker-end="url(#aro)"/>
+      <rect class="bx-g" x="218" y="176" width="164" height="60" rx="4"/>
+      <text class="t-b" x="300" y="196" text-anchor="middle">늦게 도착한 데이터 반영</text>
+      <text class="t-s" x="300" y="212" text-anchor="middle">v0.3.5 수정 — 예전엔 "event 파일이</text>
+      <text class="t-s" x="300" y="224" text-anchor="middle">있으면 skip" 이라 첫 스냅샷에 고정</text>
+
+      <rect class="bx-s" x="398" y="110" width="232" height="126" rx="5"/>
+      <text class="t-o" x="408" y="128">이 판정이 없으면 생기는 일</text>
+      <text class="t-s" x="408" y="146">· 롤링 윈도우로 raw 를 다시 받아도 event 는 옛날 것</text>
+      <text class="t-s" x="408" y="160">· 재시도로 복구된 유닛이 feature 에 영영 반영 안 됨</text>
+      <text class="t-s" x="408" y="174">· 매칭 csv 를 flow 가 고쳐 내려줘도 옛 기준 산출물 유지</text>
+      <text class="t-s" x="408" y="192" style="fill:#b45309">전부 예외 없이 조용히 틀리는 유형이다 —</text>
+      <text class="t-s" x="408" y="204" style="fill:#b45309">그래서 mtime 비교와 버전 지문을 둘 다 둔다.</text>
+      <text class="t-s" x="408" y="222">DB heatmap 의 '미처리' 판정도 같은 기준을 쓴다</text>
+    </svg>
+    <figcaption>event 필터와 2단 재생성 게이트</figcaption>
+  </figure>
+
+  <h3>매칭 csv ↔ event 갱신 매핑</h3>
+  <table class="tbl-tight">
+    <tr><th style="width:44mm">갱신된 파일</th><th>재생성 범위</th></tr>
+    <tr><td class="k">vehicle_matching.csv</td><td>FAB · VM event 전체 (적용 안 된 vehicle×소스만)</td></tr>
+    <tr><td class="k">feature_rules/inline.csv</td><td>INLINE event 재생성</td></tr>
+    <tr><td class="k">feature_rules/vm.csv</td><td>event 필터와 무관 — feature 단계가 매 실행 전체 재산출이라 다음 실행에 자동 반영</td></tr>
+    <tr><td class="k">ppid_knob.csv · fab.csv · mask.csv</td><td>event 무관 — feature 단계에서만 쓰인다</td></tr>
+  </table>
+
+  <h3>폴백 · 예외 처리</h3>
+  <table>
+    <tr><th style="width:44mm">상황</th><th>동작</th><th style="width:30mm">근거</th></tr>
+    <tr><td><code>_meta.json</code> 이 깨졌거나 없음</td><td>빈 meta 로 간주 → <b>1회 전체 재생성</b> (안전한 쪽으로 판정)</td><td class="k">run_event</td></tr>
+    <tr><td>mtime 조회 실패(OSError)</td><td><code>fresh=False</code> — 즉 <b>재생성</b> 쪽으로 판정한다</td><td class="k">_event_partition_fresh</td></tr>
+    <tr><td>event 파티션 폴더는 있는데 parquet 이 없음</td><td>fresh 아님 → 다시 만든다</td><td class="k">_event_partition_fresh</td></tr>
+    <tr><td>소스를 <code>event: false</code> 로 전환</td><td>과거에 만들어진 event DB 를 정리한다 (ET)</td><td class="k">run_event</td></tr>
+    <tr><td>구 레이아웃 (vehicle 바로 아래 <code>date=*</code>)</td><td>기동 시 제거 — 소스 하위 구조로 재편된 잔재 청소</td><td class="k">run_event</td></tr>
+    <tr><td>FAB 컬럼이 제각각</td><td><code>EVENT_KEEP_COLS</code> 교집합만 남기고 전부 String 캐스팅 — 날짜별 dtype 흔들림으로 concat 이 깨지지 않게</td><td class="k">run_event</td></tr>
+    <tr><td>매칭 rules csv 에 id 컬럼이 없음</td><td>item_ids 빈 집합 → 그 소스 event 는 0행 (예외 대신 빈 결과)</td><td class="k">run_event</td></tr>
+  </table>
+</section>
+
+<!-- ═══════════ 08 · FEATURE ═══════════ -->
+<section class="sec">
+  <div class="sec-h"><span class="sec-n">08</span><span class="sec-t">feature 단계 — 5 카테고리와 knob 처리</span>
+    <span class="sec-s">feature_pipeline.run_feature · _knob_skip_layer</span></div>
+
+  <div class="lead">룰북 CSV 를 읽어 wafer 한 장당 한 줄이 되도록 집계한다. 이 단계의 설계 원칙은
+    <b class="hl">"하나가 실패해도 나머지는 나간다"</b> — feature 단위로 예외를 잡고 사유를 <code>skipped</code> 에 남긴다.</div>
+
+  <table class="tbl-tight">
+    <tr><th style="width:18mm">카테고리</th><th style="width:26mm">입력</th><th style="width:34mm">룰북</th><th>컬럼 이름</th></tr>
+    <tr><td>FAB</td><td>FAB event</td><td class="k">feature_rules/fab.csv</td><td class="k">FAB_{step_desc}_{feature_name}</td></tr>
+    <tr><td>KNOB</td><td>FAB event</td><td class="k">feature_rules/ppid_knob.csv</td><td class="k">KNOB_{step_desc}_ppid</td></tr>
+    <tr><td>MASK</td><td>FAB event</td><td class="k">feature_rules/mask.csv</td><td class="k">MASK_{step_desc}_reticle</td></tr>
+    <tr><td>INLINE</td><td>INLINE event</td><td class="k">feature_rules/inline.csv</td><td class="k">INLINE_{item_id}_{agg}</td></tr>
+    <tr><td>VM</td><td>VM event</td><td class="k">feature_rules/vm.csv</td><td class="k">VM_{sensor_id}_residual_{agg}</td></tr>
+  </table>
+
+  <h3>KNOB — 매핑 실패는 버리지 않고 RO 로 남긴다</h3>
+  <figure>
+    <svg viewBox="0 0 640 132">
+      <rect class="bx-s" x="10" y="20" width="120" height="42" rx="4"/>
+      <text class="t-b" x="70" y="38" text-anchor="middle">event 의 ppid</text>
+      <text class="t-s" x="70" y="52" text-anchor="middle">step_id 별 그룹</text>
+      <path class="ln-o" d="M132 41 L164 41" marker-end="url(#aro)"/>
+      <rect class="bx-o" x="166" y="20" width="140" height="42" rx="4"/>
+      <text class="t-b" x="236" y="38" text-anchor="middle">ppid → knob 치환</text>
+      <text class="t-s" x="236" y="52" text-anchor="middle">replace_strict(mapping)</text>
+      <path class="ln-o" d="M308 30 L340 30" marker-end="url(#aro)"/>
+      <rect class="bx-g" x="342" y="12" width="140" height="34" rx="4"/>
+      <text class="t-b" x="412" y="26" text-anchor="middle">매핑 성공 → knob 값</text>
+      <text class="t-s" x="412" y="39" text-anchor="middle">기본 집계 last</text>
+      <path class="ln-r" d="M308 52 L340 66" marker-end="url(#arr)"/>
+      <rect class="bx-y" x="342" y="52" width="140" height="34" rx="4"/>
+      <text class="t-b" x="412" y="66" text-anchor="middle">실패 → raw ppid 유지</text>
+      <text class="t-s" x="412" y="79" text-anchor="middle">= RO · knob_miss 리포트</text>
+      <path class="ln" d="M484 69 L512 69" marker-end="url(#ar)"/>
+      <rect class="bx-r" x="514" y="52" width="116" height="34" rx="4"/>
+      <text class="t-b" x="572" y="66" text-anchor="middle">알람 ro_ppid</text>
+      <text class="t-s" x="572" y="79" text-anchor="middle">flow 로 발행</text>
+      <text class="t-s" x="10" y="104">값을 버리면 "왜 비었지"가 되고, 조용히 채우면 틀린 값이 된다 — 그래서 원본을 남기고 알람으로 올린다.</text>
+      <text class="t-s" x="10" y="118" style="fill:#b45309">FAB 조회 컬럼에 ppid 가 없으면 KNOB_* 전체를 skip 하고 사유를 남긴다 (sources.FAB.columns 확인).</text>
+    </svg>
+  </figure>
+
+  <h3>knob skip 판정 — "확신할 수 없으면 SKIP 하지 않는다"</h3>
+  <figure>
+    <svg viewBox="0 0 640 186">
+      <rect class="bx-o" x="10" y="10" width="164" height="40" rx="4"/>
+      <text class="t-b" x="92" y="27" text-anchor="middle">값이 빈 wafer 발견</text>
+      <text class="t-s" x="92" y="41" text-anchor="middle">그 step 에 event 자체가 없음</text>
+      <path class="ln-o" d="M176 30 L206 30" marker-end="url(#aro)"/>
+      <rect class="bx" x="208" y="10" width="150" height="40" rx="4"/>
+      <text class="t-b" x="283" y="27" text-anchor="middle">명시 SKIP 블록 있나?</text>
+      <text class="t-s" x="283" y="41" text-anchor="middle">ppid_knob.csv AND 블록</text>
+
+      <path class="ln-o" d="M360 22 L392 22" marker-end="url(#aro)"/>
+      <text class="t-s" x="366" y="16">예</text>
+      <rect class="bx-g" x="394" y="6" width="236" height="30" rx="4"/>
+      <text class="t" x="404" y="24">조건 충족 wafer → "SKIP" · mode=rule 리포트</text>
+
+      <path class="ln-o" d="M283 52 L283 72" marker-end="url(#aro)"/>
+      <text class="t-s" x="288" y="66">아니오 → auto 판정</text>
+      <rect class="bx" x="160" y="74" width="246" height="52" rx="4"/>
+      <text class="t-b" x="283" y="92" text-anchor="middle">뒤쪽 step 을 이미 지났는가</text>
+      <text class="t-s" x="283" y="106" text-anchor="middle">두 step 을 모두 가진 wafer 의 tkout_time 상대순서</text>
+      <text class="t-s" x="283" y="118" text-anchor="middle">(sleuth_order 는 소량 투입 시 비어 신뢰 못 함)</text>
+
+      <path class="ln-o" d="M408 90 L436 90" marker-end="url(#aro)"/>
+      <rect class="bx-g" x="438" y="72" width="192" height="26" rx="4"/>
+      <text class="t" x="448" y="89">표본 ≥ min_support(5) · 비율 ≥ 0.8 → SKIP</text>
+      <path class="ln-r" d="M408 112 L436 112" marker-end="url(#arr)"/>
+      <rect class="bx-y" x="438" y="102" width="192" height="30" rx="4"/>
+      <text class="t" x="448" y="116">미달 → 보류 (null 유지)</text>
+      <text class="t-s" x="448" y="127">"auto skip 보류 — 뒤쪽 step 판별 불가" 리포트</text>
+
+      <rect class="bx-r" x="10" y="140" width="620" height="40" rx="4"/>
+      <text class="t-b" x="20" y="156">매칭 오류가 SKIP 으로 둔갑하지 않게</text>
+      <text class="t-s" x="20" y="166">SKIP 블록의 조건 step 이 이 제품 매칭 테이블에 없으면 블록을 적용하지 않고 "vehicle_matching 확인 필요"로 리포트한다.</text>
+      <text class="t-s" x="20" y="177">값 룰(category≠SKIP)의 AND 블록은 미지원으로 명시 표기한다.</text>
+    </svg>
+    <figcaption>비어 있음의 3분류 — pending(미도달·null 유지) / skip(뒤 step 통과) / 의심(매칭 문제·리포트)</figcaption>
+  </figure>
+
+  <h3>폴백 · 예외 처리</h3>
+  <table>
+    <tr><th style="width:44mm">상황</th><th>동작</th><th style="width:30mm">근거</th></tr>
+    <tr><td>event DB 가 없음</td><td>RuntimeError — "raw/event 단계를 먼저 실행하세요"</td><td class="k">run_feature</td></tr>
+    <tr><td>룰북에 모르는 <code>feature_name</code></td><td>그 feature 만 skip + "config/feature_funcs.py 에 함수 추가 가능" 안내</td><td class="k">run_feature</td></tr>
+    <tr><td>집계 중 예외</td><td>해당 feature 만 skip, 사유 기록. 다른 feature 는 계속</td><td class="k">run_feature</td></tr>
+    <tr><td>커스텀 함수 파일 오류</td><td>로드 오류를 <code>skipped</code> 로 노출. <b>재시작 없이</b> 매 실행 재로드</td><td class="k">feature_funcs</td></tr>
+    <tr><td>룰북 agg 와 고정 규칙 충돌</td><td><code>FORCED_AGG</code>(ecuall)가 이기고, 무엇이 덮였는지 <code>agg_overrides</code> 로 노출</td><td class="k">run_feature</td></tr>
+    <tr><td>값이 전부 null·빈 문자열</td><td>그 feature parquet 을 <b>저장하지 않는다</b> (빈 컬럼이 wide 를 오염시키지 않게)</td><td class="k">_save_feature</td></tr>
+    <tr><td>같은 step_desc 에 step_id 여러 개</td><td>마지막 것이 이긴다(기존 동작 유지) — step_ids 는 리포트에 함께 남긴다</td><td class="k">run_feature</td></tr>
+    <tr><td>커버 구간을 모름</td><td>산출 시점에 <code>_meta.json</code> 으로 기록 (feature parquet 에는 날짜 컬럼이 없다). 기록 없는 예전 산출물은 heatmap 이 <b>추정</b>으로 표시하고 툴팁에 명시</td><td class="k">run_feature</td></tr>
+  </table>
+</section>
+
+<!-- ═══════════ 09 · WIDE / SEND ═══════════ -->
+<section class="sec">
+  <div class="sec-h"><span class="sec-n">09</span><span class="sec-t">wide · send form — 합치고 나누기</span>
+    <span class="sec-s">feature_pipeline.run_wide · run_send_form</span></div>
+
+  <figure>
+    <svg viewBox="0 0 640 200">
+      <text class="t-o" x="10" y="16">4 · WIDE — 제품 1개</text>
+      <rect class="bx-s" x="10" y="24" width="88" height="26" rx="3"/><text class="t" x="54" y="41" text-anchor="middle">KNOB_*.parquet</text>
+      <rect class="bx-s" x="10" y="54" width="88" height="26" rx="3"/><text class="t" x="54" y="71" text-anchor="middle">FAB_*.parquet</text>
+      <rect class="bx-s" x="10" y="84" width="88" height="26" rx="3"/><text class="t" x="54" y="101" text-anchor="middle">INLINE_*.parquet</text>
+      <path class="ln-o" d="M102 40 L134 62" marker-end="url(#aro)"/>
+      <path class="ln-o" d="M102 67 L134 67" marker-end="url(#aro)"/>
+      <path class="ln-o" d="M102 96 L134 74" marker-end="url(#aro)"/>
+      <rect class="bx-o" x="136" y="34" width="180" height="66" rx="4"/>
+      <text class="t-b" x="226" y="52" text-anchor="middle">KEY 정규화 후 left join</text>
+      <text class="t-s" x="226" y="66" text-anchor="middle">root_lot_id trim · wafer_id 숫자만</text>
+      <text class="t-s" x="226" y="78" text-anchor="middle">키 union 을 base 로 → 전부 left</text>
+      <text class="t-s" x="226" y="92" text-anchor="middle">전부 null 인 컬럼은 제거</text>
+      <path class="ln-o" d="M318 67 L350 67" marker-end="url(#aro)"/>
+      <rect class="bx-g" x="352" y="34" width="278" height="66" rx="4"/>
+      <text class="t-b" x="362" y="52">ML_TABLE_{vehicle}.parquet</text>
+      <text class="t-m" x="362" y="68">PRODUCT · ROOT_LOT_ID · WAFER_ID · KNOB_… · FAB_…</text>
+      <text class="t-s" x="362" y="84">컬럼 정렬 = KEY → KNOB → FAB → MASK → INLINE → VM</text>
+      <text class="t-s" x="362" y="95">(각 그룹 안에서는 prefix 뒤 첫 숫자 = 공정 순서)</text>
+
+      <text class="t-o" x="10" y="130">5 · SEND FORM — 전 제품</text>
+      <rect class="bx-s" x="10" y="138" width="120" height="42" rx="3"/>
+      <text class="t" x="70" y="156" text-anchor="middle">ML_TABLE_A · B · C…</text>
+      <text class="t-s" x="70" y="170" text-anchor="middle">concat + unique(keep last)</text>
+      <path class="ln-o" d="M134 159 L164 159" marker-end="url(#aro)"/>
+      <rect class="bx-o" x="166" y="138" width="112" height="42" rx="3"/>
+      <text class="t" x="222" y="156" text-anchor="middle">0.KNOB</text><text class="t-s" x="222" y="170" text-anchor="middle">KNOB_</text>
+      <rect class="bx-o" x="284" y="138" width="112" height="42" rx="3"/>
+      <text class="t" x="340" y="156" text-anchor="middle">1.FAB</text><text class="t-s" x="340" y="170" text-anchor="middle">FAB_ + MASK_</text>
+      <rect class="bx-o" x="402" y="138" width="108" height="42" rx="3"/>
+      <text class="t" x="456" y="156" text-anchor="middle">2.VM</text><text class="t-s" x="456" y="170" text-anchor="middle">VM_</text>
+      <rect class="bx-o" x="516" y="138" width="114" height="42" rx="3"/>
+      <text class="t" x="573" y="156" text-anchor="middle">3.INLINE</text><text class="t-s" x="573" y="170" text-anchor="middle">INLINE_</text>
+    </svg>
+    <figcaption>제품 안에서 합치고(wide), 제품을 넘어 합친 뒤 용도별로 나눈다(send)</figcaption>
+  </figure>
+
+  <h3>폴백 · 예외 처리</h3>
+  <table>
+    <tr><th style="width:44mm">상황</th><th>동작</th><th style="width:30mm">근거</th></tr>
+    <tr><td>feature 파일이 하나도 없음</td><td>RuntimeError — wide 를 만들지 않는다 (빈 ML_TABLE 로 덮어쓰지 않기 위해)</td><td class="k">run_wide</td></tr>
+    <tr><td>wafer_id 표기가 제각각(<code>W03</code>, <code>3</code>)</td><td>숫자만 남겨 <code>Int64</code>(strict=False) 로 정규화 — 실패하면 null 이 되고 조인에서 자연 제외</td><td class="k">run_wide</td></tr>
+    <tr><td>같은 키가 feature 안에 중복</td><td><code>unique(subset=KEY)</code> 로 먼저 접는다 — 조인 폭발 방지</td><td class="k">run_wide</td></tr>
+    <tr><td>전부 null 인 feature 컬럼</td><td>제거 (KEY 컬럼은 항상 유지)</td><td class="k">run_wide</td></tr>
+    <tr><td>prefix 에 숫자가 없는 컬럼</td><td>정렬 키를 <code>inf</code> 로 줘 그룹 맨 뒤로 — 순서가 깨지지 않는다</td><td class="k">first_number_after</td></tr>
+    <tr><td>제품 간 컬럼 구성이 다름</td><td><code>diagonal_relaxed</code> concat 으로 합집합, wafer 중복은 <b>최신(keep last)</b> 우선</td><td class="k">run_send_form</td></tr>
+    <tr><td>어떤 그룹에 해당 prefix 컬럼이 없음</td><td>파일을 만들지 않고 <code>{"skipped": "해당 prefix 컬럼 없음"}</code> 기록 (빈 CSV 를 flow 로 보내지 않는다)</td><td class="k">run_send_form</td></tr>
+    <tr><td>실행이 취소됨</td><td>send form 을 <b>건너뛴다</b> — 부분 산출물로 기존 전송본을 덮지 않는다</td><td class="k">pipeline_runner.run_all</td></tr>
+  </table>
+</section>
+<!-- ═══════════ 10 · 스케줄 ═══════════ -->
+<section class="sec">
+  <div class="sec-h"><span class="sec-n">10</span><span class="sec-t">제품별 실행 주기 · 실행 금지 시간대</span>
+    <span class="sec-s">pipeline_runner.schedule_plan · quiet_* · _loop</span></div>
+
+  <div class="lead">파이프라인은 <b>제품마다 다른 주기</b>로 돈다. 중요한 제품만 자주 돌릴 수 있고,
+    야간 백업·사내 API 점검 구간은 <b>실행 금지 시간대</b>로 비워 둔다.</div>
+
+  <figure>
+    <svg viewBox="0 0 640 250">
+      <!-- ticker -->
+      <rect class="bx-o" x="10" y="10" width="150" height="56" rx="4"/>
+      <text class="t-b" x="85" y="30" text-anchor="middle">백그라운드 루프</text>
+      <text class="t-s" x="85" y="44" text-anchor="middle">sched_tick_sec (기본 60초)</text>
+      <text class="t-s" x="85" y="57" text-anchor="middle">"돌 때가 된 제품"만 고른다</text>
+      <path class="ln-o" d="M162 38 L196 38" marker-end="url(#aro)"/>
+      <rect class="bx" x="198" y="10" width="192" height="56" rx="4"/>
+      <text class="t-b" x="294" y="28" text-anchor="middle">due 판정</text>
+      <text class="t-s" x="294" y="42" text-anchor="middle">now − 마지막 실행 ≥ 24h / runs_per_day</text>
+      <text class="t-s" x="294" y="55" text-anchor="middle">또는 재시도 예정 시각 도달</text>
+      <path class="ln-o" d="M392 38 L426 38" marker-end="url(#aro)"/>
+      <rect class="bx-g" x="428" y="10" width="202" height="56" rx="4"/>
+      <text class="t-b" x="529" y="28" text-anchor="middle">run_all(vehicles=due)</text>
+      <text class="t-s" x="529" y="42" text-anchor="middle">마지막 실행 시각의 근거 = logs/pipeline_runs.jsonl</text>
+      <text class="t-s" x="529" y="55" text-anchor="middle">→ 재기동해도 주기가 유지된다</text>
+
+      <!-- per product -->
+      <text class="t-o" x="10" y="92">runs_per_day 해석</text>
+      <rect class="bx-s" x="10" y="100" width="150" height="34" rx="3"/>
+      <text class="t" x="20" y="115">N (예: 6)</text><text class="t-s" x="20" y="128">24/N 시간 간격 = 4시간</text>
+      <rect class="bx-s" x="166" y="100" width="150" height="34" rx="3"/>
+      <text class="t" x="176" y="115">0</text><text class="t-s" x="176" y="128">자동 실행 제외 (수동 ▶ 는 가능)</text>
+      <rect class="bx-s" x="322" y="100" width="150" height="34" rx="3"/>
+      <text class="t" x="332" y="115">생략</text><text class="t-s" x="332" y="128">전역 runtime.interval_hours</text>
+      <rect class="bx-y" x="478" y="100" width="152" height="34" rx="3"/>
+      <text class="t" x="488" y="115">잘못된 값</text><text class="t-s" x="488" y="128">전역값으로 폴백 (예외 없음)</text>
+
+      <!-- quiet -->
+      <text class="t-o" x="10" y="160">실행 금지 시간대 (quiet window)</text>
+      <rect class="bx" x="10" y="168" width="620" height="74" rx="5"/>
+      <line class="ln" x1="30" y1="200" x2="610" y2="200"/>
+      <rect x="30" y="188" width="96" height="24" fill="#fee2e2" stroke="#fca5a5"/>
+      <text class="t-s" x="78" y="204" text-anchor="middle">00:00 ~ 02:00 금지</text>
+      <text class="t-s" x="30" y="226">기본값</text>
+      <circle cx="86" cy="200" r="4" fill="#FF5E00"/>
+      <text class="t-s" x="92" y="184">01:10 예정이던 실행</text>
+      <path class="ln-o" d="M86 178 L126 178" marker-end="url(#aro)"/>
+      <text class="t-s" x="130" y="182">02:00 으로 밀린다 (건너뛰지 않는다)</text>
+      <text class="t-s" x="300" y="204">→ 이후 정상 주기</text>
+      <text class="t-s" x="30" y="238">· 대상은 자동 실행(주기·루프)뿐 — 사람이 누르는 ▶ 실행은 그대로 된다   · 이미 돌고 있는 실행은 중단하지 않는다 (끊으면 event 파티션이 반만 남는다)</text>
+    </svg>
+    <figcaption>tick 은 "확인 간격"이지 주기가 아니다. 주기는 제품별 <code>runs_per_day</code> 가 정한다</figcaption>
+  </figure>
+
+  <h3>폴백 · 예외 처리</h3>
+  <table>
+    <tr><th style="width:44mm">상황</th><th>동작</th><th style="width:30mm">근거</th></tr>
+    <tr><td>서버 재기동</td><td>마지막 실행 시각을 <b>실행 로그에서 복원</b> — 메모리에만 두면 재기동마다 전 제품이 due 로 잡혀 전량 재실행된다</td><td class="k">run_log.last_started</td></tr>
+    <tr><td>실행 이력이 아예 없음(최초 기동)</td><td>즉시 due — 첫 실행을 기다리지 않는다</td><td class="k">schedule_plan</td></tr>
+    <tr><td>quiet 값이 <code>9:00</code> 처럼 따옴표 없이 적힘</td><td>YAML 1.1 이 정수 540 으로 읽는데, 그 <b>정수도 분으로 받아준다</b> (0~1440)</td><td class="k">parse_hhmm</td></tr>
+    <tr><td>quiet 형식이 아예 틀림 / 시작 == 종료</td><td>구간 없음으로 간주 — 금지 시간대가 실행을 영구히 막는 사고를 만들지 않는다</td><td class="k">quiet_window</td></tr>
+    <tr><td>기존 설치에 quiet 키가 없음</td><td>코드 기본값 <code>00:00~02:00</code> 적용. 단 <b>빈 문자열은 "지웠다"는 뜻</b>이므로 되살리지 않는다</td><td class="k">quiet_cfg</td></tr>
+    <tr><td>quiet 중 예정 시각 도달</td><td>건너뛰지 않고 해제 시각으로 <b>밀린다</b>. 화면에는 <code>quiet_blocked</code> 로 표시</td><td class="k">schedule_plan</td></tr>
+    <tr><td>루프 모드(loop_enabled)</td><td>주기를 무시하고 연속 실행 (개발·백필용). 회차 간 <code>loop_gap_sec</code> 휴식</td><td class="k">_loop</td></tr>
+    <tr><td>스케줄 마스터 OFF</td><td>5초마다 토글만 확인 — 켜면 즉시 반응한다</td><td class="k">_loop</td></tr>
+    <tr><td>루프 안에서 예외 발생</td><td>삼키고 다음 tick 으로 — 한 번의 실패가 스케줄러를 죽이지 않는다</td><td class="k">_loop</td></tr>
+  </table>
+</section>
+
+<!-- ═══════════ 11 · 락/큐/취소 ═══════════ -->
+<section class="sec">
+  <div class="sec-h"><span class="sec-n">11</span><span class="sec-t">실행 락 · 작업 큐 · 안전 지점 취소</span>
+    <span class="sec-s">pipeline_runner._run_lock · _checkpoint · queue()</span></div>
+
+  <div class="lead">산출물을 쓰는 <b>모든 진입점이 하나의 락</b>을 공유한다. 그리고 그 락을 기다리는 작업까지
+    화면에 보여준다 — 예전에는 락 대기가 보이지 않아 "아무 일도 안 하는 것"처럼 보였다.</div>
+
+  <figure>
+    <svg viewBox="0 0 640 268">
+      <!-- entrances -->
+      <text class="t-o" x="10" y="16">락을 공유하는 5개 진입점</text>
+      <rect class="bx-s" x="10" y="24" width="116" height="30" rx="3"/><text class="t-s" x="68" y="43" text-anchor="middle">스케줄 / 루프</text>
+      <rect class="bx-s" x="130" y="24" width="116" height="30" rx="3"/><text class="t-s" x="188" y="43" text-anchor="middle">수동 전체 실행</text>
+      <rect class="bx-s" x="250" y="24" width="116" height="30" rx="3"/><text class="t-s" x="308" y="43" text-anchor="middle">수동 단건 실행</text>
+      <rect class="bx-s" x="370" y="24" width="126" height="30" rx="3"/><text class="t-s" x="433" y="43" text-anchor="middle">매칭 갱신 재생성</text>
+      <rect class="bx-s" x="500" y="24" width="130" height="30" rx="3"/><text class="t-s" x="565" y="43" text-anchor="middle">wide / send 단독</text>
+      <path class="ln-o" d="M320 58 L320 74" marker-end="url(#aro)"/>
+      <rect class="bx-o" x="180" y="76" width="280" height="30" rx="4"/>
+      <text class="t-b" x="320" y="95" text-anchor="middle">_run_lock (threading.Lock) — 동시에 하나만</text>
+
+      <!-- damages -->
+      <rect class="bx-r" x="10" y="118" width="300" height="82" rx="5"/>
+      <text class="t-b" x="20" y="136">락을 공유하지 않으면 생기는 손상 3가지</text>
+      <text class="t-s" x="20" y="152">(a) 한쪽이 파티션을 지우는 사이 다른 쪽이 "이미 있음"으로 판정</text>
+      <text class="t-s" x="20" y="163">    → event DB 에 날짜 구멍, 예외 없이 틀린 feature 가 나간다</text>
+      <text class="t-s" x="20" y="177">(b) 같은 data.parquet 동시 write → 잘린 parquet</text>
+      <text class="t-s" x="20" y="191">(c) _meta.json 을 나중에 쓴 쪽이 이겨 stale 판정이 영영 안 됨</text>
+
+      <!-- behaviors -->
+      <rect class="bx" x="322" y="118" width="308" height="82" rx="5"/>
+      <text class="t-b" x="332" y="136">진입 실패 시 동작이 다르다</text>
+      <text class="t-s" x="332" y="152">· run_all / 단독 작업 → <tspan style="font-weight:700">즉시 skip</tspan> (다음 주기에 다시 온다)</text>
+      <text class="t-s" x="332" y="168">· 매칭 갱신 재생성 → <tspan style="font-weight:700">기다린다</tspan> (기본 1800초)</text>
+      <text class="t-s" x="332" y="180">  건너뛰면 옛 매칭 기준 산출물이 그대로 flow 로 나가므로</text>
+      <text class="t-s" x="332" y="194">  대기 시간 초과·취소도 last_rebuild 에 남긴다 (조용한 실패 방지)</text>
+
+      <!-- cancel -->
+      <text class="t-o" x="10" y="222">취소 — 안전 지점에서만</text>
+      <rect class="bx-y" x="10" y="230" width="180" height="30" rx="3"/>
+      <text class="t-s" x="100" y="243" text-anchor="middle">대기 중(waiting) → 즉시 취소</text>
+      <text class="t-s" x="100" y="255" text-anchor="middle">state=cancelled</text>
+      <path class="ln" d="M194 245 L216 245" marker-end="url(#ar)"/>
+      <rect class="bx-o" x="218" y="230" width="200" height="30" rx="3"/>
+      <text class="t-s" x="318" y="243" text-anchor="middle">실행 중 → raw 유닛 · 단계 경계에서 중단</text>
+      <text class="t-s" x="318" y="255" text-anchor="middle">쓰는 중인 event/feature 를 끊지 않는다</text>
+      <path class="ln" d="M422 245 L444 245" marker-end="url(#ar)"/>
+      <rect class="bx-g" x="446" y="230" width="184" height="30" rx="3"/>
+      <text class="t-s" x="538" y="243" text-anchor="middle">중단된 일은 다음 실행이 이어받는다</text>
+      <text class="t-s" x="538" y="255" text-anchor="middle">(파티션 신선도 비교)</text>
+    </svg>
+    <figcaption>락 · 큐 · 취소는 한 세트다. "무엇이 돌고 무엇이 기다리는가"가 보여야 취소가 의미를 가진다</figcaption>
+  </figure>
+
+  <h3>작업 큐 스냅샷 <span class="src">GET /api/pipeline/queue</span></h3>
+  <table class="tbl-tight">
+    <tr><th style="width:26mm">필드</th><th>내용</th></tr>
+    <tr><td class="k">running</td><td>지금 락을 쥐고 도는 작업</td></tr>
+    <tr><td class="k">waiting</td><td>락을 기다리는 작업 (대기 상태에서도 취소 가능)</td></tr>
+    <tr><td class="k">upcoming</td><td>제품별 다음 예정 (due · 재시도 대기 · quiet 차단 여부 포함)</td></tr>
+    <tr><td class="k">recent</td><td>최근 완료 10건 (전체 보관은 최근 20건)</td></tr>
+    <tr><td class="k">busy · retry</td><td>락 점유 여부 · 재시도 큐 요약</td></tr>
+  </table>
+
+  <h3>폴백 · 예외 처리</h3>
+  <table>
+    <tr><th style="width:44mm">상황</th><th>동작</th><th style="width:30mm">근거</th></tr>
+    <tr><td>취소 후 남은 단계</td><td>취소는 <b>장애가 아니다</b> — severity=warning 으로 기록하고, 알람 발행 훅은 <b>돌지 않는다</b>(옛 리포트를 내보내지 않기 위해)</td><td class="k">run_vehicle</td></tr>
+    <tr><td>취소된 raw 유닛</td><td>실패로 기록하지 않는다(<code>cancelled_units</code>) — 재시도 큐를 오염시키지 않는다</td><td class="k">_raw_guarded</td></tr>
+    <tr><td>취소 후 send form</td><td>건너뛴다 — 부분 산출물로 전송본을 덮지 않는다</td><td class="k">run_all</td></tr>
+    <tr><td>대기 중 취소 요청</td><td>락을 잡는 순간 취소를 재확인하고 <b>바로 놓는다</b> (경쟁 조건 차단)</td><td class="k">_acquire_for</td></tr>
+    <tr><td>취소 불가 작업</td><td><code>cancellable=false</code> 인 작업(wide/send 단독)은 명시적으로 거부 응답</td><td class="k">cancel_task</td></tr>
+    <tr><td>제품 하나가 예외로 죽음</td><td>run_all 은 나머지 제품을 계속 처리하고 결과에 <code>error</code> 만 담는다</td><td class="k">run_all</td></tr>
+    <tr><td>진행 표시가 회차 사이에 끊김</td><td>스냅샷에 <code>loop/schedule/busy/quiet</code> 를 실어 "실행 중(다음 회차 준비)"로 계속 표시 — 깜빡임 제거(v0.3.1)</td><td class="k">snapshot</td></tr>
+  </table>
+</section>
+
+<!-- ═══════════ 12 · 재시도 큐 ═══════════ -->
+<section class="sec">
+  <div class="sec-h"><span class="sec-n">12</span><span class="sec-t">raw 실패 유닛 영구 재시도 큐</span>
+    <span class="sec-s">backend/core/pipeline_retry.py</span></div>
+
+  <div class="lead">실패한 <b>(소스 × 날짜)</b> 유닛은 롤링 <code>raw_days</code> 윈도우를 벗어나도 큐에 남아 성공할 때까지 재시도된다.
+    다만 <b class="hl">무한 재시도는 하지 않는다</b> — 5회 연속 실패는 일시 장애가 아니라 사람이 고쳐야 할 문제로 본다.</div>
+
+  <figure>
+    <svg viewBox="0 0 640 224">
+      <rect class="bx-s" x="14" y="30" width="104" height="44" rx="4"/>
+      <text class="t-b" x="66" y="50" text-anchor="middle">raw 유닛 실패</text>
+      <text class="t-s" x="66" y="64" text-anchor="middle">예외 · 타임아웃</text>
+      <path class="ln-o" d="M120 52 L156 52" marker-end="url(#aro)"/>
+
+      <rect class="bx-y" x="158" y="24" width="150" height="56" rx="4"/>
+      <text class="t-b" x="233" y="44" text-anchor="middle">retry_wait</text>
+      <text class="t-s" x="233" y="58" text-anchor="middle">backoff 5m → 15m → 30m → 1h</text>
+      <text class="t-s" x="233" y="70" text-anchor="middle">(마지막 값으로 고정 반복)</text>
+
+      <path class="ln-o" d="M310 40 L346 40" marker-end="url(#aro)"/>
+      <rect class="bx-g" x="348" y="24" width="140" height="32" rx="4"/>
+      <text class="t-b" x="418" y="44" text-anchor="middle">성공 → 큐에서 제거</text>
+      <text class="t-s" x="492" y="38">실행 로그에 "복구" 줄</text>
+
+      <path class="ln-r" d="M233 82 L233 112" marker-end="url(#arr)"/>
+      <text class="t-s" x="238" y="100">attempts ≥ retry_max_attempts (기본 5)</text>
+      <rect class="bx-r" x="158" y="114" width="150" height="58" rx="4"/>
+      <text class="t-b" x="233" y="132" text-anchor="middle">blocked</text>
+      <text class="t-s" x="233" y="146" text-anchor="middle">next_retry_at = null</text>
+      <text class="t-s" x="233" y="158" text-anchor="middle">severity = critical</text>
+      <text class="t-s" x="233" y="168" text-anchor="middle">자동 재시도 중단</text>
+
+      <path class="ln-o" d="M310 143 L346 143" marker-end="url(#aro)"/>
+      <rect class="bx-o" x="348" y="114" width="180" height="58" rx="4"/>
+      <text class="t-b" x="438" y="132" text-anchor="middle">↻ 재시도 재개 (사람이 누름)</text>
+      <text class="t-s" x="438" y="146" text-anchor="middle">attempts 를 0 으로 되돌린다</text>
+      <text class="t-s" x="438" y="158" text-anchor="middle">— 그대로 두면 한 번 실패에 곧바로 blocked</text>
+      <text class="t-s" x="438" y="168" text-anchor="middle">누적은 total_attempts 로 남는다</text>
+      <path class="ln-o" d="M438 112 L438 96 L233 96 L233 84" marker-end="url(#aro)"/>
+
+      <rect class="bx" x="14" y="182" width="612" height="34" rx="4"/>
+      <text class="t-s" x="24" y="198">blocked 안내문: "연속 실패로 자동 재시도를 멈췄습니다 — 자격증명 만료·권한·테이블 변경 가능성을 확인하고, 해결 후 '재시도 재개' 를 누르세요"</text>
+      <text class="t-s" x="24" y="211">severity 승격 기준: blocked · 12시간(retry_critical_after_sec) 초과 · 5회(retry_critical_attempts) 이상 → critical / 대기 중이면 warning</text>
+    </svg>
+    <figcaption>재시도 상태 기계. 무한 재시도로 사내 API 를 계속 두드리는 것을 막는 것이 blocked 의 목적</figcaption>
+  </figure>
+
+  <h3>폴백 · 예외 처리</h3>
+  <table>
+    <tr><th style="width:44mm">상황</th><th>동작</th><th style="width:30mm">근거</th></tr>
+    <tr><td>큐 파일이 BOM·깨진 JSON</td><td><code>utf-8-sig</code> 로 읽고, 실패하면 <b class="hl">원본을 <code>.bad</code> 로 보관</b>하고 경고를 남긴다 — 여기가 조용히 비면 "놓친 유닛" 추적이 통째로 사라지는데 화면은 정상으로 보인다</td><td class="k">_load</td></tr>
+    <tr><td>저장 중 크래시</td><td><code>.tmp</code> 에 쓰고 <code>replace</code> — 반쪽 파일이 남지 않는다</td><td class="k">_save_locked</td></tr>
+    <tr><td>정상 유닛과 재시도 유닛이 겹침</td><td>키 기준 중복 제거 후 추가 — 같은 유닛을 두 번 쿼리하지 않는다</td><td class="k">run_vehicle</td></tr>
+    <tr><td>자동 실행이 꺼진 제품</td><td>재시도도 자동으로 돌지 않는다. 화면에 "자동 실행 꺼짐"으로 표시하고 수동 실행 때 함께 처리</td><td class="k">schedule_plan</td></tr>
+    <tr><td>큐 항목의 날짜 파싱 실패</td><td>그 항목만 건너뛴다 (전체 큐를 버리지 않는다)</td><td class="k">due_units</td></tr>
+    <tr><td>재시도 delay 설정이 이상함</td><td>정수 변환 실패 시 기본 <code>[300,900,1800,3600]</code> 로 폴백, 값은 최소 1초로 클램프</td><td class="k">retry_delays</td></tr>
+    <tr><td>blocked 가 섞여 있을 때 "다음 재시도"</td><td>대기 중인 것만 보고 계산한다 — blocked 는 예정 시각이 없다</td><td class="k">summary</td></tr>
+  </table>
+</section>
+
+<!-- ═══════════ 13 · 워커 산정 ═══════════ -->
+<section class="sec">
+  <div class="sec-h"><span class="sec-n">13</span><span class="sec-t">워커 수 산정 · 동시 실행 상한</span>
+    <span class="sec-s">backend/core/runtime_env.py</span></div>
+
+  <div class="lead">호스트의 코어와 메모리를 읽어 워커 수를 정하되, <b>사내 API 로 나가는 동시 요청은 따로 캡</b>한다.
+    계산 근거는 화면(모니터 탭)에 문자열로 표시된다 — 왜 이 숫자인지 물어볼 필요가 없게.</div>
+
+  <figure>
+    <svg viewBox="0 0 640 160">
+      <rect class="bx-s" x="10" y="14" width="140" height="52" rx="4"/>
+      <text class="t-b" x="80" y="34" text-anchor="middle">호스트 자원</text>
+      <text class="t-s" x="80" y="48" text-anchor="middle">os.cpu_count()</text>
+      <text class="t-s" x="80" y="60" text-anchor="middle">psutil 총 메모리</text>
+      <path class="ln-o" d="M152 40 L184 40" marker-end="url(#aro)"/>
+      <rect class="bx-o" x="186" y="10" width="212" height="60" rx="4"/>
+      <text class="t-b" x="292" y="28" text-anchor="middle">compute_w = min(코어−2, 메모리×0.8 / 4GB)</text>
+      <text class="t-s" x="292" y="44" text-anchor="middle">2코어는 event loop/OS 여유분</text>
+      <text class="t-s" x="292" y="58" text-anchor="middle">reason 문자열로 근거 노출 ("cores 12-2=10")</text>
+      <path class="ln-o" d="M400 40 L432 40" marker-end="url(#aro)"/>
+      <rect class="bx-g" x="434" y="6" width="196" height="26" rx="3"/>
+      <text class="t" x="444" y="23">raw_workers = min(compute, raw_api_max=3)</text>
+      <rect class="bx-g" x="434" y="34" width="196" height="24" rx="3"/>
+      <text class="t" x="444" y="50">vehicle_workers = min(compute, 4)</text>
+      <rect class="bx-g" x="434" y="60" width="196" height="24" rx="3"/>
+      <text class="t" x="444" y="76">feature_workers = min(compute, max(2, 코어/4))</text>
+
+      <rect class="bx-y" x="10" y="86" width="620" height="62" rx="4"/>
+      <text class="t-b" x="20" y="104">왜 raw 만 따로 캡하나</text>
+      <text class="t-s" x="20" y="120">raw 는 사내 API 풀을 쓴다 — 제품을 여러 개 동시에 돌려도 <tspan style="font-weight:700">전 제품 합쳐</tspan> 동시 raw 쿼리가 raw_api_max 를 넘지 않도록 전역 세마포어로 묶는다.</text>
+      <text class="t-s" x="20" y="136">event/feature 는 API 를 쓰지 않으므로 compute 값을 그대로 쓴다. 모든 값은 pipeline.yaml runtime 에서 정수로 덮어쓸 수 있다 (sizing: config).</text>
+    </svg>
+  </figure>
+
+  <h3>폴백 · 예외 처리</h3>
+  <table>
+    <tr><th style="width:44mm">상황</th><th>동작</th><th style="width:30mm">근거</th></tr>
+    <tr><td>psutil 미설치</td><td>POSIX <code>sysconf</code> 로 총 메모리 추정 → 그것도 없으면 <b>코어 수만으로</b> 산정</td><td class="k">total_mem_gb</td></tr>
+    <tr><td>총 메모리를 못 구함</td><td><code>available</code> 로 대체, 둘 다 없으면 메모리 상한을 적용하지 않는다</td><td class="k">plan_workers</td></tr>
+    <tr><td>컨테이너에서 코어가 과다 보고</td><td><code>cpu_cores</code> 를 정수로 지정해 강제 (테스트·컨테이너용)</td><td class="k">cfg.cpu_cores</td></tr>
+    <tr><td>설정값이 0 이나 음수</td><td>최소 1 로 클램프 — 워커 0 으로 파이프라인이 멈추지 않는다</td><td class="k">plan_workers</td></tr>
+  </table>
+</section>
+
+<!-- ═══════════ 14 · 로그/현황 ═══════════ -->
+<section class="sec">
+  <div class="sec-h"><span class="sec-n">14</span><span class="sec-t">실행 로그 · DB heatmap · 용량 경고</span>
+    <span class="sec-s">run_log.py · feature_pipeline.status/db_usage</span></div>
+
+  <h3>실행 로그 — 제품 × 1회 실행 = 1줄</h3>
+  <div class="note mono" style="white-space:pre">[raw]     1.74s · 유닛 24 / FAB 1050 · INLINE 576 · VM 384 · ET 960 rows
+[event]   1.37s / FAB: raw 0 → event 0 · 0 파티션        ← 이미 처리된 날짜는 건너뜀
+[feature] 1.34s · event 19일 전체 대상 / fab 4 · knob 2 · mask 1 · inline 2 · vm 2
+          knob 미변환(RO) 7건 · skip 판정 17건
+          ⚠ KNOB_CONTACT_ETCH_ppid: auto skip 보류 — 뒤쪽 step 판별 불가
+[wide]    0.21s · rows 705 · feature 11 → db/4.WIDE_FORM/ML_TABLE_VH_PRODA.parquet</div>
+  <p>트리거(<code>schedule</code>/<code>loop</code>/<code>manual</code>/<code>rebuild</code>)와 성공·실패가 함께 남고,
+    실패는 <b>어느 단계까지 갔는지</b>와 사유가 남는다. 결과 표기는 <b>성공 / 부분 실패 / 중단</b> 3단계다.</p>
+
+  <figure>
+    <svg viewBox="0 0 640 150">
+      <text class="t-o" x="10" y="16">DB heatmap 의 feat 배지</text>
+      <rect class="bx" x="10" y="24" width="380" height="60" rx="4"/>
+      <text class="t-m" x="24" y="46">● FAB   feat 7 · 20일 (07-04~07-27)</text>
+      <path class="ln-d" d="M96 52 L96 66"/><text class="t-s" x="60" y="78">feature 컬럼(parquet) 수</text>
+      <path class="ln-d" d="M180 52 L180 66"/><text class="t-s" x="196" y="78">그 feature 가 대상으로 삼은 event 구간</text>
+      <rect class="bx-y" x="400" y="24" width="230" height="60" rx="4"/>
+      <text class="t-b" x="410" y="42">기록이 없는 예전 산출물은</text>
+      <text class="t-s" x="410" y="58">현재 event 기준 <tspan style="font-weight:700">추정</tspan>으로 표시하고</text>
+      <text class="t-s" x="410" y="72">툴팁에 그렇게 적는다 — 한 번 실행하면 정확해진다</text>
+
+      <text class="t-o" x="10" y="106">DB 사용량</text>
+      <rect class="bx-g" x="10" y="114" width="196" height="30" rx="3"/>
+      <text class="t-s" x="108" y="127" text-anchor="middle">제품 × 소스로 raw·event 분해</text>
+      <text class="t-s" x="108" y="139" text-anchor="middle">+ 전 제품 소스별 합계</text>
+      <rect class="bx-y" x="212" y="114" width="196" height="30" rx="3"/>
+      <text class="t-s" x="310" y="127" text-anchor="middle">db_warn_gb(기본 40GB) 초과 시 경고</text>
+      <text class="t-s" x="310" y="139" text-anchor="middle">자동 삭제는 하지 않는다</text>
+      <rect class="bx-s" x="414" y="114" width="216" height="30" rx="3"/>
+      <text class="t-s" x="522" y="127" text-anchor="middle">전체 트리 탐색이라 10분 캐시</text>
+      <text class="t-s" x="522" y="139" text-anchor="middle">표기는 적응형 (KB/MB/GB)</text>
+    </svg>
+  </figure>
+
+  <h3>폴백 · 예외 처리</h3>
+  <table>
+    <tr><th style="width:44mm">상황</th><th>동작</th><th style="width:30mm">근거</th></tr>
+    <tr><td>로그 파일 쓰기 실패</td><td>조용히 통과 — <b>로그 실패가 파이프라인을 멈추지 않는다</b></td><td class="k">RunLog.append</td></tr>
+    <tr><td>로그 파일이 4MB 초과</td><td>뒤쪽(최신) 절반만 남기고 잘라낸다. 화면 표시와 스케줄 판정 모두 최신만 있으면 성립</td><td class="k">_trim_if_needed</td></tr>
+    <tr><td>깨진 JSONL 줄</td><td>그 줄만 건너뛰고 나머지를 읽는다</td><td class="k">_all</td></tr>
+    <tr><td>severity 가 비어 있음</td><td><code>error</code> → critical / <code>ok=false</code> → warning / 그 외 info 로 자동 결정</td><td class="k">append</td></tr>
+    <tr><td>용량 조회 중 접근 불가 폴더</td><td><code>OSError</code> 를 건너뛰며 계속 걷는다 (심볼릭 링크는 따라가지 않음)</td><td class="k">_dir_bytes</td></tr>
+    <tr><td><code>time_col</code> 설정 오류가 있는 소스</td><td>용량 조회는 계속하고 그 소스의 기준 열만 <code>null</code> 로 — 설정 오류가 화면 전체를 막지 않는다</td><td class="k">db_usage</td></tr>
+    <tr><td><code>db_warn_gb</code> 가 0·음수·문자열</td><td>기본 40GB 로 폴백</td><td class="k">db_warn_bytes</td></tr>
+  </table>
+</section>
+<!-- ═══════════ 15 · 알람 순환 ═══════════ -->
+<section class="sec">
+  <div class="sec-h"><span class="sec-n">15</span><span class="sec-t">매칭알람 — Valve ↔ flow 순환</span>
+    <span class="sec-s">backend/core/alert_store.py</span></div>
+
+  <div class="lead">Valve 가 "이 step 은 매칭 테이블에 없다 / 이 ppid 는 knob 으로 못 바꿨다"를 알리면,
+    flow 가 판정해서 룰북을 고치거나 <b>반영불필요</b>로 닫는다. 그 판정이 다시 Valve 로 돌아와 알람을 억제한다.</div>
+
+  <figure>
+    <svg viewBox="0 0 640 288">
+      <!-- lanes -->
+      <rect class="bx-d" x="10" y="10" width="120" height="26" rx="4"/><text class="t-w" x="70" y="28" text-anchor="middle">Valve</text>
+      <rect class="bx-o" x="264" y="10" width="120" height="26" rx="4"/><text class="t-o" x="324" y="28" text-anchor="middle">S3</text>
+      <rect class="bx-s" x="510" y="10" width="120" height="26" rx="4"/><text class="t-b" x="570" y="28" text-anchor="middle">flow</text>
+      <line class="ln-d" x1="70" y1="40" x2="70" y2="268"/>
+      <line class="ln-d" x1="324" y1="40" x2="324" y2="268"/>
+      <line class="ln-d" x1="570" y1="40" x2="570" y2="268"/>
+
+      <!-- 1 -->
+      <path class="ln-o" d="M74 62 L318 62" marker-end="url(#aro)"/>
+      <text class="t" x="90" y="56">① 파이프라인 실행 → 알람 생성 → 발행</text>
+      <text class="t-m" x="90" y="74">valve-alerts/pipeline/{vehicle}.json</text>
+      <rect class="bx-g" x="90" y="80" width="200" height="24" rx="3"/>
+      <text class="t-s" x="100" y="95">동시에 로컬 outbox 에 같은 트리로 미러</text>
+      <!-- 2 -->
+      <path class="ln-o" d="M320 122 L566 122" marker-end="url(#aro)"/>
+      <text class="t" x="340" y="116">② flow 매칭알람 탭이 폴링(기본 300초)</text>
+      <!-- 3 -->
+      <path class="ln" d="M566 156 L328 156" marker-end="url(#ar)"/>
+      <text class="t" x="352" y="150">③-a 매칭 csv 수정 → S3 업로드</text>
+      <path class="ln" d="M566 186 L328 186" marker-end="url(#ar)"/>
+      <text class="t" x="352" y="180">③-b 보류·반영불필요 → ack.json 기록</text>
+      <!-- 4 -->
+      <path class="ln" d="M318 216 L76 216" marker-end="url(#ar)"/>
+      <text class="t" x="92" y="210">④ Valve 가 csv 를 내려받아 event 재생성 → 알람 자연 소멸</text>
+      <path class="ln" d="M318 244 L76 244" marker-end="url(#ar)"/>
+      <text class="t" x="92" y="238">⑤ ack 를 읽어 해당 알람 억제 (status 를 달고 목록에는 유지)</text>
+
+      <rect class="bx-r" x="316" y="252" width="314" height="30" rx="3"/>
+      <text class="t-s" x="326" y="266">ack.json 은 outbox 에 두지 않는다 — 양방향 파일이라</text>
+      <text class="t-s" x="326" y="277">폴더 sync 로 덮으면 flow 의 판정이 유실된다</text>
+    </svg>
+    <figcaption>알람 1순환. 발행은 Valve, 판정은 flow, 억제는 다시 Valve</figcaption>
+  </figure>
+
+  <h3>알람 id 와 발행 규칙</h3>
+  <table class="tbl-tight">
+    <tr><th style="width:44mm">항목</th><th>값</th></tr>
+    <tr><td>미매칭 step id</td><td class="k">um|{vehicle}|{step_id}</td></tr>
+    <tr><td>RO ppid id</td><td class="k">ro|{vehicle}|{step_id}|{ppid}</td></tr>
+    <tr><td>억제 상태</td><td><code>미확인예정</code> · <code>반영불필요</code> (지우거나 <code>active</code> 로 두면 다시 활성)</td></tr>
+    <tr><td>발행 조건</td><td>알람 id 집합 + ack 상태의 <b>지문(fp)</b>이 직전과 다를 때만. 수치(rows 등)는 파이프라인 실행 시 발행이 갱신</td></tr>
+    <tr><td>payload 부가</td><td><code>schema</code>(현재 2) · <code>alert_cols</code> · <code>delta{new,resolved}</code> · <code>first_seen_ts</code> 계승</td></tr>
+    <tr><td>주기</td><td><code>alerts.s3_interval_min</code> 기본 10분 (5~15분 권장) · 0 이면 파이프라인 실행 시에만</td></tr>
+  </table>
+
+  <div class="okbox"><b>보증되는 성질.</b> ① 파일은 <b>내용이 바뀔 때만</b> 갱신된다 — 같으면 mtime 도 건드리지 않아
+    <code>aws s3 sync</code> 가 헛돌지 않는다. ② outbox 는 <b>바이트로 저장</b>해 Windows 개행 변환으로 S3 발행본과
+    달라지지 않는다. ③ 폴더가 통째로 지워져도 다음 사이클에 자동 복구된다(지문이 같아도 파일이 없으면 발행).</div>
+
+  <h3>폴백 · 예외 처리</h3>
+  <table>
+    <tr><th style="width:44mm">상황</th><th>동작</th><th style="width:30mm">근거</th></tr>
+    <tr><td>S3 자격증명이 없는 환경</td><td>outbox 미러는 <b>s3_enabled 와 무관하게 항상</b> 쓴다 — 직접 접근이 없는 환경의 유일한 경로이기 때문</td><td class="k">publish</td></tr>
+    <tr><td>ack 를 S3 에서 못 읽음</td><td>로컬 캐시 <code>logs/alerts_ack.json</code> 로 폴백. 저장은 로컬 먼저, S3 는 best-effort</td><td class="k">load_ack / set_ack</td></tr>
+    <tr><td>ack JSON 이 깨짐</td><td>빈 dict 로 간주 — 전 알람이 <code>active</code> 로 보인다(억제가 조용히 새는 것보다 낫다)</td><td class="k">load_ack</td></tr>
+    <tr><td>Valve 업그레이드</td><td><code>schema</code> 버전이 지문에 섞여 있어 알람 구성이 그대로여도 <b>한 번은 재발행</b> — 새 필드가 flow 로 넘어가도록</td><td class="k">_fingerprint</td></tr>
+    <tr><td>발행 스냅샷 저장 실패</td><td>조용히 통과하고 발행은 계속</td><td class="k">publish</td></tr>
+    <tr><td>특정 제품에서 예외</td><td>그 제품만 <code>{"error": …}</code> 로 기록하고 나머지 제품은 계속 발행</td><td class="k">publish_all_if_changed</td></tr>
+    <tr><td>주기가 0(비활성)</td><td>루프는 계속 돌되 60초마다 설정만 재확인 — 켜면 다음 사이클부터 동작(재시작 불필요)</td><td class="k">_publish_loop</td></tr>
+    <tr><td>unmatched 스캔이 불가(raw 없음)</td><td>RuntimeError 를 잡아 알람 목록에서 그 부분만 제외 (RO ppid 알람은 그대로 나간다)</td><td class="k">build</td></tr>
+  </table>
+</section>
+
+<!-- ═══════════ 16 · match_hint ═══════════ -->
+<section class="sec">
+  <div class="sec-h"><span class="sec-n">16</span><span class="sec-t">match_hint — function step 추천의 근거</span>
+    <span class="sec-s">feature_pipeline._step_match_hints → alert_store.build</span></div>
+
+  <div class="lead"><b>flow 서버에는 FAB raw DB 가 없다.</b> 그래서 flow 가 "이 신규 step 은 어느 function step 인가"를
+    LLM 에게 물을 때 쓰는 <b class="hl">유일한 근거가 Valve 가 알람에 실어 보내는 <code>match_hint</code></b> 다.
+    한쪽만 고치면 조용히 근거 없는 추천이 된다 — 이건 두 앱 사이의 계약이다.</div>
+
+  <figure>
+    <svg viewBox="0 0 640 250">
+      <text class="t-o" x="10" y="16">step_id 는 같은 prefix·같은 자릿수 안에서 번호가 공정 순서를 뜻한다</text>
+      <line class="ln" x1="30" y1="60" x2="610" y2="60"/>
+      <g>
+        <circle cx="90" cy="60" r="6" fill="#94a3b8"/><text class="t-m" x="90" y="80" text-anchor="middle">CC955000</text>
+        <text class="t-s" x="90" y="92" text-anchor="middle">SPACER_DEP</text>
+        <circle cx="230" cy="60" r="6" fill="#94a3b8"/><text class="t-m" x="230" y="80" text-anchor="middle">CC955100</text>
+        <text class="t-s" x="230" y="92" text-anchor="middle">SPACER_CVD</text>
+        <circle cx="370" cy="60" r="8" fill="#FF5E00"/><text class="t-m" x="370" y="44" text-anchor="middle" style="fill:#FF5E00">CC955200 (신규)</text>
+        <text class="t-s" x="370" y="80" text-anchor="middle" style="fill:#FF5E00">매칭 없음</text>
+        <circle cx="510" cy="60" r="6" fill="#94a3b8"/><text class="t-m" x="510" y="80" text-anchor="middle">CC955300</text>
+        <text class="t-s" x="510" y="92" text-anchor="middle">SPACER_ETCH</text>
+      </g>
+      <path class="ln-o" d="M356 60 L244 60" marker-end="url(#aro)"/>
+      <path class="ln-o" d="M384 60 L496 60" marker-end="url(#aro)"/>
+      <text class="t-s" x="300" y="52" text-anchor="middle">prev</text>
+      <text class="t-s" x="440" y="52" text-anchor="middle">next</text>
+
+      <rect class="bx" x="10" y="104" width="300" height="88" rx="5"/>
+      <text class="t-b" x="20" y="122">실어 보내는 것</text>
+      <text class="t-s" x="20" y="138">· 최근 N일(기본 7) FAB raw 에서 각 step 이 실제로 쓴</text>
+      <text class="t-m" x="30" y="152">ppid · eqp_id · eqp_model · area 의 unique 값</text>
+      <text class="t-s" x="20" y="168">· window(from~to·dates) · rows · n_lots · gap · direction</text>
+      <text class="t-s" x="20" y="184">· 기간은 오늘이 아니라 <tspan style="font-weight:700">데이터에 있는 날짜</tspan> 기준</text>
+
+      <rect class="bx-g" x="322" y="104" width="308" height="88" rx="5"/>
+      <text class="t-b" x="332" y="122">판단은 flow 몫</text>
+      <text class="t-s" x="332" y="140">· 신규 step 의 ppid 가 이웃의 ppid 에 있으면 → 같은 function step 1순위</text>
+      <text class="t-s" x="332" y="156">· 새 ppid 면 eqp_id·eqp_model·area 가 겹치는 이웃이 후보</text>
+      <text class="t-s" x="332" y="172">· 한 step 은 1회만 검사하고 flow 가 결과를 기록(캐시)</text>
+      <text class="t-s" x="332" y="186">· 후보 step 목록은 flow 의 Vehicle_matching.csv 가 소유</text>
+
+      <rect class="bx-y" x="10" y="202" width="620" height="42" rx="4"/>
+      <text class="t-b" x="20" y="218">이웃으로 안 뽑는 것</text>
+      <text class="t-s" x="20" y="234">① 아직 매칭 안 된 step (function step 이 없으니 근거가 못 된다)  ② 같은 prefix 라도 자릿수가 다른 step (체계가 다르다)  ③ 최근 N일 raw 에 등장하지 않은 step</text>
+    </svg>
+    <figcaption>번호로 이웃을 고르고, 그 이웃이 "실제로 어떻게 돌았는지"를 붙여 보낸다</figcaption>
+  </figure>
+
+  <h3>payload 예시</h3>
+  <div class="note mono" style="white-space:pre">{ "id": "um|VH_PRODA|CC955200", "type": "unmatched_step", "step_id": "CC955200",
+  "match_hint": {
+    "prefix": "CC", "number": 955200, "days": 7,
+    "window": {"from": "2026-07-20", "to": "2026-07-26", "dates": 7},
+    "cols": ["ppid", "eqp_id", "eqp_model", "area"],
+    "values": {"ppid": ["PP_SPAC_STD"], "eqp_id": ["CVD_02"]},        // 신규 step
+    "neighbors": [                                                    // 앞뒤 매칭 step
+      {"step_id": "CC955100", "step_desc": "SPACER_CVD", "direction": "prev", "gap": 100,
+       "values": {"ppid": ["PP_SPAC_STD"], "eqp_id": ["CVD_02"]}}
+    ] } }</div>
+
+  <h3>설정 <span class="src">pipeline.yaml unmatched_scan.hint · 알람 탭 ⚙ · PUT /api/pipeline/config/alert-hint</span></h3>
+  <table class="tbl-tight">
+    <tr><th style="width:26mm">키</th><th style="width:22mm">기본값</th><th>의미 · 클램프</th></tr>
+    <tr><td class="k">enabled</td><td>true</td><td>끄면 컨텍스트를 싣지 않는다 (flow 는 "근거 없음"으로 표시)</td></tr>
+    <tr><td class="k">days</td><td>7</td><td>FAB raw 에서 볼 최근 날짜 파티션 수 (1~90 클램프)</td></tr>
+    <tr><td class="k">neighbors</td><td>3</td><td>앞/뒤 각각의 이웃 수 (1~10)</td></tr>
+    <tr><td class="k">cols</td><td>ppid, eqp_id, eqp_model, area</td><td>비교할 열. 중복 제거, 비면 기본값</td></tr>
+    <tr><td class="k">value_limit</td><td>12</td><td>열 하나에 실을 unique 값 상한 (1~50)</td></tr>
+  </table>
+
+  <div class="warnbox"><b><code>area</code> 는 조용히 빠진다.</b> FAB raw 조회 컬럼에 없으면 hint 에서 그냥 제외된다.
+    쓰려면 <b class="hl">먼저 <code>sources.FAB.columns</code> 에 추가</b>해야 한다(알람 탭 ⚙ 조회 컬럼).
+    기본 조회 컬럼에 넣지 않은 이유는 — 사내 테이블에 없는 열을 SELECT 에 넣으면 <b>FAB raw 쿼리가 통째로 실패</b>하기 때문이다.</div>
+
+  <h3>폴백 · 예외 처리</h3>
+  <table>
+    <tr><th style="width:44mm">상황</th><th>동작</th><th style="width:30mm">근거</th></tr>
+    <tr><td>설정 키가 아예 없는 기존 설치</td><td>코드 기본값으로 그대로 동작 (<code>config/</code> 는 seed-only 라 업그레이드해도 키가 안 생긴다)</td><td class="k">alert_hint_cfg</td></tr>
+    <tr><td>비교 열이 raw 에 하나도 없음</td><td>hint 를 만들지 않고 빈 dict 반환 → 알람에 <code>match_hint</code> 키 자체가 없다 (flow 가 "컨텍스트 없음"으로 구분)</td><td class="k">_step_match_hints</td></tr>
+    <tr><td><code>time_col</code> 설정 오류</td><td>기간 축소를 포기하고 전체 raw 로 계산 — 추천 컨텍스트까지 막지는 않는다</td><td class="k">_recent_raw</td></tr>
+    <tr><td>DB 가 며칠 밀려 있음</td><td>"오늘 기준 7일"이 아니라 <b>데이터에 있는 최근 7개 날짜</b>를 쓴다 — 빈 창이 나오지 않는다</td><td class="k">_recent_raw</td></tr>
+    <tr><td>step_id 가 숫자로 끝나지 않음</td><td>이웃 계산을 건너뛰고 자기 값(values)만 싣는다</td><td class="k">split_step_id</td></tr>
+    <tr><td>매칭 테이블 로드 실패</td><td><code>smap</code> 을 빈 dict 로 — 이웃이 0개가 될 뿐 알람은 정상 발행</td><td class="k">_step_match_hints</td></tr>
+  </table>
+  <p class="src">검증: Valve tests/test_pipeline.py(hint 3건) · flow tests/test_valve_match_hint.py(3건)</p>
+</section>
+
+<!-- ═══════════ 17 · S3 전송 엔진 ═══════════ -->
+<section class="sec">
+  <div class="sec-h"><span class="sec-n">17</span><span class="sec-t">S3 전송 항목 엔진 · 탐색기 신호등</span>
+    <span class="sec-s">backend/core/s3_jobs.py · s3_link.py</span></div>
+
+  <div class="lead">전송은 <b>항목(item) 단위</b>다. "로컬 어디" ↔ "S3 어느 key" 를 짝지어 두고 방향·명령·주기를 각각 준다
+    (flow 의 s3_ingest 와 같은 사용 모델). 탐색기 우상단 <b>⚙</b> 에서 관리한다.</div>
+
+  <figure>
+    <svg viewBox="0 0 640 216">
+      <rect class="bx" x="10" y="10" width="292" height="96" rx="5"/>
+      <text class="t-o" x="20" y="26">항목 하나</text>
+      <text class="t-m" x="20" y="42">direction: download | upload</text>
+      <text class="t-m" x="20" y="56">root: config | staging | db | outbox   target: 상대경로</text>
+      <text class="t-m" x="20" y="70">dest: S3 연결   key: S3 key/prefix</text>
+      <text class="t-m" x="20" y="84">mode: sync(변경분만) | cp(항상 덮어쓰기)</text>
+      <text class="t-m" x="20" y="98">interval_min: 0 = 수동 전용   enabled: true/false</text>
+
+      <rect class="bx-o" x="314" y="10" width="316" height="96" rx="5"/>
+      <text class="t-o" x="324" y="26">실행 모델</text>
+      <text class="t-s" x="324" y="42">· 단일 워커 큐 — 동시에 한 항목만, 나머지는 queued</text>
+      <text class="t-s" x="324" y="58">· ■ 중지는 <tspan style="font-weight:700">파일 경계</tspan>에서 끊는다 → 이미 옮긴 파일은 남고</text>
+      <text class="t-s" x="334" y="70">반쪽 파일은 생기지 않는다 (상태 cancelled)</text>
+      <text class="t-s" x="324" y="86">· 진행률 5초 폴링 {done,total,current} · 이력 최근 500건</text>
+      <text class="t-s" x="324" y="100">· 🔍 S3 에서 고르기 — 버킷을 계단식으로 훑어 실제 key 선택</text>
+
+      <text class="t-o" x="10" y="132">탐색기 신호등 — 이 파일은 누가 소유하는가</text>
+      <rect class="bx" x="10" y="140" width="150" height="64" rx="4"/>
+      <text class="t-b" x="20" y="157" style="fill:#2563eb">↓ 파랑 — 받기</text>
+      <text class="t-s" x="20" y="171">S3 → Valve. flow 가 소유하므로</text>
+      <text class="t-s" x="20" y="183">올려도 다음 sync 에 덮인다</text>
+      <text class="t-s" x="20" y="197">Vehicle_matching · ppid_knob · scan_ignore</text>
+      <rect class="bx" x="166" y="140" width="150" height="64" rx="4"/>
+      <text class="t-b" x="176" y="157" style="fill:#16a34a">↑ 초록 — 올리기</text>
+      <text class="t-s" x="176" y="171">Valve → S3</text>
+      <text class="t-s" x="176" y="185">staging/ · 알람 outbox/</text>
+      <rect class="bx" x="322" y="140" width="150" height="64" rx="4"/>
+      <text class="t-b" x="332" y="157" style="fill:#7c3aed">↕ 보라 — 양방향</text>
+      <text class="t-s" x="332" y="171">기동 시 pull, 탐색기에서 push</text>
+      <text class="t-s" x="332" y="185">settings · products · source_types</text>
+      <rect class="bx" x="478" y="140" width="152" height="64" rx="4"/>
+      <text class="t-b" x="488" y="157">화살표 없음 — 로컬 전용</text>
+      <text class="t-s" x="488" y="171">pipeline.yaml · vehicles.yaml</text>
+      <text class="t-s" x="488" y="185">feature_funcs.py</text>
+      <text class="t-s" x="488" y="199">점 색 = 상태(정상·대기·실패)</text>
+    </svg>
+  </figure>
+
+  <h3>폴백 · 예외 처리</h3>
+  <table>
+    <tr><th style="width:44mm">상황</th><th>동작</th><th style="width:30mm">근거</th></tr>
+    <tr><td>최초 기동 (항목 없음)</td><td>기존 <code>csv_sync.yaml</code>(다운로드) · <code>s3_transfer.yaml</code>(업로드)에서 <b>1회 자동 이관</b></td><td class="k">migrate_if_empty</td></tr>
+    <tr><td>이관된 업로드 항목</td><td><b class="hl"><code>enabled: false</code>(수동 전용)로 시작</b> — 사고 방지. 켜는 건 사람의 판단</td><td class="k">migrate_if_empty</td></tr>
+    <tr><td>알람 outbox 항목이 없음</td><td>기동 시 <code>up_valve_alerts</code>(sync·10분) 항목을 자동 시드 — 탐색기 db 폴더와 같은 엔진을 탄다</td><td class="k">ensure_outbox_item</td></tr>
+    <tr><td>중복 실행 요청</td><td>단일 워커 큐라 순서대로 대기 — 같은 파일을 두 워커가 건드리지 않는다</td><td class="k">s3_jobs</td></tr>
+    <tr><td>다운로드 항목과 legacy csv_sync 중복</td><td>다운로드 항목이 하나라도 있으면 legacy 루프를 기동하지 않는다 (이중 실행 방지)</td><td class="k">app.py startup</td></tr>
+    <tr><td>설정 YAML 이 깨짐</td><td>빈 항목 목록 + 기본 플래그로 폴백 (엔진이 죽지 않는다)</td><td class="k">S3Jobs.load</td></tr>
+    <tr><td>업로드 중 <code>.tmp</code> 파일</td><td>알람 폴더 업로드 시 제외 — 반쪽 파일이 flow 로 나가지 않는다</td><td class="k">ensure_outbox_item</td></tr>
+  </table>
+</section>
+
+<!-- ═══════════ 18 · 설정 소유권 ═══════════ -->
+<section class="sec">
+  <div class="sec-h"><span class="sec-n">18</span><span class="sec-t">설정 파일 소유권 — 3가지 덮어쓰기 경로</span>
+    <span class="sec-s">_build_setup.py · s3_jobs/csv_sync · _save_yaml</span></div>
+
+  <div class="lead">같은 <code>config/</code> 를 건드리는 주체가 셋이다. <b>"내가 고친 게 왜 사라졌지"</b> 는 거의 전부 여기서 갈린다.</div>
+
+  <figure>
+    <svg viewBox="0 0 640 210">
+      <rect class="bx-o" x="234" y="86" width="172" height="42" rx="5"/>
+      <text class="t-b" x="320" y="104" text-anchor="middle">config/</text>
+      <text class="t-s" x="320" y="118" text-anchor="middle">pipeline · vehicles · settings · 룰북</text>
+
+      <rect class="bx-s" x="10" y="14" width="180" height="58" rx="4"/>
+      <text class="t-b" x="100" y="32" text-anchor="middle">① 설치본 재실행</text>
+      <text class="t-s" x="100" y="46" text-anchor="middle">코드는 항상 교체</text>
+      <text class="t-s" x="100" y="58" text-anchor="middle">config 는 있으면 <tspan style="font-weight:700">절대 안 덮는다</tspan> (seed-only)</text>
+      <path class="ln" d="M192 52 L262 88" marker-end="url(#ar)"/>
+
+      <rect class="bx-s" x="450" y="14" width="180" height="58" rx="4"/>
+      <text class="t-b" x="540" y="32" text-anchor="middle">② S3 동기화 (flow → Valve)</text>
+      <text class="t-s" x="540" y="46" text-anchor="middle">룰북 csv · scan_ignore.json</text>
+      <text class="t-s" x="540" y="58" text-anchor="middle">로컬에서 고쳐도 다음 sync 에 덮인다</text>
+      <path class="ln" d="M448 52 L378 88" marker-end="url(#ar)"/>
+
+      <rect class="bx-s" x="234" y="152" width="172" height="52" rx="4"/>
+      <text class="t-b" x="320" y="170" text-anchor="middle">③ 웹에서 저장</text>
+      <text class="t-s" x="320" y="184" text-anchor="middle">그 파일 하나를 통째로 다시 쓴다</text>
+      <text class="t-s" x="320" y="196" text-anchor="middle">값은 보존 · <tspan style="fill:#b45309;font-weight:700">주석은 맨 앞 블록만</tspan></text>
+      <path class="ln" d="M320 150 L320 132" marker-end="url(#ar)"/>
+
+      <rect class="bx-g" x="10" y="92" width="200" height="52" rx="4"/>
+      <text class="t-b" x="20" y="110">안전장치</text>
+      <text class="t-s" x="20" y="124">추출 직전 ~/.valve_backups 로 스냅샷</text>
+      <text class="t-m" x="20" y="137">python setup.py restore latest</text>
+
+      <rect class="bx-y" x="430" y="92" width="200" height="52" rx="4"/>
+      <text class="t-b" x="440" y="110">설계 원칙</text>
+      <text class="t-s" x="440" y="124">seed-only 이므로 <tspan style="font-weight:700">새 설정의 기본값은</tspan></text>
+      <text class="t-s" x="440" y="137"><tspan style="font-weight:700">반드시 코드에도</tspan> 둔다 (rt.get(key, 기본값))</text>
+    </svg>
+    <figcaption>설정을 고칠 때는 "누가 이 파일의 주인인가"를 먼저 본다</figcaption>
+  </figure>
+
+  <div class="warnbox"><b>주석 유실.</b> yaml 저장은 <code>yaml.safe_dump</code> 라 주석을 전부 버리고,
+    복원되는 건 <b>파일 첫 줄부터 이어지는 주석 블록</b>뿐이다. 그래서 <code>pipeline.yaml</code>·<code>vehicles.yaml</code> 은
+    설명을 전부 맨 위에 모아 뒀다. <b class="hl">키 옆에 주석을 달면 웹에서 한 번 저장하는 순간 지워진다.</b>
+    (설정 값 자체가 사라지는 일은 없다.)</div>
+
+  <h3>기동 시 config 부트스트랩 <span class="src">backend/core/config_sync.py · app.py</span></h3>
+  <ul>
+    <li><code>settings.json</code> · <code>products.yaml</code> · <code>source_types.yaml</code> 을 S3 에서 pull 한다.</li>
+    <li>실패하면 <b>last_good 으로 폴백</b>하고 알람을 남긴다 (이벤트 루프 전이라 버퍼링했다가 startup 에서 발송).</li>
+    <li>동기화로 파일이 실제로 바뀌었을 때만 메모리 재로드 + <code>api.reload</code>/<code>s3.reload</code>.</li>
+    <li>구 포맷 <code>params_template</code>(<code>{slot:{column,…}}</code>)은 기동 시 신 포맷으로 자동 마이그레이션 후 저장.</li>
+    <li><code>fake_local_path</code> 가 상대경로면 Valve ROOT 기준으로 절대화 — CWD 에 따라 다른 폴더를 쓰는 사고 방지.</li>
+  </ul>
+</section>
+
+<!-- ═══════════ 19 · FAB 스캐너 ═══════════ -->
+<section class="sec">
+  <div class="sec-h"><span class="sec-n">19</span><span class="sec-t">FAB 스캐너 — 미매칭 step · 미등록 PPID</span>
+    <span class="sec-s">backend/core/fab_scanner.py · routers/scanner.py</span></div>
+
+  <div class="lead">파이프라인과 별개로, 지정한 기간·step 범위를 훑어 <b>매칭 테이블에 없는 step</b> 과
+    <b>룰북에 없는 PPID</b> 를 뽑아내는 점검 기능이다. 결과는 저장되고 알람으로 발행된다.</div>
+
+  <figure>
+    <svg viewBox="0 0 640 150">
+      <rect class="bx" x="10" y="10" width="180" height="76" rx="5"/>
+      <text class="t-o" x="20" y="26">데이터 소스 3택</text>
+      <rect class="bx-g" x="20" y="32" width="160" height="16" rx="2"/><text class="t-s" x="28" y="44">Local — 로컬 FAB parquet 읽기</text>
+      <rect class="bx-y" x="20" y="50" width="160" height="16" rx="2"/><text class="t-s" x="28" y="62">Mock — 합성 데이터</text>
+      <rect class="bx-o" x="20" y="68" width="160" height="16" rx="2"/><text class="t-s" x="28" y="80">Real — LakeAPI 로 직접 조회</text>
+
+      <path class="ln-o" d="M192 48 L222 48" marker-end="url(#aro)"/>
+      <rect class="bx-o" x="224" y="10" width="180" height="76" rx="5"/>
+      <text class="t-o" x="234" y="26">스캔</text>
+      <text class="t-s" x="234" y="42">scan_config.yaml — 기간 · step 범위</text>
+      <text class="t-s" x="234" y="56">main step 필터 (eqp 제외 패턴)</text>
+      <text class="t-s" x="234" y="70">미매칭 step · 미등록 ppid 추출</text>
+      <text class="t-s" x="234" y="82">scan_ignore.json 으로 무시 목록 적용</text>
+
+      <path class="ln-o" d="M406 48 L436 48" marker-end="url(#aro)"/>
+      <rect class="bx-g" x="438" y="10" width="192" height="76" rx="5"/>
+      <text class="t-o" x="448" y="26">결과</text>
+      <text class="t-m" x="448" y="42">db/REPORTS/{vehicle}/scan_result</text>
+      <text class="t-s" x="448" y="58">→ 알람 발행 (flow 판정 대상)</text>
+      <text class="t-s" x="448" y="74">flow 가 "반영불필요"로 판정한 항목은</text>
+      <text class="t-s" x="448" y="84" style="fill:#b45309">scan_ignore.json 으로 되돌아와 다음 스캔에서 제외</text>
+
+      <rect class="bx-y" x="10" y="100" width="620" height="42" rx="4"/>
+      <text class="t-b" x="20" y="116">빈 쿼리 방어</text>
+      <text class="t-s" x="20" y="132">해당 기간에 lot 이 하나도 없어도 에러가 아니다 — 스캔 쿼리는 <tspan style="font-weight:700">요청한 컬럼 스키마를 보장</tspan>한 빈 결과를 반환하고, 빈 결과 리포트로 정상 종료한다.</text>
+    </svg>
+  </figure>
+
+  <table>
+    <tr><th style="width:44mm">상황</th><th>동작</th><th style="width:30mm">근거</th></tr>
+    <tr><td>scan_config 가 없는 제품</td><td>기본 설정으로 동작 (기간·범위 기본값)</td><td class="k">scan_config</td></tr>
+    <tr><td>scan_ignore 가 비었거나 깨짐</td><td>무시 목록 없이 진행 — 무시가 조용히 적용되는 것보다 다 보이는 쪽이 안전</td><td class="k">scan_ignore</td></tr>
+    <tr><td>결과 컬럼이 없는 빈 스캔</td><td><code>_empty_result</code> 로 컬럼 구조를 갖춘 빈 결과 반환 (프론트가 깨지지 않게)</td><td class="k">_empty_result</td></tr>
+  </table>
+</section>
+<!-- ═══════════ 20 · 배포·기동 ═══════════ -->
+<section class="sec">
+  <div class="sec-h"><span class="sec-n">20</span><span class="sec-t">배포 · 기동 안전장치</span>
+    <span class="sec-s">setup.py · _build_setup.py · app.py</span></div>
+
+  <div class="lead">사내 배포 표준은 <b>self-extracting <code>setup.py</code></b> 하나다 (flow 와 같은 패턴).
+    <code>python setup.py</code> 한 번이면 소스 추출 + 의존성 설치까지 끝난다.</div>
+
+  <figure>
+    <svg viewBox="0 0 640 208">
+      <rect class="bx-o" x="10" y="12" width="140" height="46" rx="4"/>
+      <text class="t-b" x="80" y="32" text-anchor="middle">python setup.py</text>
+      <text class="t-s" x="80" y="46" text-anchor="middle">단일 파일 (약 730KB)</text>
+      <path class="ln-o" d="M152 35 L182 35" marker-end="url(#aro)"/>
+
+      <rect class="bx" x="184" y="6" width="446" height="58" rx="5"/>
+      <text class="t" x="194" y="24">① Python 3.10 검사 → 낮으면 한글 안내 후 종료 (version/snapshots/restore 만 예외)</text>
+      <text class="t" x="194" y="40">② config/ 스냅샷 → ~/.valve_backups/  ③ 코드 추출(항상 교체) · config 는 없을 때만</text>
+      <text class="t" x="194" y="56">④ db_root 자동 설정  ⑤ requirements.txt 전체 pip 설치 (argv 리스트 호출)</text>
+
+      <rect class="bx-g" x="10" y="76" width="200" height="56" rx="4"/>
+      <text class="t-b" x="20" y="94">복구</text>
+      <text class="t-m" x="20" y="110">python setup.py restore latest</text>
+      <text class="t-m" x="20" y="124">python setup.py snapshots</text>
+
+      <rect class="bx-y" x="220" y="76" width="200" height="56" rx="4"/>
+      <text class="t-b" x="230" y="94">DB 루트 우선순위</text>
+      <text class="t-s" x="230" y="110">VALVE_DB_ROOT (env)</text>
+      <text class="t-s" x="230" y="122">&gt; pipeline.yaml db_root &gt; ROOT/db</text>
+
+      <rect class="bx-s" x="430" y="76" width="200" height="56" rx="4"/>
+      <text class="t-b" x="440" y="94">C: 설치 + D: 존재</text>
+      <text class="t-s" x="440" y="110">db_root 를 D:/Valve_DB 로 자동 설정</text>
+      <text class="t-s" x="440" y="122">기본값('db')일 때만 — 운영자 지정값 존중</text>
+
+      <rect class="bx-r" x="10" y="146" width="620" height="56" rx="4"/>
+      <text class="t-b" x="20" y="164">번들·쓰기에서 제외되는 것 (이중 방어)</text>
+      <text class="t-s" x="20" y="180"><tspan style="font-family:Consolas">db/ · logs/ · staging/ · s3_local/</tspan> — _build_setup.py 의 제외 목록 + setup.py 쓰기 가드. 설치본을 다시 돌려도 <tspan style="font-weight:700">운영 데이터는 건드려지지 않는다.</tspan></text>
+      <text class="t-s" x="20" y="194">배포 절차: VERSION.json 버전·changelog 갱신 → <tspan style="font-family:Consolas">python _build_setup.py</tspan> 로 setup.py 재빌드 → 커밋. (빌드를 빼먹으면 설치본 메타가 어긋난다)</text>
+    </svg>
+  </figure>
+
+  <h3>기동 실패 대응 — 사내 이식에서 실제로 겪은 것들</h3>
+  <table class="tbl-tight">
+    <tr><th style="width:56mm">증상</th><th>원인 · 해결</th></tr>
+    <tr><td class="k">ModuleNotFoundError: sse_starlette</td><td><code>pip install fastapi</code> 만으로는 부족 — <code>pip install -r requirements.txt</code> 로 전체 설치</td></tr>
+    <tr><td class="k">TypeError: unsupported operand for |</td><td>Python 3.9 이하. v0.3.2 부터 app.py·setup.py 가 <b>한글 안내 후 즉시 종료</b>한다 (<code>py -3.11</code> 처럼 버전 지정)</td></tr>
+    <tr><td class="k">Invalid requirement: 'fastapi</td><td>Windows cmd 가 <code>&gt;</code> 를 리다이렉션으로 해석한 것. v0.3.3 에서 pip 호출을 argv 리스트로 교체해 해결</td></tr>
+    <tr><td>사내망에서 pip 이 외부를 못 봄</td><td>외부 PC 에서 <code>pip download -r requirements.txt -d wheels/</code> 후 반입 → <code>--no-index --find-links wheels/</code></td></tr>
+    <tr><td>업데이트했는데 화면이 그대로</td><td>정적 파일 <code>no-cache</code> 재검증(v0.3.4). 그 전 배포본은 브라우저가 구버전 app.js 를 캐시했다</td></tr>
+    <tr><td>aipd 패키지가 없음</td><td>브리지 라우터만 비활성화되고 <b>Valve 본체는 정상 동작</b> (optional import)</td></tr>
+  </table>
+
+  <h3>런타임 반영 범위 — 재시작이 필요한가</h3>
+  <table class="tbl-tight">
+    <tr><th style="width:56mm">바꾼 것</th><th>반영 시점</th></tr>
+    <tr><td>pipeline.yaml (runtime · sources · unmatched_scan · knob_skip)</td><td><b>매 호출마다 fresh 로드</b> — 즉시</td></tr>
+    <tr><td>vehicles.yaml (제품·주기)</td><td>즉시 (다음 tick)</td></tr>
+    <tr><td>settings.json (lake_api · s3 · alerts)</td><td>설정 API 가 in-place merge + <code>reload()</code> — 즉시</td></tr>
+    <tr><td>config/feature_funcs.py</td><td>실행 시점마다 다시 읽는다 — 즉시</td></tr>
+    <tr><td>알람 주기 / S3 항목 주기</td><td>루프가 매 사이클 설정을 다시 읽는다 — 즉시</td></tr>
+  </table>
+</section>
+
+<!-- ═══════════ 21 · 폴백 총정리 ═══════════ -->
+<section class="sec">
+  <div class="sec-h"><span class="sec-n">21</span><span class="sec-t">폴백 총정리</span>
+    <span class="sec-s">한 장으로 보는 실패 대응</span></div>
+
+  <div class="lead">Valve 의 폴백은 세 가지 원칙 위에 서 있다.
+    <b>① 결과 없음은 실패가 아니다</b> — 빈 결과로 흐른다.
+    <b>② 확신할 수 없으면 판단을 유보한다</b> — 채우지도 지우지도 않고 리포트한다.
+    <b>③ 조용히 틀리느니 시끄럽게 멈춘다</b> — 근거 없는 산출물을 flow 로 내보내지 않는다.</div>
+
+  <table class="tbl-tight">
+    <tr><th style="width:12mm">계층</th><th style="width:52mm">상황</th><th>폴백 동작</th></tr>
+
+    <tr><td rowspan="5">수집</td><td>HY000 · timeout · 커넥션 오류</td><td>10s → 30s → 120s 3회 재시도 후 마지막 예외 전파</td></tr>
+    <tr><td>재시도 대상이 아닌 예외</td><td>즉시 실패 (사내 API 를 3배로 두드리지 않는다)</td></tr>
+    <tr><td>어댑터가 None/빈 값 반환</td><td>빈 DataFrame — "데이터 없음"은 정상 경로</td></tr>
+    <tr><td>pandas→polars 변환 실패</td><td>컬럼별 list 로 dict 재구성</td></tr>
+    <tr><td>probe 실패</td><td>단일 chunk 로 진행 + <b>실패 결과는 캐시하지 않는다</b></td></tr>
+
+    <tr><td rowspan="4">업로드</td><td>일부 chunk 실패</td><td>업로드 보류(partial_failed) — 반쪽 파티션을 flow 로 보내지 않는다</td></tr>
+    <tr><td>완전성 허용치 초과</td><td>업로드 보류(completeness_failed) + 재큐잉</td></tr>
+    <tr><td>예상 행 수 0</td><td>완전성 검사 생략 (근거 없는 수치로 막지 않는다)</td></tr>
+    <tr><td>S3 자격증명 없음</td><td>put/get 이 예외 대신 False/None — 기동은 계속, 설정 탭에서 고칠 수 있게</td></tr>
+
+    <tr><td rowspan="6">파이프라인</td><td>기준 열이 columns 에 없음(명시)</td><td>실패시킨다 — 하루치가 엉뚱한 파티션에 들어가는 것보다 낫다</td></tr>
+    <tr><td>기준 열이 없음(미명시)</td><td>tkout_time → 'time' 포함 첫 열 → 쿼리 시작일 순으로 폴백</td></tr>
+    <tr><td>reformatter 파일 없음</td><td>그 제품의 ET 를 건너뛴다</td></tr>
+    <tr><td>event _meta 손상 · mtime 조회 실패</td><td>재생성 쪽으로 판정 (안전한 방향)</td></tr>
+    <tr><td>feature 하나가 실패</td><td>그 feature 만 skip + 사유 기록, 나머지는 산출</td></tr>
+    <tr><td>knob 매핑 실패</td><td>raw ppid 유지(RO) + knob_miss 리포트 + 알람</td></tr>
+
+    <tr><td rowspan="3">판정 유보</td><td>auto skip 표본·비율 미달</td><td>null 유지 + "뒤쪽 step 판별 불가" 리포트</td></tr>
+    <tr><td>SKIP 블록 조건 step 이 매칭에 없음</td><td>블록 미적용 + "vehicle_matching 확인 필요"</td></tr>
+    <tr><td>hint 비교 열이 raw 에 없음</td><td>그 열만 조용히 제외 · 전부 없으면 match_hint 키 자체를 안 붙인다</td></tr>
+
+    <tr><td rowspan="5">운영</td><td>실행 락 경합</td><td>일반 실행은 skip, 매칭 재생성은 대기(기본 1800s) 후 결과를 last_rebuild 에 기록</td></tr>
+    <tr><td>실행 중 취소</td><td>안전 지점(raw 유닛·단계 경계)에서만 중단, send form 건너뜀, 다음 실행이 이어받음</td></tr>
+    <tr><td>raw 유닛 실패</td><td>영구 재시도 큐 → 5회 연속 실패 시 blocked(critical) → 사람이 '재시도 재개'</td></tr>
+    <tr><td>재시도 큐 파일 손상</td><td><code>.bad</code> 로 보관 + 경고 (조용히 비우지 않는다)</td></tr>
+    <tr><td>로그 쓰기 실패 · 4MB 초과</td><td>무시하고 진행 · 최신 절반만 유지</td></tr>
+
+    <tr><td rowspan="5">연동</td><td>S3 접근 불가</td><td>알람은 outbox 미러로 항상 남는다 (sync 만 하면 flow 갱신)</td></tr>
+    <tr><td>ack 를 S3 에서 못 읽음</td><td>로컬 캐시로 폴백, 깨졌으면 전부 active 로 표시</td></tr>
+    <tr><td>outbox 폴더 삭제</td><td>다음 발행 사이클에 자동 복구 (지문이 같아도 파일 없으면 발행)</td></tr>
+    <tr><td>Valve 업그레이드</td><td>schema 버전이 지문에 섞여 1회 강제 재발행 — 새 필드가 flow 로 전달</td></tr>
+    <tr><td>config S3 pull 실패</td><td>last_good 으로 폴백 + 알람</td></tr>
+
+    <tr><td rowspan="3">기동</td><td>Python 3.10 미만</td><td>한글 안내 후 종료 (restore/snapshots/version 은 허용)</td></tr>
+    <tr><td>fake_local_path 준비 실패</td><td>기동을 막지 않고 오류 문자열만 보관 (설정 탭에서 수정 가능)</td></tr>
+    <tr><td>aipd 미설치</td><td>브리지만 비활성화</td></tr>
+  </table>
+</section>
+
+<!-- ═══════════ 22 · 한계 ═══════════ -->
+<section class="sec">
+  <div class="sec-h"><span class="sec-n">22</span><span class="sec-t">알려진 한계 · 다음 단계</span>
+    <span class="sec-s">솔직한 현재 상태</span></div>
+
+  <div class="errbox"><b>1. 파이프라인 raw 는 아직 mock 합성이다.</b><br>
+    <code>feature_pipeline._run_raw_unit</code> 은 <code>lake_api</code> 를 호출하지 않고 결정적 합성 데이터를 만든다.
+    실 어댑터를 쓰는 것은 <b>모니터 탭의 제품 백필 경로</b>(probe → chunk → executor)다.
+    즉 <code>lake_api.mode: real</code> 로 바꿔도 <b class="hl">파이프라인 5단계는 여전히 합성 데이터로 돈다.</b>
+    VERSION.json 의 "다음 — 실사내 API 연결"이 이 작업이며, 붙는 지점은
+    <code>_run_raw_unit</code> 의 생성기 자리 하나다 (컬럼·파티션·필터 규약은 이미 실 데이터 기준으로 맞춰져 있다).</div>
+
+  <div class="errbox"><b>2. <code>_SUCCESS</code> 마커가 없다.</b><br>
+    개별 파일은 원자적으로 쓰이지만(<code>put_atomic</code>), <b>파티션 폴더가 반쯤 채워진 순간</b>에 flow 가 읽으면
+    일부 파일만 보게 되는 이론적 race 가 남아 있다. 실무 영향은 작지만(flow 쪽이 관대하게 fallback)
+    정합성 보강 여지로 남는다. <span class="src">docs/flow_integration.md §6</span></div>
+
+  <div class="warnbox"><b>3. 백필 경로의 S3 key prefix.</b> executor 는
+    <code>{SOURCE}/{PRODUCT}/date=…/part-0.parquet</code> 로 올린다. flow 의 규약은
+    <code>1.RAWDATA_DB_{SOURCE}/…</code> 이므로, 한 버킷을 직접 물릴 때는 prefix 한 줄 정렬이 필요하다
+    (<code>s3.prefix</code> 설정 또는 key 규칙 변경). <span class="src">docs/flow_integration.md §3 Option A/B</span>
+    — 다만 이 문서는 2026-04-24 기준이라 현재 파이프라인/전송 항목 엔진 구조와는 일부 어긋난다.</div>
+
+  <div class="warnbox"><b>4. 알람 outbox 는 "폴더를 올려주는 누군가"가 필요하다.</b>
+    Valve 는 <code>s3_outbox/valve-alerts/</code> 를 항상 최신으로 유지하지만, 실제 업로드는
+    ① <code>s3_jobs</code> 의 <code>up_valve_alerts</code> 항목(자동 시드, 10분 sync) 또는
+    ② 외부 <code>aws s3 sync</code> 중 하나가 담당한다. 둘 다 꺼져 있으면 flow 는 알람을 못 본다.</div>
+
+  <div class="note"><b>5. 검증 범위.</b> <code>python -m pytest tests -q</code> 기준 <b>187개</b>가 모두 mock 경로를 탄다.
+    실 어댑터·실 S3 는 테스트 대상이 아니다. 시계에 의존하는 기본값(실행 금지 시간대 등)은
+    <code>pipe</code> fixture 에서 꺼야 새벽에 도는 테스트가 깨지지 않는다.</div>
+
+  <h3>우선순위 제안</h3>
+  <table class="tbl-tight">
+    <tr><th style="width:14mm">순위</th><th>할 일</th><th style="width:44mm">이유</th></tr>
+    <tr><td>1</td><td><code>_run_raw_unit</code> 에 실 어댑터 경로 연결 (+ mock 은 개발 모드로 유지)</td><td>파이프라인 전체가 실데이터로 돌기 시작하는 유일한 관문</td></tr>
+    <tr><td>2</td><td>파티션 완료 마커(<code>_SUCCESS</code>) 쓰기 + flow 쪽 체크</td><td>남은 정합성 구멍 하나</td></tr>
+    <tr><td>3</td><td>백필 경로 S3 key 를 flow 규약으로 정렬</td><td>중간 동기화 없이 바로 물릴 수 있게</td></tr>
+    <tr><td>4</td><td><code>docs/flow_integration.md</code> 를 현재 구조(v0.3.9)로 갱신</td><td>2026-04-24 기준이라 지금과 어긋난다</td></tr>
+  </table>
+</section>
+
+<!-- ═══════════ 부록 ═══════════ -->
+<section class="sec">
+  <div class="sec-h"><span class="sec-n">A</span><span class="sec-t">부록 — 설정 키 · API</span>
+    <span class="sec-s">빠른 참조</span></div>
+
+  <h3>자주 만지는 설정 키</h3>
+  <table class="tbl-tight">
+    <tr><th style="width:52mm">키</th><th style="width:18mm">기본값</th><th>의미</th></tr>
+    <tr><td class="k">runtime.raw_days / split_days</td><td>5 / 1</td><td>한 번에 조회할 일수 · 유닛 분할 단위</td></tr>
+    <tr><td class="k">runtime.raw_api_max</td><td>3</td><td>전 제품 합친 동시 raw 쿼리 상한</td></tr>
+    <tr><td class="k">runtime.interval_hours</td><td>6</td><td><code>runs_per_day</code> 없는 제품의 기본 주기</td></tr>
+    <tr><td class="k">runtime.schedule_enabled</td><td>true</td><td>자동 실행 마스터 스위치</td></tr>
+    <tr><td class="k">runtime.sched_tick_sec</td><td>60</td><td>"돌 때가 된 제품" 확인 간격</td></tr>
+    <tr><td class="k">runtime.quiet_enabled / start / end</td><td>true / 00:00 / 02:00</td><td>실행 금지 시간대 (따옴표 필수)</td></tr>
+    <tr><td class="k">runtime.retry_delays_sec</td><td>300·900·1800·3600</td><td>재시도 backoff (마지막 값 고정 반복)</td></tr>
+    <tr><td class="k">runtime.retry_max_attempts</td><td>5</td><td>연속 실패 상한 → blocked</td></tr>
+    <tr><td class="k">runtime.db_warn_gb</td><td>40</td><td>제품 DB 경고 임계 (자동 삭제 없음)</td></tr>
+    <tr><td class="k">sources.&lt;NAME&gt;.time_col</td><td>tkout_time</td><td>파티션 기준 열 (조회 컬럼 안에서만)</td></tr>
+    <tr><td class="k">unmatched_scan.alert_cols</td><td>eqp_id·eqp_model·area</td><td>매칭알람에 실을 raw 열</td></tr>
+    <tr><td class="k">unmatched_scan.hint.*</td><td>7일·이웃 3</td><td>function step 추천 컨텍스트</td></tr>
+    <tr><td class="k">knob_skip.min_support / after_fraction</td><td>5 / 0.8</td><td>auto skip 판정 임계</td></tr>
+    <tr><td class="k">lake_api.mode / module / user</td><td>mock / — / pipe-runner</td><td>어댑터 전환 · 인증은 user 하나</td></tr>
+    <tr><td class="k">alerts.s3_interval_min / outbox_dir</td><td>10 / s3_outbox</td><td>알람 발행 주기 · 미러 폴더</td></tr>
+    <tr><td class="k">s3.upload_mode</td><td>immediate</td><td>immediate / interval / manual</td></tr>
+  </table>
+
+  <h3>주요 API</h3>
+  <table class="tbl-tight">
+    <tr><th style="width:52mm">경로</th><th>설명</th></tr>
+    <tr><td class="k">GET /api/pipeline/queue · POST …/queue/cancel</td><td>작업 큐(실행·락대기·예정) · 안전 지점 취소</td></tr>
+    <tr><td class="k">GET /api/pipeline/retries · POST …/retries/resume</td><td>재시도 큐 · blocked 재개</td></tr>
+    <tr><td class="k">GET /api/pipeline/schedule · PUT …/{vehicle}</td><td>제품별 주기 조회·저장 (0=제외, null=전역)</td></tr>
+    <tr><td class="k">GET /api/pipeline/runs</td><td>실행 로그 (vehicle·limit·failed_only 필터)</td></tr>
+    <tr><td class="k">GET /api/pipeline/db-usage</td><td>제품 × 소스 raw·event 사용량 (10분 캐시)</td></tr>
+    <tr><td class="k">GET /api/pipeline/sources · PUT …/config/sources</td><td>테이블·조회 컬럼·파티션 기준 열</td></tr>
+    <tr><td class="k">PUT /api/pipeline/config/alert-cols · alert-hint</td><td>매칭알람 전송 열 · 추천 컨텍스트</td></tr>
+    <tr><td class="k">GET /api/pipeline/alerts · alerts/outbox · PUT alerts/ack</td><td>알람 목록 · 업로드 폴더 현황 · ack</td></tr>
+    <tr><td class="k">GET /api/jobs/state · /stream · POST /enqueue(-all)</td><td>백필 plan/chunk 상태 · SSE · 큐 투입</td></tr>
+    <tr><td class="k">POST /api/jobs/cancel · retry-partition · probe-invalidate</td><td>chunk 취소 · 파티션 재실행 · probe 캐시 무효화</td></tr>
+    <tr><td class="k">GET /api/s3/items · POST /run · /stop · GET /browse-keys</td><td>전송 항목 · 실행/중지 · S3 key 탐색</td></tr>
+    <tr><td class="k">GET /api/scanner/result/{vehicle} · PUT /ignore/{vehicle}</td><td>FAB 스캔 결과 · 무시 목록</td></tr>
+    <tr><td class="k">GET /api/health · /api/version</td><td>모드 확인 · VERSION.json</td></tr>
+  </table>
+
+  <div class="note" style="margin-top:6mm">
+    <b>이 리포트의 근거.</b> Valve 저장소 <code>backend/core/*.py</code> (20개 모듈) · <code>backend/routers/*.py</code> ·
+    <code>config/*.yaml|json</code> · <code>app.py</code> · <code>VERSION.json</code> · <code>README.md</code> ·
+    <code>docs/flow_integration.md</code> 를 2026-07-29 시점(v0.3.9 / e3f9e8f)에 직접 읽어 작성했다.
+    수치·기본값은 코드와 <code>config/</code> 시드 값을 그대로 옮긴 것이며, 설치본의 <code>config/</code> 는 seed-only 라
+    <b>운영 중인 설치에서는 값이 다를 수 있다</b> — 실제 값은 웹 설정 화면 또는
+    <code>GET /api/pipeline/config</code> 로 확인할 것.
+  </div>
+</section>
+
+</body>
+</html>

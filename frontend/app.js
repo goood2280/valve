@@ -56,6 +56,7 @@ const STATE = {
   logsFilter: { product: '', source: '', status: '', severity: '', failed_only: false, kind: 'all', limit: 300 },
   logsItems: [],
   logsRefresh: null,
+  logsOpen: new Set(),   // 펼쳐 둔 로그 행 (15초 자동 갱신 후에도 유지)
 };
 
 // ─────────────────────────────────────
@@ -183,6 +184,7 @@ function renderCurrentTab() {
   const map = {
     monitor: renderMonitor,
     products: renderProducts,
+    diagnose: renderDiagnose,
     logs: renderLogs,
     settings: renderSettings,
     browser: renderBrowser,
@@ -200,10 +202,6 @@ function renderMonitor() {
 
   main.append(
     el('div', { class: 'row', style: { marginBottom: '12px', gap: '8px' } },
-      el('div', {},
-        el('div', { class: 'section-title' }, '모니터'),
-        el('div', { class: 'section-desc' }, '파티션 상태 · 현재 실행 chunk · 최근 실패. SSE 로 실시간 반영.'),
-      ),
       el('div', { class: 'spacer' }),
       el('button', { class: 'btn primary', onclick: onEnqueueAll }, '▶ 전체 실행 (backfill 범위)'),
       el('button', { class: 'btn', onclick: onProbeInvalidateAll }, '↻ Probe 캐시 전체 무효화'),
@@ -536,7 +534,7 @@ function renderQuietControl(rt) {
     timeInput('quiet_end', q.end),
   ];
   if (on && !q.valid) {
-    bits.push(el('span', { class: 'hint', style: { color: '#e5484d' } }, '시각 확인 필요'));
+    bits.push(el('span', { class: 'hint', style: { color: 'var(--danger)' } }, '시각 확인 필요'));
   } else if (blocking) {
     bits.push(el('span', { class: 'rt-quiet-now' },
       `지금 금지 중 → ${fmtClock(q.until)} 해제`));
@@ -583,7 +581,7 @@ function renderVehicleSchedLine(sched) {
   return el('div', { class: 'rt-line rt-veh-line' },
     el('span', { class: 'rt-cap' }, '제품별 주기'), ...chips,
     sched.master_enabled ? null
-      : el('span', { class: 'hint', style: { color: '#f5a524' } }, '자동 실행 꺼짐 — 위 ⏱ 자동 체크'));
+      : el('span', { class: 'hint', style: { color: 'var(--warn)' } }, '자동 실행 꺼짐 — 위 ⏱ 자동 체크'));
 }
 
 const fmtClock = (ts) => (ts ? new Date(ts * 1000).toLocaleString('ko-KR',
@@ -704,7 +702,7 @@ function renderFailuresCard() {
         el('div', { class: 'chunk-id' }, c.chunk_id || '-'),
         el('span', { class: 'pill err' }, c.error_type || c.status),
         el('span', { class: 'mono', style: { color: 'var(--text-muted)' } }, fmt.ago(c.ended_at)),
-        el('div', { class: 'mono', style: { color: '#991b1b', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: c.error }, c.error || ''),
+        el('div', { class: 'mono failure-full', title: c.error }, c.error || ''),
         el('button', { class: 'btn small', onclick: () => onRetry(c) }, '↻ retry'),
       ));
     });
@@ -778,6 +776,49 @@ function getSourceType(name) {
   return SOURCE_TYPES.find(s => s.name === key);
 }
 
+// 소스(DB 종류) 배지 — 색은 source_types.yaml 의 accent 그대로다
+// (설정 › Source types 에서 바꾸면 제품 탭 힌트 박스와 함께 여기 색도 같이 바뀐다).
+// 화면마다 다른 색을 쓰면 색이 정보가 아니라 장식이 된다 — 한 곳에서만 만든다.
+function srcBadge(name) {
+  const key = String(name || '').toUpperCase();
+  const accent = getSourceType(key)?.accent || '#64748b';
+  return el('span', {
+    class: 'src-badge', title: `${key} DB`,
+    style: { color: accent, background: `${accent}22`, borderColor: `${accent}66` },
+  }, key);
+}
+
+// 문장 안의 소스명만 배지로 바꿔 children 배열로 돌려준다 (나머지는 그대로 글자).
+// 진단 검사명은 "FAB raw 파티션" 처럼 앞에, SEND_FORM 은 "1.FAB (FAB+MASK)" 처럼
+// 중간에 섞여 오므로 위치를 가리지 않고 훑는다. 앞뒤가 영숫자면 배지로 보지 않는다
+// (ETC·FABRIC 의 ET/FAB 까지 물들이지 않기 위해).
+function withSourceBadges(text) {
+  const s = String(text ?? '');
+  const names = SOURCE_NAMES.filter(Boolean).slice().sort((a, b) => b.length - a.length);
+  if (!s || !names.length) return [s];
+  const re = new RegExp(`(${names.map(n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`, 'g');
+  const isWord = (ch) => !!ch && /[A-Za-z0-9_]/.test(ch);
+  const out = [];
+  let last = 0, m;
+  while ((m = re.exec(s)) !== null) {
+    if (isWord(s[m.index - 1]) || isWord(s[m.index + m[0].length])) continue;
+    if (m.index > last) out.push(s.slice(last, m.index));
+    out.push(srcBadge(m[0]));
+    last = m.index + m[0].length;
+  }
+  if (!out.length) return [s];
+  if (last < s.length) out.push(s.slice(last));
+  return out;
+}
+
+// 소스 타입의 table_template({name} 치환) — 제품 source.table 기본값.
+// 서버 _render_table 과 같은 규칙이어야 한다 (backend/routers/schedule.py).
+function sourceTypeTable(name) {
+  const key = (name || '').toUpperCase();
+  const tpl = (getSourceType(key)?.table_template || '').trim();
+  return tpl ? tpl.replace(/\{name\}/g, key) : `RAW_${key}_DATA`;
+}
+
 // `inline code` 표기 → children [text, <code>x</code>, text]
 function renderInlineHintText(text) {
   if (!text) return [];
@@ -846,7 +887,12 @@ async function renderProducts() {
       product: newName,
       enabled: true,
       priority: 50,
-      sources: [{ name: 'FAB', table: 'RAW_FAB_DATA', shard_hierarchy: [], target_chunk_rows: 500000 }],
+      sources: [{
+        name: SOURCE_NAMES[0] || 'FAB',
+        table: sourceTypeTable(SOURCE_NAMES[0] || 'FAB'),
+        shard_hierarchy: [...(getSourceType(SOURCE_NAMES[0] || 'FAB')?.default_shard || [])],
+        target_chunk_rows: 500000,
+      }],
       params_template: { product_code: { op: 'eq', value: newName } },
       custom_col: ['lot_id', 'wafer_id', 'time', 'value'],
     });
@@ -863,10 +909,6 @@ async function renderProducts() {
   }
 
   const headerBar = el('div', { class: 'row' },
-    el('div', {},
-      el('div', { class: 'section-title' }, '제품 관리'),
-      el('div', { class: 'section-desc' }, '제품 카드 클릭으로 선택 · 소스 탭으로 상세 drilldown · 저장 시 products.yaml 에 반영.'),
-    ),
     el('div', { class: 'spacer' }),
     el('button', { class: 'btn ghost', onclick: resetAll }, '↺ 되돌리기'),
     el('button', { class: 'btn', onclick: addProduct }, '+ 제품 추가'),
@@ -933,7 +975,12 @@ function productDetailView(p, draft, rerender) {
     p.sources = p.sources || [];
     const existing = new Set(p.sources.map(s => (s.name || '').toUpperCase()));
     const next = SOURCE_NAMES.find(n => !existing.has(n)) || 'NEW';
-    p.sources.push({ name: next, table: `RAW_${next}_DATA`, shard_hierarchy: [], target_chunk_rows: 500000 });
+    p.sources.push({
+      name: next,
+      table: sourceTypeTable(next),
+      shard_hierarchy: [...(getSourceType(next)?.default_shard || [])],
+      target_chunk_rows: 500000,
+    });
     STATE.productsSourceSelected = next;
     rerender();
   };
@@ -1128,8 +1175,10 @@ function sourceCard(p, s, si, rerender) {
     renderHint(st),
     el('div', { class: 'source-head' },
       el('select', { class: 'inline-input', onchange: e => {
+        const prev = s.name;
         s.name = e.target.value;
-        if (!s.table || /^RAW_[A-Z]+_DATA$/.test(s.table)) s.table = `RAW_${s.name}_DATA`;
+        // 직접 지정한 table 이 아니면(이전 타입의 템플릿 값 그대로면) 새 타입 템플릿으로 교체
+        if (!s.table || s.table === sourceTypeTable(prev)) s.table = sourceTypeTable(s.name);
         rerender();
       }},
         ...SOURCE_NAMES.map(n => el('option', { value: n, ...(n === s.name ? { selected: 'selected' } : {}) }, n)),
@@ -1137,7 +1186,10 @@ function sourceCard(p, s, si, rerender) {
       ),
       el('span', { class: 'hint' }, 'table'),
       el('input', { type: 'text', class: 'inline-input', style: { width: '170px' },
-        value: s.table || '', onchange: e => { s.table = e.target.value; } }),
+        value: s.table || '', placeholder: sourceTypeTable(srcKey),
+        title: `소스 타입 기본값: ${sourceTypeTable(srcKey)}\n`
+             + '다르게 적으면 이 제품 전용 값이 되고, 소스 타입을 저장해도 자동으로 안 바뀝니다.',
+        onchange: e => { s.table = e.target.value; } }),
       el('span', { class: 'hint' }, 'chunk rows'),
       el('input', { type: 'number', class: 'inline-input', style: { width: '100px' },
         value: s.target_chunk_rows ?? 500000, onchange: e => { s.target_chunk_rows = Number(e.target.value); } }),
@@ -1160,7 +1212,7 @@ function sourceCard(p, s, si, rerender) {
 function queryPreview(p, s) {
   const cols = Array.isArray(s.custom_col) ? s.custom_col
              : Array.isArray(p.custom_col) ? p.custom_col : [];
-  const table = s.table || `RAW_${s.name}_DATA`;
+  const table = s.table || sourceTypeTable(s.name);
 
   // params_template — key 가 컬럼명, value 가 {op, value}. 빈 값은 제외.
   const paramEntries = [];
@@ -1186,7 +1238,7 @@ function queryPreview(p, s) {
   };
 
   const paramLines = [
-    `    "table": "${table}",`,
+    `    "table_name": "${table}",`,
     `    "dateFrom": "{dateFrom}",          # YYYY-MM-DDT00:00:00`,
     `    "dateTo":   "{dateTo}",            # 다음 날 00:00:00`,
   ];
@@ -1208,7 +1260,7 @@ function queryPreview(p, s) {
 
   const snippet = [
     '# Valve 는 다음 호출로 DataLake 에서 데이터를 가져와 staging parquet 으로 저장.',
-    '# (settings.lake_api.module 에서 로드한 query 함수; mock 모드면 내부 mock engine)',
+    '# (settings.lake_api.module 에서 로드한 실 API query 함수)',
     '',
     'df: pandas.DataFrame = query(',
     '    params={',
@@ -1498,18 +1550,6 @@ async function renderLogs() {
   );
 
   main.append(
-    el('div', { class: 'row', style: { marginBottom: '12px', gap: '8px' } },
-      el('div', {},
-        el('div', { class: 'section-title' }, '실행 로그'),
-        el('div', { class: 'section-desc' }, '각 chunk 의 마지막 시도 결과 — 언제 시도했고, 얼마 걸렸고, 왜 실패했는지.'),
-      ),
-    ),
-    el('div', { class: 'card logs-highlight-card', id: 'logs-highlights' },
-      el('div', { class: 'card-title' }, 'Important issues',
-        el('span', { class: 'count' }, 'WARNING / CRITICAL')),
-      el('div', { id: 'logs-highlight-body', class: 'logs-highlight-grid' },
-        el('div', { class: 'empty' }, 'Loading important events…')),
-    ),
     el('div', { class: 'card', id: 'logs-card' },
       el('div', { class: 'card-title' }, '📜 실행 이력', el('span', { class: 'count' }, '…')),
       filterBar,
@@ -1539,16 +1579,10 @@ async function loadLogs() {
   q.set('limit', String(f.limit || 300));
 
   const body = $('#logs-body');
-  const highlightBody = $('#logs-highlight-body');
   const countEl = document.querySelector('#logs-card .card-title .count');
   try {
-    const hq = new URLSearchParams({ kind: 'all', min_severity: 'warning', limit: '8' });
-    const [r, highlights] = await Promise.all([
-      api.get(`/api/jobs/history?${q.toString()}`),
-      api.get(`/api/jobs/history?${hq.toString()}`),
-    ]);
+    const r = await api.get(`/api/jobs/history?${q.toString()}`);
     STATE.logsItems = r.items || [];
-    if (highlightBody) renderLogHighlights(highlightBody, highlights.items || []);
     if (countEl) countEl.textContent = `${STATE.logsItems.length} 건${r.log_exists ? '' : ' (로그 없음)'}`;
     if (!STATE.logsItems.length) {
       body.innerHTML = '';
@@ -1563,53 +1597,105 @@ async function loadLogs() {
   }
 }
 
-function logReason(it) {
+// 한 줄 요약 — 표는 "한 행 = 한 줄"이 원칙이다. 전문은 행을 눌러 펼친 상세에서 본다.
+const firstLine = (s) => String(s ?? '').split('\n')[0].trim();
+
+function logSummary(it) {
   if (it.kind === 'pipeline') {
-    if (it.error) return it.error;
-    const errors = it.raw_errors || [];
-    if (errors.length) {
-      const first = errors[0];
-      const extra = errors.length > 1 ? ` +${errors.length - 1}` : '';
-      return `${first.source || 'RAW'} ${first.date || ''}: ${first.error || 'retry scheduled'}${extra}`;
+    if (it.error) return firstLine(it.error);
+    const errs = it.raw_errors || [];
+    if (errs.length) {
+      const head = errs[0];
+      const causes = new Set(errs.map(e => e.error || ''));
+      const blocked = errs.filter(e => e.blocked).length;
+      return `raw 실패 ${errs.length}건 · ${head.source || 'RAW'} ${head.date || ''} ${firstLine(head.error) || 'retry scheduled'}`
+        + (causes.size > 1 ? ` (원인 ${causes.size}종)` : '')
+        + (blocked ? ` · 재시도 중단 ${blocked}` : '');
     }
-    return `pipeline ${it.status || ''}`;
+    return `pipeline ${it.status || ''}${it.mode ? ` · ${it.mode}` : ''}`.trim();
   }
   if (it.kind === 'chunk') {
-    if (it.error) return `${it.error_type || 'error'}: ${it.error}`;
+    if (it.error) return `${it.error_type || 'error'}: ${firstLine(it.error)}`;
     if (it.actual_rows != null) return `expected ${fmt.int(it.expected_rows)} · actual ${fmt.int(it.actual_rows)}`;
+    return it.status || '';
   }
   if (it.kind === 'plan') {
     const pm = it.probe_meta || {};
-    if (pm.error) return `probe failed; fallback chunking: ${pm.error}`;
-    if (pm.skipped) return `probe skipped (${pm.reason || 'manual'})`;
-    return `chunks=${it.chunks} · probe=${pm.strategy || '-'}`;
+    if (pm.error) return `⚠ probe 실패 → 단일 chunk fallback: ${firstLine(pm.error)}`;
+    if (pm.skipped) return `probe skip (${pm.reason || 'manual'})`;
+    return `chunks=${it.chunks} · probe=${pm.strategy || '-'}`
+      + (pm.estimated_rows != null ? ` · est ${fmt.int(pm.estimated_rows)}` : '')
+      + (pm.shard_count ? ` · shards=${pm.shard_count}` : '');
   }
-  return JSON.stringify(it.update || {}).slice(0, 160);
+  const u = it.update || {};
+  if (Object.keys(u).length) {
+    const bits = [];
+    if (u.total_rows != null) bits.push(`rows ${fmt.int(u.total_rows)}`);
+    const c = u.completeness || {};
+    if (c.diff_pct != null) bits.push(`diff ${c.diff_pct}%`);
+    if (u.error) bits.push(firstLine(u.error));
+    if (u.s3_key) bits.push(`s3 ${u.s3_key}`);
+    if (bits.length) return bits.join(' · ');
+  }
+  return firstLine(JSON.stringify(u));
 }
 
-function renderLogHighlights(target, items) {
-  target.innerHTML = '';
-  if (!items.length) {
-    target.append(el('div', { class: 'logs-all-clear' }, '✓ No recent WARNING or CRITICAL events'));
-    return;
-  }
-  items.forEach(it => {
-    const sev = LOG_SEVERITY_META[it.severity] || LOG_SEVERITY_META.warning;
-    const when = it.ts ? `${fmt.ago(it.ts)} · ${new Date(it.ts * 1000).toLocaleString('sv').slice(5, 16)}` : '-';
-    target.append(el('div', { class: `logs-highlight ${sev.cls}` },
-      el('div', { class: 'logs-highlight-head' },
-        el('span', { class: `severity-pill ${sev.cls}` }, sev.label),
-        el('strong', {}, `${it.product || it.vehicle || '-'}${it.source ? ` / ${it.source}` : ''}`),
-        el('span', { class: 'hint' }, when),
-      ),
-      el('div', { class: 'logs-highlight-reason', title: logReason(it) }, logReason(it)),
-    ));
-  });
-}
+// 자동 갱신(15초)으로 표를 다시 그려도 펼친 행이 닫히지 않도록 키로 기억한다.
+const logKey = (it) =>
+  `${it.kind}|${it.ts}|${it.chunk_id || it.plan_id || it.partition_key || it.product || it.vehicle || ''}`;
 
 function renderLogsTable(items) {
-  const tbl = el('table', { class: 'tbl logs-tbl' },
+  const rows = [];
+  items.forEach((it) => {
+    const tsStr = it.ts ? new Date(it.ts * 1000).toLocaleString('sv').slice(5, 16) : '-';
+    const tsAgo = it.ts ? fmt.ago(it.ts) : '';
+    const meta = LOG_STATUS_META[it.status] || { label: it.status || '-', cls: 'pending' };
+    const summary = logSummary(it);
+    const sev = LOG_SEVERITY_META[it.severity] || LOG_SEVERITY_META.info;
+    const probeFailed = it.kind === 'plan' && it.probe_meta?.error;
+    const rowCls = [
+      it.severity === 'critical' ? 'row-err' : '',
+      it.severity === 'warning' || probeFailed ? 'row-warn' : '',
+    ].filter(Boolean).join(' ');
+    const rowsTxt = it.kind === 'chunk' && it.actual_rows != null
+      ? `${fmt.int(it.actual_rows)}${it.expected_rows ? ` / ${fmt.int(it.expected_rows)}` : ''}`
+      : '';
+
+    const key = logKey(it);
+    const open = STATE.logsOpen.has(key);
+    const detailTr = el('tr', { class: 'logs-detail-row', ...(open ? {} : { hidden: '' }) },
+      el('td', { colspan: '10' }, renderLogDetail(it)));
+    const tr = el('tr', {
+      class: `logs-row ${rowCls}${open ? ' open' : ''}`.trim(),
+      tabindex: '0',
+      title: it.chunk_id || it.plan_id || it.partition_key || '클릭하면 상세',
+      onclick: () => toggleLogRow(key, tr, detailTr),
+      onkeydown: (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleLogRow(key, tr, detailTr); }
+      },
+    },
+      el('td', { class: 'logs-caret-cell' }, el('span', { class: 'logs-caret' }, '▸')),
+      el('td', { class: 'mono logs-ts' }, tsStr, el('span', { class: 'hint' }, tsAgo)),
+      el('td', {}, el('span', { class: 'pill' }, it.kind)),
+      el('td', { class: 'mono' }, it.product || '-'),
+      el('td', {}, it.source ? srcBadge(it.source) : '-'),
+      el('td', { class: 'mono' }, it.date || '-'),
+      el('td', {},
+        it.status ? el('span', { class: `pill ${meta.cls}` }, meta.label)
+        : probeFailed ? el('span', { class: 'pill warn' }, 'probe fail')
+        : (it.kind === 'plan' && it.probe_meta?.skipped) ? el('span', { class: 'pill pending' }, 'probe skip')
+        : (it.kind === 'plan') ? el('span', { class: 'pill run' }, 'planned')
+        : '-'),
+      el('td', {}, el('span', { class: `severity-pill ${sev.cls}` }, sev.label)),
+      el('td', { class: 'mono' }, it.duration_sec != null ? fmt.dur(it.duration_sec) : '-'),
+      el('td', { class: 'logs-reason', title: summary }, summary || ''),
+    );
+    rows.push(tr, detailTr);
+  });
+
+  return el('table', { class: 'tbl logs-tbl' },
     el('thead', {}, el('tr', {},
+      el('th', { class: 'logs-caret-cell' }, ''),
       el('th', {}, '시간'),
       el('th', {}, '종류'),
       el('th', {}, '제품'),
@@ -1618,58 +1704,121 @@ function renderLogsTable(items) {
       el('th', {}, '상태'),
       el('th', {}, 'Severity'),
       el('th', {}, 'duration'),
-      el('th', {}, 'rows'),
       el('th', {}, '사유 / 메모'),
     )),
-    el('tbody', {},
-      items.map((it) => {
-        const tsStr = it.ts ? new Date(it.ts * 1000).toLocaleString('sv').slice(5, 16) : '-';
-        const tsAgo = it.ts ? fmt.ago(it.ts) : '';
-        const meta = LOG_STATUS_META[it.status] || { label: it.status || '-', cls: 'pending' };
-        let reason = '';
-        if (it.kind === 'chunk') {
-          if (it.error) reason = `${it.error_type || 'error'}: ${it.error}`;
-          else if (it.actual_rows) reason = `expected ${fmt.int(it.expected_rows)} · actual ${fmt.int(it.actual_rows)}`;
-        } else if (it.kind === 'plan') {
-          const pm = it.probe_meta || {};
-          if (pm.error) reason = `⚠ probe 실패 → 단일 chunk fallback: ${pm.error}`;
-          else if (pm.skipped) reason = `probe skip (${pm.reason || 'manual'})`;
-          else reason = `chunks=${it.chunks} · probe=${pm.strategy || '-'}${pm.estimated_rows != null ? ` · est ${fmt.int(pm.estimated_rows)}` : ''}${pm.shard_count ? ` · shards=${pm.shard_count}` : ''}`;
-        } else {
-          reason = JSON.stringify(it.update || {}).slice(0, 120);
-        }
-        reason = logReason(it);
-        const sev = LOG_SEVERITY_META[it.severity] || LOG_SEVERITY_META.info;
-        const probeFailed = it.kind === 'plan' && it.probe_meta?.error;
-        const rowCls = [
-          it.severity === 'critical' ? 'row-err' : '',
-          it.severity === 'warning' || probeFailed ? 'row-warn' : '',
-        ].filter(Boolean).join(' ');
-        const rowsTxt = it.kind === 'chunk' && it.actual_rows != null
-          ? `${fmt.int(it.actual_rows)}${it.expected_rows ? ` / ${fmt.int(it.expected_rows)}` : ''}`
-          : '';
-        const tr = el('tr', { class: rowCls, title: it.chunk_id || it.plan_id || it.partition_key || '' },
-          el('td', { class: 'mono', style: { whiteSpace: 'nowrap' } }, tsStr, el('span', { class: 'hint', style: { marginLeft: '4px' } }, tsAgo)),
-          el('td', {}, el('span', { class: 'pill' }, it.kind)),
-          el('td', { class: 'mono' }, it.product || '-'),
-          el('td', { class: 'mono' }, it.source || '-'),
-          el('td', { class: 'mono' }, it.date || '-'),
-          el('td', {},
-            it.status ? el('span', { class: `pill ${meta.cls}` }, meta.label)
-            : probeFailed ? el('span', { class: 'pill warn' }, 'probe fail')
-            : (it.kind === 'plan' && it.probe_meta?.skipped) ? el('span', { class: 'pill pending' }, 'probe skip')
-            : (it.kind === 'plan') ? el('span', { class: 'pill run' }, 'planned')
-            : '-'),
-          el('td', {}, el('span', { class: `severity-pill ${sev.cls}` }, sev.label)),
-          el('td', { class: 'mono' }, it.duration_sec != null ? fmt.dur(it.duration_sec) : '-'),
-          el('td', { class: 'mono' }, rowsTxt),
-          el('td', { class: 'logs-reason', title: reason }, reason || ''),
-        );
-        return tr;
-      }),
-    ),
+    el('tbody', {}, rows),
   );
-  return tbl;
+}
+
+function toggleLogRow(key, tr, detailTr) {
+  const open = !STATE.logsOpen.has(key);
+  if (open) STATE.logsOpen.add(key); else STATE.logsOpen.delete(key);
+  tr.classList.toggle('open', open);
+  detailTr.toggleAttribute('hidden', !open);
+}
+
+// 펼친 상세 — 한 줄 요약에서 잘린 것을 여기서 전부 본다.
+function renderLogDetail(it) {
+  const kv = [];
+  const add = (k, v) => { if (v != null && v !== '') kv.push(el('dt', {}, k), el('dd', {}, v)); };
+  const clock = (ts) => (ts ? new Date(ts * 1000).toLocaleString('sv') : null);
+
+  add('시각', it.ts ? `${clock(it.ts)} (${fmt.ago(it.ts)})` : null);
+  add('ID', it.chunk_id || it.plan_id || it.partition_key || null);
+  add('제품', [it.product, it.vehicle].filter(Boolean).join(' · ') || null);
+  add('소스 · 날짜', [it.source, it.date].filter(Boolean).join(' · ') || null);
+  add('상태', [it.status, (LOG_SEVERITY_META[it.severity] || {}).label].filter(Boolean).join(' · ') || null);
+  add('실행 모드', it.mode || null);
+  add('소요', it.duration_sec != null ? fmt.dur(it.duration_sec) : null);
+  if (it.started_at || it.ended_at) add('구간', `${clock(it.started_at) || '?'} → ${clock(it.ended_at) || '?'}`);
+  if (it.expected_rows != null || it.actual_rows != null) {
+    add('rows', `actual ${fmt.int(it.actual_rows)} / expected ${fmt.int(it.expected_rows)}`);
+  }
+  if (it.chunks != null) add('chunks', String(it.chunks));
+
+  const u = it.update || {};
+  if (u.total_rows != null) add('total rows', fmt.int(u.total_rows));
+  const comp = u.completeness || {};
+  if (comp.actual != null || comp.expected != null) {
+    add('completeness', `actual ${fmt.int(comp.actual)} / expected ${fmt.int(comp.expected)}`
+      + (comp.diff_pct != null ? ` · diff ${comp.diff_pct}% (tol ${comp.tolerance_pct ?? '-'}%)` : ''));
+  }
+  if (u.s3_key) add('s3 key', u.s3_key);
+
+  const blocks = [el('dl', { class: 'kv log-detail-kv' }, ...kv)];
+
+  if (it.error) {
+    blocks.push(logDetailBlock('오류',
+      el('pre', { class: 'log-detail-pre' }, `${it.error_type ? `${it.error_type}: ` : ''}${it.error}`)));
+  }
+
+  const errs = it.raw_errors || [];
+  if (errs.length) {
+    blocks.push(logDetailBlock(`raw 실패 ${errs.length}건`,
+      el('div', { class: 'log-detail-scroll' },
+        el('table', { class: 'tbl log-detail-tbl' },
+          el('thead', {}, el('tr', {},
+            ['소스', '날짜', '오류', '시도', '재시도', '다음'].map(h => el('th', {}, h)))),
+          el('tbody', {}, errs.map(e => el('tr', {},
+            el('td', {}, e.source ? srcBadge(e.source) : '-'),
+            el('td', { class: 'mono' }, e.date || '-'),
+            el('td', {}, e.error || '-'),
+            el('td', { class: 'mono' }, e.attempts != null ? String(e.attempts) : '-'),
+            el('td', {}, e.blocked
+              ? el('span', { class: 'pill err' }, '중단')
+              : el('span', { class: 'pill warn' }, '대기')),
+            el('td', { class: 'mono' }, e.next_retry_at ? fmtClock(e.next_retry_at) : '-'),
+          )))))));
+  }
+
+  const rt = it.retry;
+  if (rt && (rt.pending || rt.due || rt.max_attempts)) {
+    blocks.push(logDetailBlock('재시도 큐', el('div', { class: 'log-detail-line' },
+      `대기 ${rt.pending ?? 0}건 · 지금 실행 대상 ${rt.due ?? 0}건 · 최대 ${rt.max_attempts ?? '-'}회`
+      + (rt.oldest_age_sec ? ` · 가장 오래된 건 ${Math.round(rt.oldest_age_sec / 3600)}h 경과` : '')
+      + (rt.next_retry_at ? ` · 다음 ${fmtClock(rt.next_retry_at)}` : ''))));
+  }
+
+  const pm = it.probe_meta;
+  if (pm && Object.keys(pm).length) {
+    const bits = [
+      pm.strategy ? `strategy=${pm.strategy}` : null,
+      pm.estimated_rows != null ? `est ${fmt.int(pm.estimated_rows)} rows` : null,
+      pm.sample_rows != null ? `sample ${fmt.int(pm.sample_rows)} rows${pm.sample_hours ? ` / ${pm.sample_hours}h` : ''}` : null,
+      pm.shard_count != null ? `shards ${pm.shard_count}` : null,
+      pm._from_cache ? `캐시 사용 (${Math.round((pm._cache_age_sec || 0) / 3600)}h 경과)` : null,
+      pm.skipped ? `skipped (${pm.reason || 'manual'})` : null,
+      pm.error ? `error: ${pm.error}` : null,
+    ].filter(Boolean);
+    blocks.push(logDetailBlock('probe', el('div', {},
+      el('div', { class: 'log-detail-line' }, bits.join(' · ')),
+      pm.shards?.length ? logDetailChips(`shard ${pm.shards.length}개`, pm.shards) : null)));
+  }
+
+  const sf = it.shard_filters;
+  if (sf && Object.keys(sf).length) {
+    blocks.push(logDetailBlock('shard filter', el('div', {},
+      Object.entries(sf).map(([k, v]) => Array.isArray(v)
+        ? logDetailChips(`${k} · ${v.length}개`, v)
+        : el('div', { class: 'log-detail-line' }, `${k} = ${JSON.stringify(v)}`)))));
+  }
+
+  blocks.push(el('details', { class: 'log-detail-raw' },
+    el('summary', {}, '원본 JSON'),
+    el('pre', { class: 'text-view' }, JSON.stringify(it, null, 2))));
+
+  return el('div', { class: 'log-detail' }, ...blocks);
+}
+
+function logDetailBlock(title, node) {
+  return el('div', { class: 'log-detail-block' },
+    el('div', { class: 'log-detail-title' }, title), node);
+}
+
+function logDetailChips(label, values) {
+  return el('details', { class: 'log-detail-chips' },
+    el('summary', {}, label),
+    el('div', {}, values.map(v => el('span', { class: 'pill' }, String(v)))));
 }
 
 // ─────────────────────────────────────
@@ -1686,8 +1835,7 @@ async function renderSettings() {
 
   const sections = [
     { key: 'lake', label: '🔌 사내 Lake API', rows: [
-      ['lake_api.mode',          'select', ['mock','real']],
-      ['lake_api.module',        'text',   null,   'real 모드에서 부를 함수 — "패키지.모듈:함수" (예: mycorp.valve_adapter:query). 시그니처는 query(params, custom_col, user). 사내 getData 는 keyword 형이라 getData(params, custom_columns=custom_col, user_name=user) 로 넘기는 얇은 어댑터를 만들어 그 경로를 적는다'],
+      ['lake_api.module',        'text',   null,   '실 API 함수 — "패키지.모듈:함수". 기본값 backend.core.real_lake_adapter:query 는 사내 getData(params, custom_columns=custom_col, user_name=user)를 호출한다'],
       ['lake_api.user',          'text',   null,   '사내 getData 의 user_name — 이 API 의 인증 정보는 이것 하나뿐이다 (키/토큰 없음)'],
       ['lake_api.timeout_sec',   'number', null,   '5분(300) 이하 권장. 기본 290'],
       ['lake_api.min_interval_sec', 'number'],
@@ -1696,17 +1844,9 @@ async function renderSettings() {
       ['lake_api.retry.backoff_sec', 'csv', null,  '쉼표 구분 int (예: 10,30,120)'],
       ['lake_api.retryable_errors', 'csv', null,   'HY000, TimeoutError 등'],
     ]},
-    { key: 's3', label: '☁ S3 업로드', rows: [
-      ['s3.endpoint_url', 'text', null, '비우면 AWS S3 / MinIO 는 http://host:9000'],
-      ['s3.bucket', 'text'],
-      ['s3.prefix', 'text'],
-      ['s3.access_key', 'text'],
-      ['s3.secret_key', 'password', null, '저장 후 ****. 그대로 두면 기존 값 유지'],
-      ['s3.fake_local_path', 'text', null, 'endpoint_url 비어있고 이 값 있으면 개발 모드 (로컬 폴더)'],
-      ['s3.upload_mode', 'select', ['immediate','interval','manual'], 'immediate=chunk 직후 / interval=주기적 flush / manual=버튼 눌러야 업로드'],
-      ['s3.upload_interval_sec', 'number', null, 'interval 모드에서만 의미. 기본 300초(5분). 최소 5초 보장'],
-      ['s3.retry_failed_sec', 'number', null, '업로드 실패한 항목의 재시도 간격. 기본 120초'],
-    ]},
+    // ☁ S3 는 탐색기 ⚙ 로 옮겼다 — 연결·전송 규칙·업로드 항목이 한 화면에 있어야
+    // "어디로 무엇이 올라가는지" 가 읽힌다. 여기엔 이동 안내만 남긴다.
+    { key: 's3', label: '☁ S3', custom: renderS3Moved },
     { key: 'schedule', label: '📅 스케줄', rows: [
       ['schedule.backfill_days', 'number', null, '오늘 + 과거 N일 (권장 3~5). 제품별 override 는 제품 탭에서.'],
       ['schedule.interval_hours', 'number', null, '자동 스케줄 (v0.2 구현)'],
@@ -1728,6 +1868,15 @@ async function renderSettings() {
       ['alerts.webhook_url', 'text', null, '범용 webhook URL'],
       ['alerts.config_prefix', 'text', null, 'S3 에서 settings/products/source_types 를 pull 해올 prefix. 기본 valve-config'],
     ]},
+    { key: 'ai', label: '🤖 AI', custom: renderAiSettings, rows: [
+      ['llm.enabled',   'bool',   null, 'AI 보조 사용 여부. 꺼 두면 진단 요약이 규칙 요약으로만 나온다 (기능은 그대로 동작)'],
+      ['llm.api_url',   'text',   null, '사내 LLM 엔드포인트. OpenAI 호환이면 ".../v1" 까지만 적어도 된다'],
+      ['llm.model',     'text',   null, '예: gpt-oss-120b'],
+      ['llm.auth_mode', 'select', ['bearer','dep_ticket','none'], 'bearer → Authorization, dep_ticket → x-dep-ticket 헤더'],
+      ['llm.token',     'password', null, '저장 후에는 **** 로만 보인다 (빈 칸으로 저장하면 기존 값 유지)'],
+      ['llm.format',    'select', ['openai','raw'], 'openai = messages[] · raw = {"prompt": …}'],
+      ['llm.timeout_s', 'number', null, '초. 기본 20 — 한 번 실패하면 60초 동안은 호출을 건너뛴다'],
+    ]},
     { key: 'types', label: '🧩 소스 타입', custom: renderSourceTypesManager },
   ];
 
@@ -1737,7 +1886,7 @@ async function renderSettings() {
   const sectionEls = {};
   for (const s of sections) {
     sectionEls[s.key] = s.custom
-      ? s.custom(draft)
+      ? s.custom(draft, s)          // custom 이 rows 를 직접 그릴 수 있게 섹션째 넘긴다
       : settingsSection(s.label, s.rows, draft);
   }
 
@@ -1763,10 +1912,6 @@ async function renderSettings() {
 
   main.append(
     el('div', { class: 'row' },
-      el('div', {},
-        el('div', { class: 'section-title' }, '설정'),
-        el('div', { class: 'section-desc' }, '저장 시 런타임 반영. secret 은 화면에서 ****.'),
-      ),
       el('div', { class: 'spacer' }),
       el('button', { class: 'btn primary', onclick: () => onSaveSettings(draft) }, '💾 저장'),
     ),
@@ -1775,21 +1920,99 @@ async function renderSettings() {
   );
 }
 
+// 설정 탭에 남는 S3 자리 — 실제 편집은 탐색기 ⚙ 에서 한다.
+function renderS3Moved(_draft) {
+  return el('div', { class: 'card' },
+    el('div', { class: 'card-title' }, '☁ S3 설정은 탐색기로 옮겼습니다'),
+    el('div', { class: 'section-desc' },
+      '접속 정보(연결) · root 별 전송 규칙 · 업/다운로드 항목 · 이력을 탐색기 탭 오른쪽 위 ⚙ 한 곳에서 봅니다. '
+      + '올릴 파일을 보면서 어디로 가는지 같이 보라고 옮겼습니다.'),
+    el('div', { class: 'row', style: { marginTop: '10px' } },
+      el('button', { class: 'btn primary', onclick: () => { route('browser'); setTimeout(openS3Modal, 80); } },
+        '📂 탐색기에서 S3 설정 열기')),
+  );
+}
+
+// 🤖 AI — 사내 LLM 은 **있으면 돕고 없으면 없는 대로** 돈다. 그래서 이 화면의
+// 기본값은 '꺼짐' 이고, 상태 줄이 "지금 어느 쪽으로 동작 중인지" 를 먼저 말한다.
+function renderAiSettings(draft, section) {
+  const statusEl = el('div', { class: 'section-desc' }, '상태 확인 중…');
+  const testOut = el('div', { class: 'hint', style: { marginTop: '6px' } }, '');
+
+  const paint = (st) => {
+    if (!st) { statusEl.replaceChildren('상태를 읽지 못했습니다.'); return; }
+    const on = st.available;
+    // replaceChildren 는 el() 과 달리 null 을 "null" 로 찍는다 — 넣기 전에 걸러 낸다
+    statusEl.replaceChildren(...[
+      el('span', { class: `pill ${on ? 'ok' : 'pending'}` }, on ? 'AI 사용 중' : 'AI 꺼짐'),
+      ' ',
+      on ? `${st.model || '(모델 미지정)'} · ${st.host || 'url 없음'}`
+         : '진단 요약은 규칙 요약으로 나옵니다 — 켜면 같은 내용을 문장으로 정리해 줍니다.',
+      st.breaker_open
+        ? el('span', { class: 'hint' }, ` · 최근 실패로 ${st.cooldown_s}초간 호출 중단: ${st.last_error}`)
+        : null,
+    ].filter((c) => c != null));
+  };
+  api.get('/api/settings/ai').then(paint).catch(() => paint(null));
+
+  const onTest = async (btn) => {
+    btn.disabled = true;
+    testOut.textContent = '연결 테스트 중…';
+    try {
+      const r = await api.post('/api/settings/ai/test', {});
+      testOut.textContent = r.ok
+        ? `✅ 응답 받음 (${r.status?.last_latency_ms ?? '-'}ms): ${r.text || '(빈 응답)'}`
+        : `❌ ${r.error || '실패'}`;
+      paint(r.status);
+    } catch (e) {
+      testOut.textContent = `❌ ${e.message}`;
+    } finally { btn.disabled = false; }
+  };
+
+  return el('div', { class: 'card' },
+    el('div', { class: 'card-title' }, '🤖 AI (사내 LLM · 선택)'),
+    statusEl,
+    el('div', { class: 'section-desc', style: { marginTop: '4px' } },
+      'AI 는 판정을 만들지 않습니다. 진단의 ok/warn/fail 과 조치 문구는 언제나 규칙 코드가 만들고, '
+      + 'AI 는 그 결과를 문장으로 옮겨 적을 뿐입니다 — 연결이 끊겨도 진단은 그대로 동작합니다.'),
+    ...(section?.rows || []).map((row) => settingsRow(row, draft)),
+    el('div', { class: 'row', style: { marginTop: '10px', gap: '8px' } },
+      el('button', { class: 'btn', onclick: (e) => onTest(e.target) }, '🔌 연결 테스트'),
+      el('div', { class: 'hint' }, '※ 위 💾 저장을 먼저 눌러야 바뀐 값으로 테스트합니다.')),
+    testOut,
+  );
+}
+
 function renderSourceTypesManager(_draft) {
   // 독자적인 draft — settings 저장 버튼과 무관하게 별도 저장 버튼 노출.
-  const draft = { source_types: SOURCE_TYPES.map(s => structuredClone(s)) };
+  // prev_name 은 rename 추적용(서버가 제품 소스명까지 함께 바꾸고 yaml 엔 안 남김).
+  const draft = { source_types: SOURCE_TYPES.map(s => ({ ...structuredClone(s), prev_name: s.name })) };
   const card = el('div', { class: 'card' });
   const rerender = () => {
     card.innerHTML = '';
     buildUI();
   };
 
-  const save = async () => {
+  const save = async (force = false) => {
     try {
-      const r = await api.post('/api/schedule/source-types', draft);
-      alert(`저장됨 — ${r.count} 개 타입`);
+      const r = await api.post('/api/schedule/source-types',
+        { ...draft, apply_to_products: true, ...(force ? { force_table: true } : {}) });
       await loadSourceTypes();   // 전역 레지스트리 즉시 갱신
+      // prev_name 재기준 — 저장 후 현재 이름이 곧 이전 이름
+      for (const st of draft.source_types) st.prev_name = st.name;
+      const applied = r.products || {};
+      await afterSourceTypesSaved(applied);
       rerender();
+      alert(`저장됨 — ${r.count} 개 타입\n${summarizeProductPropagation(applied)}`);
+      const conflicts = applied.conflicts || [];
+      if (conflicts.length && !force) {
+        const list = conflicts.slice(0, 8)
+          .map(c => `· ${c.product}/${c.source}: ${c.current} → ${c.template}`).join('\n');
+        if (confirm(`제품에서 직접 지정한 table ${conflicts.length}건은 유지했습니다.\n`
+                  + `${list}${conflicts.length > 8 ? '\n…' : ''}\n\n이것도 템플릿 값으로 덮어쓸까요?`)) {
+          await save(true);
+        }
+      }
     } catch (e) { alert(`저장 실패: ${e.message}`); }
   };
   const addType = () => {
@@ -1810,17 +2033,53 @@ function renderSourceTypesManager(_draft) {
         el('span', { class: 'count' }, `${draft.source_types.length} 개`),
       ),
       el('div', { class: 'section-desc', style: { fontSize: '11px', marginBottom: '10px' } },
-        '새 DB 추가 시 여기에 등록. 등록 후 제품 편집기의 소스 드롭다운·모니터 히트맵·컬럼 풀 모두에 반영.'),
+        '새 DB 추가 시 여기에 등록. 등록 후 제품 편집기의 소스 드롭다운·모니터 히트맵·컬럼 풀 모두에 반영. '
+        + '저장하면 이 소스를 쓰는 제품의 table·소스명(이름 변경 시)·shard 기본값도 함께 갱신됩니다 '
+        + '(제품에서 직접 바꾼 table 은 물어본 뒤에만 덮어씀).'),
       ...draft.source_types.map((st, i) => sourceTypeRow(st, i, draft, rerender)),
       el('div', { class: 'row', style: { marginTop: '10px', gap: '6px' } },
         el('button', { class: 'btn', onclick: addType }, '+ 타입 추가'),
         el('div', { class: 'spacer' }),
-        el('button', { class: 'btn primary', onclick: save }, '💾 저장'),
+        el('button', { class: 'btn primary', onclick: () => save(false) }, '💾 저장'),
       ),
     );
   }
   buildUI();
   return card;
+}
+
+// source type 저장 결과(products 전파) 를 사람이 읽는 한 줄로.
+function summarizeProductPropagation(applied) {
+  const ch = applied.changes || [], cf = applied.conflicts || [], or = applied.orphans || [];
+  if (!ch.length && !cf.length && !or.length) return '제품 반영: 변경 없음';
+  const byField = {};
+  for (const c of ch) byField[c.field] = (byField[c.field] || 0) + 1;
+  const parts = Object.entries(byField).map(([f, n]) => `${f} ${n}건`);
+  const lines = [`제품 반영: ${parts.join(' · ') || '없음'}`];
+  if (cf.length) lines.push(`직접 지정한 table 유지: ${cf.length}건`);
+  if (or.length) {
+    const names = [...new Set(or.map(o => o.source))].join(', ');
+    lines.push(`⚠ 레지스트리에 없는 소스를 아직 쓰는 제품: ${or.length}건 (${names})`);
+  }
+  return lines.join('\n');
+}
+
+// products.yaml 이 서버에서 바뀌었으니 화면 상태도 맞춘다.
+// 제품 탭에 미저장 편집이 있으면 덮어쓰지 않고 알린다 (그대로 저장하면 전파분이 되돌아감).
+async function afterSourceTypesSaved(applied) {
+  if (!(applied.changes || []).length) return;
+  let fresh;
+  try { fresh = await api.get('/api/schedule/products'); } catch (_) { return; }
+  const dirty = STATE.productsDraft && STATE.products
+    && JSON.stringify(STATE.productsDraft) !== JSON.stringify(STATE.products);
+  STATE.products = fresh;
+  if (dirty) {
+    alert('제품 탭에 저장하지 않은 편집이 있어 화면 값은 그대로 뒀습니다.\n'
+        + '그 상태로 저장하면 방금 전파된 table 이 되돌아갑니다 — 제품 탭에서 "되돌리기" 후 확인하세요.');
+  } else {
+    STATE.productsDraft = structuredClone(fresh);
+  }
+  for (const k of Object.keys(_columnCache)) delete _columnCache[k];
 }
 
 function sourceTypeRow(st, idx, draft, rerender) {
@@ -1936,45 +2195,227 @@ async function onSaveSettings(draft) {
 }
 
 // ─────────────────────────────────────
+// Diagnose tab — 사내 반입 시 "어디서 막혔는지" 를 단계별로 하나씩 확인한다.
+//   raw 가 된다 → event 가 정확하다 → feature/매칭테이블이 S3 에서 온다
+// 검사마다 백엔드가 열어볼 parquet(view)을 같이 주므로, 결과를 숫자로만 보지 않고
+// 탐색기(파일 뷰어)에서 눈으로 확인할 수 있다.
+// ─────────────────────────────────────
+const DG = { vehicle: '', data: null, busy: false };
+const DG_TONE = {
+  ok: { ico: '●', color: 'var(--ok)', label: '정상' },
+  warn: { ico: '▲', color: 'var(--warn)', label: '확인' },
+  fail: { ico: '✕', color: 'var(--err)', label: '실패' },
+  skip: { ico: '–', color: 'var(--text-muted)', label: '해당없음' },
+};
+
+async function renderDiagnose() {
+  const main = $('#main');
+  main.innerHTML = '';
+  main.append(
+    el('div', { class: 'row', style: { marginBottom: '12px', gap: '8px', alignItems: 'flex-start' } },
+      el('div', { class: 'spacer' }),
+      el('div', { id: 'dgPicker' }),
+    ),
+    el('div', { id: 'dgBody' }, el('div', { class: 'loading' }, 'Loading…')),
+  );
+  try {
+    const vehicles = await api.get('/api/pipeline/vehicles');
+    const names = Object.keys(vehicles || {});
+    if (!DG.vehicle || !names.includes(DG.vehicle)) DG.vehicle = names[0] || '';
+    $('#dgPicker').replaceChildren(
+      el('select', { style: { fontSize: '12px' },
+        onchange: (e) => { DG.vehicle = e.target.value; DG.data = null; loadDiagnose(); } },
+        ...names.map((n) => el('option', n === DG.vehicle ? { value: n, selected: '' } : { value: n }, n))),
+      el('button', { class: 'btn', style: { marginLeft: '6px' }, onclick: () => loadDiagnose() }, '↻ 다시 검사'),
+    );
+  } catch (e) {
+    $('#dgPicker').replaceChildren(el('span', { class: 'hint' }, String(e.message || e)));
+  }
+  await loadDiagnose();
+}
+
+async function loadDiagnose() {
+  const body = $('#dgBody');
+  if (!body) return;
+  if (!DG.vehicle) {
+    body.replaceChildren(el('div', { class: 'empty' }, '제품이 없습니다 — 제품 탭에서 먼저 등록하세요.'));
+    return;
+  }
+  body.replaceChildren(el('div', { class: 'loading' }, `${DG.vehicle} 검사 중…`));
+  try {
+    DG.data = await api.get(`/api/pipeline/diagnose/${encodeURIComponent(DG.vehicle)}`);
+  } catch (e) {
+    body.replaceChildren(el('div', { class: 'alert err' }, String(e.message || e)));
+    return;
+  }
+  const d = DG.data;
+  body.replaceChildren(
+    dgSummary(d),
+    dgAiCard(d),
+    ...d.stages.map((s, i) => dgStageCard(s, i, d)),
+  );
+}
+
+function dgSummary(d) {
+  const blocked = d.blocked_at && d.stages.find((s) => s.key === d.blocked_at);
+  return el('div', { class: `alert ${d.status === 'ok' ? 'ok' : d.status === 'warn' ? 'warn' : 'err'}`,
+    style: { marginBottom: '12px' } },
+    el('div', { style: { fontWeight: 700 } },
+      d.status === 'ok' ? `${d.vehicle} — 세 단계 모두 통과`
+        : blocked ? `${d.vehicle} — 「${blocked.title}」 에서 막혔습니다`
+        : `${d.vehicle} — 확인이 필요한 항목이 있습니다`),
+    el('div', { class: 'mono', style: { fontSize: '11px', marginTop: '3px' } },
+      `product ${d.product} · db ${d.db_root} · ${fmtClock(d.ts)}`),
+  );
+}
+
+// 요약 카드 — 아래 표를 한 덩어리로 줄여 준다. 사내 LLM 이 연결돼 있으면 문장으로,
+// 아니면 같은 사실을 규칙이 옮겨 적는다(source). **AI 가 없어도 버튼은 동작한다** —
+// 없을 때 사라지는 기능이 되면 사람은 이 화면을 신뢰하지 않는다.
+function dgAiCard(d) {
+  const out = el('div', { class: 'hint' }, '아래 검사 결과를 한 덩어리로 줄여 줍니다.');
+  const btn = el('button', { class: 'btn', onclick: () => run() }, '📝 요약 만들기');
+
+  async function run() {
+    btn.disabled = true;
+    out.replaceChildren(el('span', { class: 'loading' }, '요약 중…'));
+    try {
+      const r = await api.post(`/api/pipeline/diagnose/${encodeURIComponent(d.vehicle)}/summary`, {});
+      out.replaceChildren(
+        el('div', { class: 'row', style: { gap: '6px', marginBottom: '4px' } },
+          el('span', { class: `pill ${r.source === 'ai' ? 'brand' : 'pending'}` },
+            r.source === 'ai' ? `AI · ${r.model || '모델'}` : '규칙 요약'),
+          r.error ? el('span', { class: 'hint' }, r.error) : null),
+        el('pre', { class: 'log-detail-pre', style: { whiteSpace: 'pre-wrap', margin: 0 } },
+          r.text || ''),
+      );
+    } catch (e) {
+      out.replaceChildren(el('div', { class: 'alert err' }, String(e.message || e)));
+    } finally { btn.disabled = false; }
+  }
+
+  return el('div', { class: 'card', style: { marginBottom: '14px' } },
+    el('div', { class: 'row', style: { gap: '8px', alignItems: 'center', marginBottom: '6px' } },
+      el('span', { style: { fontWeight: 700 } }, '📝 요약'),
+      el('div', { class: 'spacer' }), btn),
+    out,
+  );
+}
+
+function dgStageCard(stage, idx, d) {
+  const tone = DG_TONE[stage.status] || DG_TONE.skip;
+  const rows = stage.checks.map((c) => {
+    const t = DG_TONE[c.status] || DG_TONE.skip;
+    return el('tr', { style: c.status === 'skip' ? { opacity: 0.5 } : {} },
+      el('td', { style: { color: t.color, fontWeight: 700, whiteSpace: 'nowrap' } }, `${t.ico} ${t.label}`),
+      el('td', { style: { fontWeight: 600, whiteSpace: 'nowrap' } }, ...withSourceBadges(c.name)),
+      el('td', {},
+        el('div', {}, c.detail || ''),
+        c.fix ? el('div', { class: 'hint', style: { marginTop: '2px' } }, `→ ${c.fix}`) : null),
+      el('td', { style: { whiteSpace: 'nowrap' } },
+        c.view ? el('button', { class: 'btn ghost xsmall',
+          title: `${c.view.root}/${c.view.file}`,
+          onclick: () => openInViewer(c.view) }, `📊 ${c.view.label}`) : null),
+    );
+  });
+  // 앞 단계가 실패면 뒤 단계 결과는 그 여파일 수 있다 — 순서대로 보라고 알려 준다
+  const prevFailed = d.stages.slice(0, idx).some((s) => s.status === 'fail');
+  return el('div', { class: 'card', style: { marginBottom: '14px' } },
+    el('div', { style: { display: 'flex', alignItems: 'baseline', gap: '10px', marginBottom: '4px' } },
+      el('span', { style: { color: tone.color, fontWeight: 800 } }, tone.ico),
+      el('span', { style: { fontWeight: 700 } }, stage.title),
+      el('span', { class: 'hint' }, stage.desc),
+      el('span', { class: 'spacer' }),
+      el('span', { style: { fontSize: '12px', color: stage.failed ? 'var(--err)' : 'var(--text-muted)' } },
+        `실패 ${stage.failed} · 확인 ${stage.warned} · 전체 ${stage.checks.length}`),
+    ),
+    prevFailed && stage.status !== 'ok'
+      ? el('div', { class: 'hint', style: { marginBottom: '4px' } },
+        '앞 단계가 막혀 있어 이 단계의 결과는 그 여파일 수 있습니다 — 위부터 해결하세요.')
+      : null,
+    el('table', { class: 'tbl' },
+      el('thead', {}, el('tr', {},
+        el('th', {}, '판정'), el('th', {}, '검사'), el('th', {}, '결과'), el('th', {}, '확인'))),
+      el('tbody', {}, rows.length ? rows
+        : el('tr', {}, el('td', { colspan: '4', style: { color: 'var(--text-muted)' } }, '검사 항목 없음'))),
+    ),
+  );
+}
+
+// 검사 결과 → 탐색기(parquet 뷰어) 로 이동해 그 파일을 바로 연다.
+function openInViewer(view) {
+  BR.sql = view.sql || '';
+  route('browser');
+  // renderBrowser 는 DOM 을 동기로 만든 뒤 루트 목록만 await 한다 —
+  // 다음 tick 이면 #brTree/#brView 가 이미 있다.
+  setTimeout(() => selectFile(view.root, view.file), 0);
+}
+
+// ─────────────────────────────────────
 // Browser tab
 // ─────────────────────────────────────
-let BR = { root: 'staging', path: '', selFile: '', sql: '', s3mode: 'sync', s3rules: null };
+// 화면 구성은 flow 파일탐색기와 같은 규격이다 (좌측 260px 사이드바 = 범위 칩 → 루트 → 현재 폴더,
+// 우측 = SQL 바 + 가이드 + 결과). S3 전송 설정은 전부 ⚙ 모달로 모았다 — 사이드바에 편집기를
+// 끼워 넣으면 "지금 보고 있는 폴더" 가 무엇인지 읽히지 않는다.
+let BR = { root: 'staging', path: '', selFile: '', sql: '', s3mode: 'sync', s3rules: null,
+  scope: 'data', roots: [], guide: false };
+
+// 루트를 두 범위로 가른다 — 데이터(db 아래: db·staging) / 설정·연동(config·outbox·s3_local)
+const BR_SCOPES = [
+  { key: 'data', icon: '💾', label: '데이터', desc: '파이프라인 산출물 (db · staging)' },
+  { key: 'files', icon: '📁', label: '설정·연동', desc: '설정파일 · 알람 outbox · S3 로컬 저장소' },
+];
+
+function brScopeOf(r, dbPath) {
+  const path = (r.path || '').replace(/\\/g, '/').toLowerCase();
+  const isDbArea = r.name === 'db' || (dbPath && (path === dbPath || path.startsWith(dbPath + '/')));
+  return isDbArea ? 'data' : 'files';
+}
+
+function brRootsInScope(scope) {
+  const dbRoot = BR.roots.find((r) => r.name === 'db');
+  const dbPath = (dbRoot?.path || '').replace(/\\/g, '/').replace(/\/$/, '').toLowerCase();
+  return BR.roots.filter((r) => brScopeOf(r, dbPath) === scope);
+}
 
 async function renderBrowser() {
   const main = $('#main');
   BR.s3rules = null;  // 탭 진입 시 전송 규칙 재조회 (편집 중에만 메모리 유지)
   main.innerHTML = '';
   main.append(
-    el('div', {},
-      el('div', { class: 'row', style: { alignItems: 'flex-start', gap: '10px' } },
-        el('div', {},
-          el('div', { class: 'section-title' }, '파일 탐색기'),
-          el('div', { class: 'section-desc' }, 'staging · s3_local · config(설정파일 csv/yaml/json) · db(파이프라인 산출물) 탐색. parquet/csv 는 SQL 필터, yaml/json 은 텍스트로 열람.'),
+    el('div', { class: 'fb-shell' },
+      el('aside', { class: 'fb-side' },
+        el('div', { class: 'fb-side-head' },
+          el('span', {}, '파일 탐색기'),
+          el('span', { class: 'fb-count', id: 'brCount' }, ''),
+          el('button', { class: 'btn gear-btn', title: 'S3 설정 — 연결(key)·전송 규칙·업/다운로드 항목·이력',
+            onclick: openS3Modal }, '⚙'),
         ),
-        el('div', { class: 'spacer' }),
-        el('button', { class: 'btn gear-btn', title: 'S3 업/다운로드 설정 — 항목별 key 지정 · 수동 실행/중지 · 주기',
-          onclick: openS3Modal }, '⚙'),
+        el('div', { class: 'fb-scope', id: 'brScope' }),
+        el('div', { class: 'fb-side-body' },
+          el('div', { class: 'fb-sec-title' }, '루트'),
+          el('div', { id: 'brRootList' }, el('div', { class: 'fb-empty' }, 'loading…')),
+          el('div', { class: 'fb-sec-title' }, '현재 폴더',
+            el('span', { class: 'fb-crumb', id: 'brCrumb' }, '')),
+          el('div', { id: 'brTree' }),
+        ),
+        el('div', { class: 'fb-side-foot', id: 'brLegend' }),
       ),
-    ),
-    renderSqlGuide(),
-    el('div', { class: 'split' },
-      el('div', { class: 'pane' },
-        el('div', { class: 'hdr' }, '📁 Roots'),
-        el('div', { id: 'brS3Rules' }),
-        el('div', { id: 'brConfigFiles' }),
-        el('div', { id: 'brTree' }, 'loading...'),
-        el('div', { id: 'brLegend' }),
-      ),
-      el('div', { class: 'pane', style: { display: 'flex', flexDirection: 'column' } },
-        el('div', { class: 'sql-bar' },
-          el('input', { type: 'text', placeholder: "SQL filter (e.g. SELECT * FROM t WHERE root_lot_id = 'R001')",
+      el('section', { class: 'fb-main' },
+        el('div', { class: 'fb-sqlbar' },
+          el('span', { class: 'fb-sqlbar-label' }, 'SQL:'),
+          el('input', { type: 'text', placeholder: "예: SELECT lot_id, wafer_id FROM t WHERE root_lot_id = 'R001'",
             value: BR.sql, oninput: (e) => BR.sql = e.target.value,
             onkeydown: (e) => { if (e.key === 'Enter') reloadView(); } }),
-          el('button', { class: 'btn primary', onclick: reloadView }, '▶ Run'),
-          el('button', { class: 'btn', onclick: () => { BR.sql = ''; reloadView(); } }, 'Clear'),
+          el('button', { class: 'btn primary', onclick: reloadView }, '실행'),
+          el('button', { class: 'btn', onclick: () => { BR.sql = ''; renderBrowser(); } }, '초기화'),
+          el('button', { class: 'btn', title: 'DB의 WIDE FORM을 합쳐 FAB·INLINE·VM 컬럼을 한 번에 조회',
+            onclick: reloadCombinedView }, '통합 보기'),
+          el('span', { class: 'hint' }, '표시는 200행까지'),
         ),
-        el('div', { id: 'brView', style: { flex: 1, overflow: 'auto' } },
-          el('div', { class: 'empty' }, '좌측에서 파일 선택 (parquet/csv · yaml/json/txt)'),
+        renderSqlGuide(),
+        el('div', { id: 'brView', class: 'fb-content' },
+          el('div', { class: 'fb-empty' }, '왼쪽에서 파일을 고르세요 — parquet/csv 는 SQL 로, yaml/json/txt 는 텍스트로 엽니다.'),
         ),
       ),
     ),
@@ -2005,8 +2446,9 @@ function renderSqlGuide() {
     el('span', { class: 'sql-snip-label' }, label),
     el('code', {}, sql),
   );
-  return el('details', { class: 'sql-guide', open: undefined },
-    el('summary', {}, '📘 SQL 사용 가이드 (polars SQL) — 클릭해서 펼치기'),
+  return el('details', { class: 'sql-guide', ...(BR.guide ? { open: '' } : {}),
+    ontoggle: (e) => { BR.guide = e.target.open; } },
+    el('summary', {}, 'SQL 가이드(예시) — polars SQL'),
     el('div', { class: 'sql-guide-body' },
       el('div', { class: 'sql-rules' },
         el('div', { class: 'sql-rule-title' }, '규칙'),
@@ -2053,16 +2495,18 @@ function syncBadge(sync) {
 //   항목 = 로컬 경로 ↔ S3 key 한 쌍. 방향/명령/주기를 각각 준다.
 //   수동 ▶ 실행 · ■ 중지 (파일 경계에서 취소) · 5초 폴링으로 진행률
 // ─────────────────────────────────────
-const S3M = { open: false, tab: 'items', form: null, hist: [], timer: null, keyBrowse: null };
+const S3M = { open: false, tab: 'items', form: null, hist: [], timer: null, keyBrowse: null, settings: null };
+
+// 자동 갱신해도 되는 탭 = 입력 폼이 없는 탭. 나머지는 다시 그리면 입력 중인 값이 날아간다.
+const S3M_LIVE_TABS = ['items', 'history'];
 
 function openS3Modal() {
-  S3M.open = true; S3M.tab = 'items'; S3M.form = null;
+  S3M.open = true; S3M.tab = 'items'; S3M.form = null; S3M.settings = null;
   renderS3Modal();
   if (S3M.timer) clearInterval(S3M.timer);
-  // 항목/이력 탭만 자동 갱신 — 추가/수정 폼을 다시 그리면 입력 중인 값이 날아간다
   S3M.timer = setInterval(() => {
     if (!S3M.open) return closeS3Modal();
-    if (S3M.tab !== 'add') renderS3Modal(true);
+    if (S3M_LIVE_TABS.includes(S3M.tab)) renderS3Modal(true);
   }, 5000);
 }
 
@@ -2093,20 +2537,84 @@ async function renderS3Modal(quiet) {
 
   const body = S3M.tab === 'add' ? s3FormView(data, dests)
     : S3M.tab === 'history' ? s3HistoryView()
-      : s3ItemsView(data);
+      : S3M.tab === 'conn' ? s3ConnView()
+        : S3M.tab === 'rules' ? el('div', { id: 's3RulesBox' })
+          : S3M.tab === 'files' ? el('div', { id: 's3FilesBox' })
+            : s3ItemsView(data);
 
   const modal = el('div', { id: 's3modal', class: 's3-modal-back',
     onclick: (e) => { if (e.target.id === 's3modal') closeS3Modal(); } },
     el('div', { class: 's3-modal' },
-      el('div', { class: 'row', style: { gap: '8px', alignItems: 'center', marginBottom: '10px' } },
-        el('span', { style: { fontWeight: 800 } }, '⚙ S3 업/다운로드'),
-        tabBtn('items', `항목 ${data.items.length}`), tabBtn('add', '+ 추가'), tabBtn('history', '이력'),
+      el('div', { class: 'row', style: { gap: '6px', alignItems: 'center', marginBottom: '4px', flexWrap: 'wrap' } },
+        el('span', { style: { fontWeight: 800, marginRight: '4px' } }, '⚙ S3 설정'),
+        tabBtn('conn', '연결'), tabBtn('rules', '전송 규칙'),
+        tabBtn('items', `항목 ${data.items.length}`), tabBtn('add', '+ 추가'),
+        tabBtn('files', '설정파일'), tabBtn('history', '이력'),
         el('div', { class: 'spacer' }),
         el('button', { class: 'btn', onclick: closeS3Modal }, '닫기'),
       ),
+      el('div', { class: 'hint', style: { marginBottom: '10px' } }, S3M_TAB_HINT[S3M.tab] || ''),
       body,
     ));
   document.body.append(modal);
+  if (S3M.tab === 'rules') loadS3RulesSection('rules');
+  if (S3M.tab === 'files') loadConfigFilesSection();
+}
+
+const S3M_TAB_HINT = {
+  conn: 'S3 접속 정보 — 기본 연결(default)은 파이프라인 업로드에도 그대로 쓰인다. 다른 버킷/계정이 필요하면 아래에 연결을 더 등록한다.',
+  rules: 'root 별 기본 전송 방식(cp/sync)과 올릴 위치. 탐색기 목록의 ⇧ S3 버튼이 이 규칙을 따른다.',
+  items: '주기·수동으로 도는 업/다운로드 항목. ▶ 실행 / ■ 중지 는 안전 지점(파일 경계)에서만 끊는다.',
+  add: '항목 추가·수정 — 로컬 경로 ↔ S3 key 한 쌍.',
+  files: '설정파일을 S3 로 개별 전송. 이름을 누르면 탐색기에서 그 파일이 열린다.',
+  history: '최근 실행 이력 100건.',
+};
+
+// 연결 탭 — settings.json 의 s3.* (구 설정 탭 ☁ 섹션) + 추가 S3 연결(destinations).
+function s3ConnView() {
+  const box = el('div', {});
+  const build = (draft) => {
+    box.innerHTML = '';
+    const rows = [
+      ['s3.enabled', 'bool', null, '끄면 파이프라인은 로컬 DB 저장까지만 하고 S3 작업을 전부 건너뜀'],
+      ['s3.endpoint_url', 'text', null, '비우면 AWS S3 / MinIO 는 http://host:9000'],
+      ['s3.bucket', 'text'],
+      ['s3.prefix', 'text'],
+      ['s3.access_key', 'text'],
+      ['s3.secret_key', 'password', null, '저장 후 ****. 그대로 두면 기존 값 유지'],
+      ['s3.fake_local_path', 'text', null, 'endpoint_url 비어있고 이 값 있으면 개발 모드 (로컬 폴더)'],
+      ['s3.upload_mode', 'select', ['immediate', 'interval', 'manual'], 'immediate=chunk 직후 / interval=주기적 flush / manual=버튼'],
+      ['s3.upload_interval_sec', 'number', null, 'interval 모드에서만 의미. 기본 300초(5분). 최소 5초'],
+      ['s3.retry_failed_sec', 'number', null, '업로드 실패 항목 재시도 간격. 기본 120초'],
+    ];
+    box.append(
+      el('div', { class: 'subsection-title' }, '기본 연결 (default)'),
+      ...rows.map((row) => settingsRow(row, draft)),
+      el('div', { class: 'row', style: { justifyContent: 'flex-end', marginBottom: '12px' } },
+        el('button', { class: 'btn primary small', onclick: async (e) => {
+          const btn = e.target;
+          try {
+            await api.post('/api/settings', { s3: draft.s3 });
+            STATE.settings = null;   // 설정 탭 재조회
+            S3M.settings = null;
+            btn.textContent = '✓ 저장됨';
+            setTimeout(() => { btn.textContent = '💾 연결 저장'; }, 1500);
+          } catch (err) { alert(`저장 실패: ${err.message}`); }
+        } }, '💾 연결 저장')),
+      el('div', { class: 'subsection-title' }, '추가 S3 연결',
+        el('span', { class: 'hint' }, '전송 규칙에서 이름으로 고른다')),
+      el('div', { id: 's3ConnBox' }),
+    );
+    loadS3RulesSection('conn');
+  };
+  if (S3M.settings) build(S3M.settings);
+  else {
+    box.append(el('div', { class: 'loading' }, 'Loading…'));
+    api.get('/api/settings')
+      .then((s) => { S3M.settings = structuredClone(s); build(S3M.settings); })
+      .catch((e) => { box.innerHTML = ''; box.append(el('div', { class: 'alert err' }, e.message)); });
+  }
+  return box;
 }
 
 async function s3Post(path, body) {
@@ -2128,7 +2636,7 @@ function s3ItemsView(data) {
       : it.is_queued ? '대기'
         : ({ ok: '성공', error: '실패', cancelled: '중지됨', running: '중단?' }[st.last_status] || '—');
     const stateColor = it.is_running ? '#3b82f6' : it.is_queued ? '#f59e0b'
-      : st.last_status === 'ok' ? '#30a46c' : st.last_status === 'error' ? '#e5484d' : 'var(--text-muted)';
+      : st.last_status === 'ok' ? 'var(--ok)' : st.last_status === 'error' ? 'var(--danger)' : 'var(--text-muted)';
     return el('tr', {},
       el('td', { class: 'mono', style: { color: it.direction === 'download' ? '#1d4ed8' : '#15803d', fontWeight: 700 } },
         it.direction === 'download' ? '↓ 받기' : '↑ 올리기'),
@@ -2144,7 +2652,7 @@ function s3ItemsView(data) {
           ? el('span', { class: 'hint' }, ` ${st.moved}건`) : null),
       el('td', { style: { display: 'flex', gap: '4px' } },
         busy
-          ? el('button', { class: 'btn small', style: { color: '#e5484d' },
+          ? el('button', { class: 'btn small', style: { color: 'var(--danger)' },
               onclick: async () => { await s3Post('/api/s3/stop', { id: it.id }); renderS3Modal(); } }, '■ 중지')
           : el('button', { class: 'btn small primary',
               onclick: async () => { await s3Post('/api/s3/run', { id: it.id }); renderS3Modal(); } }, '▶ 실행'),
@@ -2243,12 +2751,12 @@ function s3HistoryView() {
   const rows = (S3M.hist || []).map((h) => el('tr', {},
     el('td', { class: 'mono' }, fmtRunTs(h.ts)),
     el('td', { class: 'mono' }, h.id),
-    el('td', { style: { color: h.status === 'ok' ? '#30a46c' : h.status === 'cancelled' ? '#f5a524' : '#e5484d' } },
+    el('td', { style: { color: h.status === 'ok' ? 'var(--ok)' : h.status === 'cancelled' ? 'var(--warn)' : 'var(--danger)' } },
       ({ ok: '성공', error: '실패', cancelled: '중지됨' }[h.status] || h.status)),
     el('td', { class: 'mono' }, `${h.duration_sec ?? '-'}s`),
     el('td', { class: 'mono' }, h.direction || '-'),
     el('td', { class: 'mono' }, `옮김 ${h.moved ?? 0} · 생략 ${h.skipped ?? 0} · 실패 ${h.failed ?? 0}`),
-    el('td', { style: { color: '#e5484d', fontSize: '11px' } }, h.error || ''),
+    el('td', { style: { color: 'var(--danger)', fontSize: '11px' } }, h.error || ''),
   ));
   return el('div', { style: { maxHeight: '56vh', overflow: 'auto' } },
     alTable(['시각', 'id', '결과', '소요', '방향', '건수', '오류'], rows));
@@ -2256,44 +2764,97 @@ function s3HistoryView() {
 
 // 탐색기 하단 범례 — 화살표가 무슨 뜻인지 화면에서 바로 읽히게
 function syncLegend() {
-  const item = (dir, state, text) => el('span', { class: 'row', style: { gap: '4px', alignItems: 'center' } },
+  const item = (dir, state, text) => el('span', { class: 'fb-legend-item' },
     syncBadge({ dir, state, detail: '' }), text);
-  return el('div', { class: 'row', style: { marginTop: '10px', gap: '14px', fontSize: '11px',
-    color: 'var(--text-muted)', flexWrap: 'wrap' } },
-    item('down', 'ok', '받기 — flow 가 관리 (Vehicle_matching · ppid_knob · inline_matching …)'),
-    item('up', 'ok', '올리기 — Valve 산출물 (staging · 알람 outbox)'),
-    item('both', 'ok', '양방향 — settings · products · source_types'),
-    item(null, 'local', '로컬 전용 — S3 자동 동기화 없음'),
-    el('span', { class: 'hint' }, '점 색 = 상태 (초록 정상 · 주황 대기/미수신 · 빨강 실패)'),
+  return el('div', { class: 'fb-legend' },
+    item('down', 'ok', '받기 (flow 관리)'),
+    item('up', 'ok', '올리기 (Valve 산출)'),
+    item('both', 'ok', '양방향'),
+    item(null, 'local', '로컬 전용'),
+    el('span', { class: 'hint' }, '점 = 상태 · 초록 정상 / 주황 대기 / 빨강 실패'),
   );
+}
+
+// 사이드바 한 줄 — flow 파일탐색기와 같은 2단 구성(이름 + 메타줄).
+function fbRow({ sel, sig, icon, name, title, badge, meta, onclick, actions }) {
+  return el('div', { class: 'fb-row' + (sel ? ' sel' : ''), title: title || name, onclick },
+    sig !== undefined ? syncBadge(sig) : null,
+    el('span', { class: 'fb-ic' }, icon),
+    el('span', { class: 'fb-stack' },
+      el('span', { class: 'fb-name' }, name),
+      badge || meta ? el('span', { class: 'fb-meta' },
+        badge ? el('span', { class: 'fb-ext' }, badge) : null,
+        meta ? el('span', { class: 'fb-size' }, meta) : null,
+      ) : null,
+    ),
+    ...(actions || []),
+  );
+}
+
+function renderScopeChips() {
+  const box = $('#brScope');
+  if (!box) return;
+  box.innerHTML = '';
+  for (const s of BR_SCOPES) {
+    const roots = brRootsInScope(s.key);
+    box.append(el('span', {
+      class: 'fb-chip' + (BR.scope === s.key ? ' on' : '') + (roots.length ? '' : ' off'),
+      title: `${s.desc}${roots.length ? '' : '\n(표시할 루트 없음)'}`,
+      onclick: () => {
+        if (!roots.length || BR.scope === s.key) return;
+        BR.scope = s.key;
+        renderScopeChips();
+        renderRootList();
+        loadBrowserDir(roots[0].name, '');
+      },
+    }, `${s.icon} ${s.label}`));
+  }
+}
+
+function renderRootList() {
+  const box = $('#brRootList');
+  if (!box) return;
+  box.innerHTML = '';
+  const roots = brRootsInScope(BR.scope);
+  if (!roots.length) { box.append(el('div', { class: 'fb-empty' }, '이 범위에 표시할 루트가 없습니다.')); return; }
+  for (const r of roots) {
+    box.append(fbRow({
+      sel: BR.root === r.name,
+      sig: r.dir ? { dir: r.dir, state: 'ok', detail: r.detail } : null,
+      icon: '📂',
+      name: r.name === 'config' ? '설정파일' : r.name,
+      title: `${r.path}\n${r.detail || ''}`,
+      meta: r.path,
+      onclick: () => loadBrowserDir(r.name, ''),
+    }));
+  }
+  const count = $('#brCount');
+  if (count) count.textContent = `${roots.length} roots`;
 }
 
 async function loadBrowserRoots() {
   try {
     const { roots } = await api.get('/api/browser/roots');
-    const tree = $('#brTree');
-    tree.innerHTML = '';
-    for (const r of roots) {
-      const sig = r.dir ? { dir: r.dir, state: r.dir === 'down' ? 'ok' : 'ok', detail: r.detail } : null;
-      tree.append(el('div', { class: 'tree-item', style: { fontWeight: 800 }, onclick: () => loadBrowserDir(r.name, '') },
-        syncBadge(sig),
-        el('span', { class: 'ic' }, '▸'),
-        r.name,
-        el('span', { class: 'sz' }, r.path),
-      ));
-    }
+    BR.roots = roots || [];
+    const cur = BR.roots.find((r) => r.name === BR.root);
+    const dbRoot = BR.roots.find((r) => r.name === 'db');
+    const dbPath = (dbRoot?.path || '').replace(/\\/g, '/').replace(/\/$/, '').toLowerCase();
+    if (cur) BR.scope = brScopeOf(cur, dbPath);
+    renderScopeChips();
+    renderRootList();
     loadBrowserDir(BR.root, BR.path);
   } catch (e) { $('#brTree').textContent = String(e); }
   const lg = $('#brLegend');
   if (lg) { lg.innerHTML = ''; lg.append(syncLegend()); }
-  loadS3RulesSection();
-  loadConfigFilesSection();
 }
 
 // S3 전송 규칙 — root 별 mode(cp/sync) + 타겟(S3 연결 × prefix 이름, 2개 이상 가능) 편집.
 // 설정파일은 보통 cp(항상 덮어쓰기), DB 산출물은 sync(변경분만).
-async function loadS3RulesSection() {
-  const box = $('#brS3Rules');
+// v0.3.12: 탐색기 사이드바에서 ⚙ 모달의 '연결'·'전송 규칙' 탭으로 옮겼다.
+//   part='conn'  → S3 연결(key) 목록만
+//   part='rules' → root 별 전송 규칙만
+async function loadS3RulesSection(part) {
+  const box = $(part === 'conn' ? '#s3ConnBox' : '#s3RulesBox');
   if (!box) return;
   if (!BR.s3rules) {
     try { BR.s3rules = await api.get('/api/browser/s3-transfer/config'); } catch { return; }
@@ -2311,9 +2872,9 @@ async function loadS3RulesSection() {
     const d = destinations[name];
     if (d.builtin) return el('div', { class: 'cfg-row' },
       el('span', { class: 'cfg-name', style: { flex: '0 0 90px', fontWeight: 700 } }, name),
-      el('span', { style: { fontSize: '11px', color: 'var(--text-muted)' } }, 'settings.json 의 S3 (기본 연결)'));
+      el('span', { style: { fontSize: '11px', color: 'var(--text-muted)' } }, '아래 기본 연결(위 폼) 을 그대로 사용'));
     return el('div', { class: 'cfg-row', style: { flexWrap: 'wrap' } },
-      inp(name, '이름', (v) => { if (v && v !== name) { destinations[v] = d; delete destinations[name]; loadS3RulesSection(); } }),
+      inp(name, '이름', (v) => { if (v && v !== name) { destinations[v] = d; delete destinations[name]; loadS3RulesSection('conn'); } }),
       inp(d.bucket, 'bucket', (v) => { d.bucket = v; }),
       inp(d.endpoint_url, 'endpoint_url', (v) => { d.endpoint_url = v; }, true),
       inp(d.access_key, 'access key', (v) => { d.access_key = v; }),
@@ -2321,7 +2882,7 @@ async function loadS3RulesSection() {
       el('button', { class: 'btn ghost xsmall', title: '연결 삭제', onclick: () => {
         delete destinations[name];
         Object.values(rules).forEach((r) => { r.targets = r.targets.filter((t) => t.dest !== name); });
-        loadS3RulesSection();
+        loadS3RulesSection('conn');
       } }, '✕'));
   };
 
@@ -2329,7 +2890,7 @@ async function loadS3RulesSection() {
   const modeSeg = (rule, m) => el('button', {
     class: 'seg' + (rule.mode === m ? ' on' : ''),
     title: m === 'sync' ? '변경분만 업로드 (텍스트=내용·바이너리=크기 비교)' : '항상 덮어쓰기 업로드',
-    onclick: () => { rule.mode = m; loadS3RulesSection(); },
+    onclick: () => { rule.mode = m; loadS3RulesSection('rules'); },
   }, m);
   const targetRow = (rule, t, i) => el('div', { class: 'cfg-row', style: { paddingLeft: '58px' } },
     el('select', { class: 'mono', style: { flex: '0 0 90px', fontSize: '11px' },
@@ -2337,7 +2898,7 @@ async function loadS3RulesSection() {
       ...destNames().map((n) => el('option', { value: n, selected: t.dest === n ? 'selected' : undefined }, n))),
     inp(t.prefix, 'S3 prefix (이름)', (v) => { t.prefix = v; }, true),
     rule.targets.length > 1 ? el('button', { class: 'btn ghost xsmall', title: '타겟 삭제',
-      onclick: () => { rule.targets.splice(i, 1); loadS3RulesSection(); } }, '✕') : null);
+      onclick: () => { rule.targets.splice(i, 1); loadS3RulesSection('rules'); } }, '✕') : null);
   const ruleRows = (root) => {
     const rule = rules[root];
     return [
@@ -2346,7 +2907,7 @@ async function loadS3RulesSection() {
         el('span', { class: 'cfg-mode' }, modeSeg(rule, 'cp'), modeSeg(rule, 'sync')),
         el('span', { class: 'spacer' }),
         el('button', { class: 'btn ghost xsmall', title: '전송 대상(S3 연결×이름) 추가',
-          onclick: () => { rule.targets.push({ dest: 'default', prefix: '' }); loadS3RulesSection(); } }, '＋ 대상'),
+          onclick: () => { rule.targets.push({ dest: 'default', prefix: '' }); loadS3RulesSection('rules'); } }, '＋ 대상'),
         el('button', { class: 'btn ghost xsmall', title: `${root} 전체를 ${rule.mode} 로 전 타겟에 전송`,
           onclick: async (e) => {
             const btn = e.target;
@@ -2366,63 +2927,66 @@ async function loadS3RulesSection() {
     ];
   };
 
-  box.append(el('details', { class: 'cfg-sec' },
-    el('summary', {},
-      el('span', {}, '☁ S3 전송 규칙'),
-      el('span', { class: 'spacer' }),
-      el('button', { class: 'btn ghost xsmall', onclick: async (e) => {
-        e.stopPropagation(); e.preventDefault();
-        const btn = e.target;
-        try {
-          const r = await api.put('/api/browser/s3-transfer/config', { rules, destinations });
-          BR.s3rules = { rules: r.rules, destinations: r.destinations };
-          btn.textContent = '✓ 저장됨';
-          setTimeout(() => { btn.textContent = '💾 저장'; loadS3RulesSection(); }, 1200);
-        } catch (err) { alert(err.message); }
-      } }, '💾 저장')),
-    el('div', { class: 'cfg-list' },
-      el('div', { style: { fontSize: '11px', color: 'var(--text-muted)', padding: '2px 0' } },
-        'S3 연결 (key 여러 개 등록 가능)'),
-      ...destNames().map(destRow),
-      el('div', { class: 'cfg-row' },
-        el('button', { class: 'btn ghost xsmall', onclick: () => {
-          let n = 2; while (destinations[`s3_${n}`]) n++;
-          destinations[`s3_${n}`] = { bucket: '', endpoint_url: '', access_key: '', secret_key: '' };
-          loadS3RulesSection();
-        } }, '＋ S3 연결 추가')),
-      el('div', { style: { fontSize: '11px', color: 'var(--text-muted)', padding: '6px 0 2px' } },
-        '전송 규칙 (root 별 — 타겟 여러 개면 전부 전송)'),
-      ...Object.keys(rules).flatMap(ruleRows)),
-  ));
+  const saveBtn = (label) => el('button', { class: 'btn primary small', onclick: async (e) => {
+    const btn = e.target;
+    try {
+      const r = await api.put('/api/browser/s3-transfer/config', { rules, destinations });
+      BR.s3rules = { rules: r.rules, destinations: r.destinations };
+      btn.textContent = '✓ 저장됨';
+      setTimeout(() => { btn.textContent = label; loadS3RulesSection(part); }, 1200);
+    } catch (err) { alert(err.message); }
+  } }, label);
+
+  if (part === 'conn') {
+    box.append(
+      el('div', { class: 'cfg-list', style: { maxHeight: 'none' } },
+        ...destNames().map(destRow),
+        el('div', { class: 'cfg-row' },
+          el('button', { class: 'btn ghost xsmall', onclick: () => {
+            let n = 2; while (destinations[`s3_${n}`]) n++;
+            destinations[`s3_${n}`] = { bucket: '', endpoint_url: '', access_key: '', secret_key: '' };
+            loadS3RulesSection('conn');
+          } }, '＋ S3 연결 추가'),
+          el('span', { class: 'spacer' }),
+          saveBtn('💾 연결 저장'))),
+    );
+    return;
+  }
+  box.append(
+    el('div', { class: 'cfg-list', style: { maxHeight: 'none' } },
+      ...Object.keys(rules).flatMap(ruleRows),
+      el('div', { class: 'cfg-row' }, el('span', { class: 'spacer' }), saveBtn('💾 규칙 저장'))),
+  );
 }
 
-// 최상위 "설정파일 → S3" 빠른 목록 — 각 파일 개별 전송 (sync/cp 선택)
+// "설정파일 → S3" 빠른 목록 — 각 파일 개별 전송 (sync/cp 선택). ⚙ 모달의 '설정파일' 탭.
 async function loadConfigFilesSection() {
-  const box = $('#brConfigFiles');
+  const box = $('#s3FilesBox');
   if (!box) return;
   let files = [];
   try { files = (await api.get('/api/browser/config-files')).files || []; } catch { }
   box.innerHTML = '';
-  if (!files.length) return;
+  if (!files.length) { box.append(el('div', { class: 'fb-empty' }, '설정파일이 없습니다.')); return; }
   const modeBtn = (m) => el('button', {
     class: 'seg' + (BR.s3mode === m ? ' on' : ''),
     title: m === 'sync' ? '내용 다를 때만 업로드' : '항상 덮어쓰기 업로드',
     onclick: () => { BR.s3mode = m; loadConfigFilesSection(); },
   }, m);
-  const list = el('div', { class: 'cfg-list' },
-    ...files.map((f) => el('div', { class: 'cfg-row' },
-      syncBadge(f.sync),
-      el('span', { class: 'cfg-name', title: `→ s3://${f.s3_key}`,
-        onclick: () => { BR.root = 'config'; selectFile('config', f.rel); } }, f.rel),
-      el('button', { class: 'btn ghost xsmall', title: `S3 전송 (${BR.s3mode}) → ${f.s3_key}`,
-        onclick: () => onS3Transfer('config', f.rel) }, '⇧ S3'),
-    )));
-  box.append(el('details', { class: 'cfg-sec', open: 'open' },
-    el('summary', {},
-      el('span', {}, '⚙ 설정파일 → S3'),
+  const configRoot = BR.roots.find((r) => r.name === 'config')?.path || 'config';
+  box.append(
+    el('div', { class: 'cfg-row' },
+      el('span', { class: 'config-root-path', title: configRoot }, configRoot),
       el('span', { class: 'spacer' }),
-      el('span', { class: 'cfg-mode', onclick: (e) => e.stopPropagation() }, modeBtn('sync'), modeBtn('cp'))),
-    list));
+      el('span', { class: 'cfg-mode' }, modeBtn('sync'), modeBtn('cp'))),
+    el('div', { class: 'cfg-list', style: { maxHeight: '48vh' } },
+      ...files.map((f) => el('div', { class: 'cfg-row' },
+        syncBadge(f.sync),
+        el('span', { class: 'cfg-name', title: `→ s3://${f.s3_key}\n(클릭하면 탐색기에서 이 파일을 엽니다)`,
+          onclick: () => { closeS3Modal(); BR.root = 'config'; selectFile('config', f.rel); } }, f.rel),
+        el('button', { class: 'btn ghost xsmall', title: `S3 전송 (${BR.s3mode}) → ${f.s3_key}`,
+          onclick: () => onS3Transfer('config', f.rel) }, '⇧ S3'),
+      ))),
+  );
 }
 
 async function onS3Transfer(root, path) {
@@ -2436,47 +3000,61 @@ async function onS3Transfer(root, path) {
 
 async function loadBrowserDir(root, path) {
   BR.root = root; BR.path = path;
+  renderRootList();
+  const crumb = $('#brCrumb');
+  const tree = $('#brTree');
+  if (!tree) return;
+  if (crumb) {
+    // breadcrumb — 세그먼트를 눌러 위 폴더로. flow 와 같이 섹션 제목 옆에 둔다.
+    crumb.innerHTML = '';
+    const parts = String(path || '').split('/').filter(Boolean);
+    crumb.append(el('span', { class: 'fb-crumb-seg', onclick: () => loadBrowserDir(root, '') }, root));
+    parts.forEach((seg, i) => {
+      const upto = parts.slice(0, i + 1).join('/');
+      crumb.append(el('span', { class: 'fb-crumb-sep' }, '/'),
+        el('span', { class: 'fb-crumb-seg', onclick: () => loadBrowserDir(root, upto) }, seg));
+    });
+  }
   try {
     const r = await api.get(`/api/browser/list?root=${encodeURIComponent(root)}&path=${encodeURIComponent(path)}`);
-    const tree = $('#brTree');
     tree.innerHTML = '';
-    tree.append(el('div', { class: 'tree-item', style: { fontWeight: 800 } },
-      el('span', { class: 'ic' }, '▾'),
-      `${root}${path ? '/' + path : ''}`,
-    ));
     if (path) {
       const parent = path.split('/').slice(0, -1).join('/');
-      tree.append(el('div', { class: 'tree-item', onclick: () => loadBrowserDir(root, parent) },
-        el('span', { class: 'ic' }, '↑'), '..'));
+      tree.append(fbRow({ icon: '↩', name: '상위 폴더', title: `${root}/${parent}`,
+        onclick: () => loadBrowserDir(root, parent) }));
     }
-    if (!r.entries.length) tree.append(el('div', { class: 'empty' }, '비어있음'));
+    if (!r.entries.length) tree.append(el('div', { class: 'fb-empty' }, '비어있음'));
     r.entries.forEach((e) => {
       const fullPath = path ? `${path}/${e.name}` : e.name;
-      const icon = e.is_dir ? '📁' : (e.suffix === '.parquet' ? '📊' : (e.suffix === '.csv' ? '🧾'
+      const icon = e.is_dir ? '📂' : (e.suffix === '.parquet' ? '📊' : (e.suffix === '.csv' ? '📋'
         : (['.yaml', '.yml', '.json'].includes(e.suffix) ? '⚙️' : '📄')));
-      const cls = BR.selFile === fullPath ? 'tree-item sel' : 'tree-item';
       // db/staging 은 파일·폴더 단위 S3 전송 지원 (폴더=재귀, 모드는 전송 규칙 기본)
       const canSend = (root === 'db' || root === 'staging');
-      tree.append(el('div', { class: cls, onclick: () => e.is_dir ? loadBrowserDir(root, fullPath) : selectFile(root, fullPath) },
-        syncBadge(e.sync),
-        el('span', { class: 'ic' }, icon),
-        e.name,
-        el('span', { class: 'sz' }, e.is_dir ? '' : fmtBytes(e.size)),
-        canSend ? el('button', { class: 'btn ghost xsmall', title: `S3 전송 (규칙 기본 모드)`,
-          onclick: async (ev) => {
-            ev.stopPropagation();
-            const btn = ev.target;
-            btn.disabled = true; btn.textContent = '…';
-            try {
-              const r = await api.post('/api/browser/s3-transfer', { root, path: fullPath });
-              btn.textContent = r.files ? `↑${r.uploaded} =${r.unchanged}` : '✓';
-              if (r.errors) alert(`${fullPath}: ${r.errors}건 전송 실패`);
-            } catch (err) { btn.textContent = '✗'; alert(err.message); }
-            finally { btn.disabled = false; setTimeout(() => { btn.textContent = '⇧ S3'; }, 4000); }
-          } }, '⇧ S3') : null,
-      ));
+      const sendBtn = el('button', { class: 'btn ghost xsmall', title: 'S3 전송 (규칙 기본 모드)',
+        onclick: async (ev) => {
+          ev.stopPropagation();
+          const btn = ev.target;
+          btn.disabled = true; btn.textContent = '…';
+          try {
+            const res = await api.post('/api/browser/s3-transfer', { root, path: fullPath });
+            btn.textContent = res.files ? `↑${res.uploaded} =${res.unchanged}` : '✓';
+            if (res.errors) alert(`${fullPath}: ${res.errors}건 전송 실패`);
+          } catch (err) { btn.textContent = '✗'; alert(err.message); }
+          finally { btn.disabled = false; setTimeout(() => { btn.textContent = '⇧ S3'; }, 4000); }
+        } }, '⇧ S3');
+      tree.append(fbRow({
+        sel: BR.selFile === fullPath,
+        sig: e.sync,
+        icon,
+        name: e.name,
+        title: fullPath,
+        badge: e.is_dir ? 'DIR' : (e.suffix || '').replace('.', '').toUpperCase(),
+        meta: e.is_dir ? '' : fmtBytes(e.size),
+        onclick: () => e.is_dir ? loadBrowserDir(root, fullPath) : selectFile(root, fullPath),
+        actions: canSend ? [sendBtn] : [],
+      }));
     });
-  } catch (e) { $('#brTree').textContent = String(e); }
+  } catch (e) { tree.textContent = String(e); }
 }
 
 function selectFile(root, path) {
@@ -2525,6 +3103,28 @@ async function reloadView() {
   }
 }
 
+async function reloadCombinedView() {
+  const view = $('#brView');
+  view.innerHTML = '<div class="loading">FAB · INLINE · VM 통합 로딩…</div>';
+  try {
+    const url = `/api/query/combined?root=db&sql=${encodeURIComponent(BR.sql)}&rows=200`;
+    const r = await api.get(url);
+    view.innerHTML = '';
+    const headCells = r.columns.map((c) => el('th', { title: r.dtypes[c] }, c));
+    const bodyRows = r.rows.map((row) => el('tr', {},
+      ...r.columns.map((c) => el('td', { class: 'mono' }, String(row[c] ?? '')))));
+    view.append(
+      el('div', { style: { padding: '10px 14px', fontSize: '12px', color: 'var(--text-secondary)', borderBottom: '1px solid var(--border)' } },
+        el('span', { class: 'mono' }, '4.WIDE_FORM · FAB + INLINE + VM 통합'), '  ·  ',
+        `${r.n_rows} rows · ${r.columns.length} cols · ${r.files.length} files`),
+      el('table', { class: 'tbl' },
+        el('thead', {}, el('tr', {}, ...headCells)),
+        el('tbody', {}, ...bodyRows)));
+  } catch (e) {
+    view.innerHTML = `<div class="alert err">${e.message}</div>`;
+  }
+}
+
 function fmtBytes(b) {
   if (!b) return '';
   if (b < 1024) return `${b} B`;
@@ -2553,12 +3153,6 @@ async function renderAlerts() {
   const main = $('#main');
   main.innerHTML = '';
   main.append(
-    el('div', {},
-      el('div', { class: 'section-title' }, '알람'),
-      el('div', { class: 'section-desc' },
-        'FAB 미매칭 step · KNOB 미변환(RO raw ppid) · event 처리 현황. '
-        + '설정파일(config/step_matching · feature_rules · pipeline.yaml)은 탐색기 config 루트에서 열람 가능.'),
-    ),
     el('div', { id: 'alWrap' }, el('div', { class: 'loading' }, 'Loading…')),
   );
   await loadAlerts();
@@ -2568,7 +3162,7 @@ async function loadAlerts() {
   const wrap = $('#alWrap');
   if (!wrap) return;
   try {
-    const [status, alerts, cfg, csvInfo, outbox, sched, runs, s3items, sources] = await Promise.all([
+    const [status, alerts, cfg, csvInfo, outbox, sched, runs, s3items, sources, health] = await Promise.all([
       api.get('/api/pipeline/status'),
       api.get('/api/pipeline/alerts'),
       api.get('/api/pipeline/config'),
@@ -2578,6 +3172,7 @@ async function loadAlerts() {
       api.get('/api/pipeline/runs?limit=60').catch(() => null),
       api.get('/api/s3/items').catch(() => null),
       api.get('/api/pipeline/sources').catch(() => null),
+      api.get('/api/pipeline/health').catch(() => null),
     ]);
     wrap.innerHTML = '';
 
@@ -2610,6 +3205,9 @@ async function loadAlerts() {
       alStatusLine(v, status[v], sched?.vehicles?.[v], sched?.summary?.[v])));
     if (runs) wrap.append(alRunLog(runs));
 
+    // ── 단계 정체 (제품별 raw→event→feature→wide 가 며칠째 멈췄는지)
+    if (health) wrap.append(alStallSection(health, alerts));
+
     // ── 통합 알람 리스트
     const toggle = el('label', { style: { fontSize: '12px', color: 'var(--text-muted)', display: 'flex', gap: '5px', alignItems: 'center', marginLeft: 'auto' } },
       el('input', Object.assign({ type: 'checkbox', onchange: (e) => { AL_SHOW_SUPPRESSED = e.target.checked; loadAlerts(); } },
@@ -2626,6 +3224,7 @@ async function loadAlerts() {
     if (outbox) wrap.append(alOutbox(outbox, s3items));
     wrap.append(alAlertColsEditor(cfg, alerts));
     wrap.append(alAlertHintEditor(cfg));
+    if (health) wrap.append(alStallEditor(health));
     wrap.append(alSourcesEditor(sources));
     wrap.append(alExcludeEditor(cfg));
     wrap.append(alCsvSync(csvInfo));
@@ -2653,10 +3252,10 @@ function alStatusLine(v, st, sc, sum) {
     line.append(el('span', {}, `event ${evTxt}`));
     if (rawOnlySrcs.length) line.append(el('span', { style: { color: 'var(--text-muted)' } },
       rawOnlySrcs.map((s) => `${s} raw ${(st.raw[s] || []).length}일 (raw 전용)`).join(' · ')));
-    if (pendingSrcs.length) line.append(el('span', { style: { color: '#e5484d' } }, `미처리 ${pendingSrcs.join(', ')}`));
-    if (staleSrcs.length) line.append(el('span', { style: { color: '#e5484d' } }, `매칭 변경 — 재처리 필요 (${staleSrcs.join(', ')})`));
+    if (pendingSrcs.length) line.append(el('span', { style: { color: 'var(--danger)' } }, `미처리 ${pendingSrcs.join(', ')}`));
+    if (staleSrcs.length) line.append(el('span', { style: { color: 'var(--danger)' } }, `매칭 변경 — 재처리 필요 (${staleSrcs.join(', ')})`));
     if (!pendingSrcs.length && !staleSrcs.length && evSrcs.some((s) => (ev[s]?.dates || []).length)) {
-      line.append(el('span', { style: { color: '#30a46c' } }, '최신'));
+      line.append(el('span', { style: { color: 'var(--ok)' } }, '최신'));
     }
     line.append(el('span', { style: { color: 'var(--text-muted)' } }, '|'));
     line.append(el('span', { style: { color: 'var(--text-secondary)' } },
@@ -2685,23 +3284,23 @@ function alSchedCell(v, sc, sum) {
     title: '실행 주기 조절 → 모니터 탭 DB heatmap 의 ⚙ 실행 관리',
     style: { color: 'var(--text-muted)' },
   }, `자동 일 ${sc.runs_per_day}회 · ${period}`),
-    el('span', { title: '다음 자동 실행 예정', style: { color: sc.due ? '#f5a524' : 'var(--text-muted)' } },
+    el('span', { title: '다음 자동 실행 예정', style: { color: sc.due ? 'var(--warn)' : 'var(--text-muted)' } },
       `→ ${next}`)];
   if (sc.source === 'global') {
     bits.push(el('span', { class: 'hint', title: '제품 개별 설정 없음 — 전역 주기를 따름' }, '전역'));
   }
   if (sum && sum.failed) {
-    bits.push(el('span', { style: { color: '#e5484d' }, title: sum.last_error || '' },
+    bits.push(el('span', { style: { color: 'var(--danger)' }, title: sum.last_error || '' },
       `최근 ${sum.runs}회 중 실패 ${sum.failed}`));
   }
   if (sc.retry_blocked) {
-    bits.push(el('span', { style: { color: '#e5484d', fontWeight: 800 },
+    bits.push(el('span', { style: { color: 'var(--danger)', fontWeight: 800 },
       title: sc.retry_hint || '연속 실패로 자동 재시도를 멈췄습니다 — 작업 큐에서 재개',
     }, `⛔ 재시도 중단 ${sc.retry_blocked}`));
   }
   if (sc.retry_pending - (sc.retry_blocked || 0) > 0) {
     bits.push(el('span', {
-      style: { color: sc.retry_oldest_age_sec > 43200 ? '#e5484d' : '#f5a524', fontWeight: 700 },
+      style: { color: sc.retry_oldest_age_sec > 43200 ? 'var(--danger)' : 'var(--warn)', fontWeight: 700 },
       title: '실패한 (source×날짜) 유닛 — 롤링 윈도우를 벗어나도 재시도 대상으로 남는다'
         + (sc.enabled ? '' : ' (자동 실행이 꺼져 있어 수동 실행 때 처리된다)'),
     }, `놓친 유닛 ${sc.retry_pending - (sc.retry_blocked || 0)}`
@@ -2796,14 +3395,14 @@ function renderQueue(box, q) {
       t.cancel ? '중단 대기…' : '취소 불가'));
 
   running.forEach((t) => box.append(line([
-    el('span', { style: { color: '#30a46c', fontWeight: 800 } }, '▶ 실행 중'),
+    el('span', { style: { color: 'var(--ok)', fontWeight: 800 } }, '▶ 실행 중'),
     el('span', { style: { fontWeight: 700 } }, t.label),
     el('span', { class: 'mono', style: { color: 'var(--text-muted)' } }, (t.vehicles || []).join(', ')),
     el('span', { style: { color: 'var(--text-muted)' } }, fmtSecs(now - (t.started_ts || now))),
     cancelBtn(t),
   ])));
   waiting.forEach((t) => box.append(line([
-    el('span', { style: { color: '#f5a524', fontWeight: 800 } }, '⏸ 대기'),
+    el('span', { style: { color: 'var(--warn)', fontWeight: 800 } }, '⏸ 대기'),
     el('span', { style: { fontWeight: 700 } }, t.label),
     el('span', { style: { color: 'var(--text-muted)' } },
       `${fmtSecs(now - (t.enqueued_ts || now))} 째 실행 락 대기`),
@@ -2826,7 +3425,7 @@ function renderQueue(box, q) {
     ));
   } else if (retry.pending) {
     box.append(line([
-      el('span', { style: { color: '#f5a524', fontWeight: 700 } }, `↻ 재시도 대기 ${retry.pending}건`),
+      el('span', { style: { color: 'var(--warn)', fontWeight: 700 } }, `↻ 재시도 대기 ${retry.pending}건`),
       el('span', { style: { color: 'var(--text-muted)' } },
         retry.next_retry_at ? `다음 ${fmtClock(retry.next_retry_at)}` : ''),
     ]));
@@ -2837,12 +3436,12 @@ function renderQueue(box, q) {
       '예정 (자동 실행)'));
     upcoming.slice(0, 6).forEach((u) => box.append(line([
       el('span', { class: 'mono', style: { fontWeight: 700, minWidth: '90px' } }, u.vehicle),
-      el('span', { style: { color: u.due ? '#f5a524' : 'var(--text-muted)' } },
+      el('span', { style: { color: u.due ? 'var(--warn)' : 'var(--text-muted)' } },
         u.due ? '곧 실행' : fmtClock(u.next_ts)),
       ...(u.quiet_blocked ? [el('span', { class: 'hint' }, '🌙 금지 시간대 해제 후')] : []),
-      ...(u.retry_pending ? [el('span', { style: { color: '#f5a524' } },
+      ...(u.retry_pending ? [el('span', { style: { color: 'var(--warn)' } },
         `놓친 유닛 ${u.retry_pending}`)] : []),
-      ...(u.retry_blocked ? [el('span', { style: { color: '#e5484d', fontWeight: 700 } },
+      ...(u.retry_blocked ? [el('span', { style: { color: 'var(--danger)', fontWeight: 700 } },
         `재시도 중단 ${u.retry_blocked}`)] : []),
     ], { borderBottom: 'none', padding: '2px 0' })));
   }
@@ -2892,7 +3491,7 @@ function alDbUsage(u) {
         el('td', { colspan: '3', style: { fontSize: '11px', color: 'var(--text-muted)' } },
           `feature ${GBs(x.parts.feature)} · reports ${GBs(x.parts.reports)} · 파일 ${x.files}개`),
         el('td', {}, ''),
-        el('td', { class: 'mono', style: { fontWeight: 800, color: x.warn ? '#e5484d' : '' },
+        el('td', { class: 'mono', style: { fontWeight: 800, color: x.warn ? 'var(--danger)' : '' },
           title: x.warn ? `임계 ${u.warn_gb}GB 초과` : '' }, GBs(x.bytes)),
       ));
     });
@@ -2912,10 +3511,134 @@ function alDbUsage(u) {
 
 // 통합 알람 테이블 — 한 행 = 한 알람. 유형은 색으로 구분 (미매칭 step 빨강 · RO ppid 주황)
 const AL_TYPE = {
-  unmatched_step: { label: '미매칭 step', color: '#e5484d' },
-  ro_ppid: { label: 'RO ppid', color: '#f5a524' },
+  unmatched_step: { label: '미매칭 step', color: 'var(--danger)' },
+  ro_ppid: { label: 'RO ppid', color: 'var(--warn)' },
+  stage_stall: { label: '단계 정체', color: 'var(--danger)' },
 };
 let AL_SHOW_SUPPRESSED = false;
+let AL_HEALTH_ALL = false;   // 정체 아닌 단계까지 펼쳐 보기
+
+// ── 단계 정체 — 제품별 raw/event/feature/wide 가 며칠째 안 늘고 있는지.
+// 같은 내용이 매칭알람 payload(health 블록 + stage_stall 행)로 flow 에도 나간다.
+const STAGE_ORDER = ['raw', 'event', 'feature', 'wide', 'flow', 'send', 's3'];
+
+function alStallSection(health, alerts) {
+  const cfg = health?.config || {};
+  const byVehicle = health?.vehicles || {};
+  const ackOf = {};
+  (alerts?.alerts || []).forEach((a) => {
+    if (a.type === 'stage_stall') ackOf[a.id] = a.status;
+  });
+
+  const rows = [];
+  let stalledTotal = 0;
+  let rootTotal = 0;
+  const seenGlobal = new Set();
+  Object.keys(byVehicle).sort().forEach((v) => {
+    const h = byVehicle[v] || {};
+    const stages = (h.stages || []).slice().sort(
+      (a, b) => STAGE_ORDER.indexOf(a.stage) - STAGE_ORDER.indexOf(b.stage)
+        || String(a.source).localeCompare(String(b.source)));
+    stages.forEach((r) => {
+      // SEND_FORM 은 전 제품을 합쳐 만든다 — 제품별 현황에 똑같이 들어 있으므로
+      // 표에는 한 줄만 그린다 (vehicle 칸은 '전 제품').
+      const global = r.scope === 'global';
+      if (global) {
+        const key = `${r.stage}|${r.source}`;
+        if (seenGlobal.has(key)) return;
+        seenGlobal.add(key);
+      }
+      if (r.stalled) stalledTotal += 1;
+      if (r.stalled && !r.cascade) rootTotal += 1;
+      if (!r.stalled && !AL_HEALTH_ALL) return;
+      const id = `stall|${global ? '-' : v}|${r.stage}|${r.source}`;
+      const status = ackOf[id] || 'active';
+      const tone = !r.stalled ? 'var(--ok)' : r.cascade ? 'var(--warn)' : 'var(--danger)';
+      // 앞 단계가 밀린 여파(cascade)는 알람으로 나가지 않으므로 억제 선택도 없다 —
+      // 원인 단계의 알람을 처리하면 같이 사라진다.
+      const sel = (r.stalled && !r.cascade)
+        ? el('select', { style: { fontSize: '11px' }, onchange: async (ev) => {
+          await api.put('/api/pipeline/alerts/ack', { id, status: ev.target.value });
+          loadAlerts();
+        } }, ...['active', '미확인예정', '반영불필요'].map((s) =>
+          el('option', s === status ? { value: s, selected: '' } : { value: s }, s)))
+        : el('span', { class: 'hint' }, r.stalled ? '앞 단계 여파' : '정상');
+      rows.push(el('tr', { style: (r.stalled && !r.cascade && status === 'active') ? {} : { opacity: 0.5 } },
+        el('td', { class: 'mono', style: { fontWeight: 700 } }, global ? '전 제품' : v),
+        el('td', { class: 'mono' }, global ? '' : (h.product || '')),
+        el('td', { style: { fontWeight: 700, color: tone, whiteSpace: 'nowrap' } }, r.label),
+        el('td', { class: 'mono' }, r.source || '-'),
+        el('td', { class: 'mono' }, r.latest_date || '-'),
+        el('td', { class: 'mono', style: { color: (r.lag_days ?? 0) > (cfg.threshold_days ?? 1) ? tone : 'inherit' } },
+          r.lag_days === null || r.lag_days === undefined ? '-' : `${r.lag_days}일`),
+        el('td', { class: 'mono' }, r.behind_days === null || r.behind_days === undefined
+          ? '-' : `${r.behind_of} −${r.behind_days}일`),
+        el('td', { class: 'mono', style: { fontSize: '11px' } }, fmtClock(r.last_write_ts)),
+        el('td', { style: { color: r.stalled ? tone : 'var(--text-muted)' } }, r.reason || '정상'),
+        el('td', {}, sel),
+      ));
+    });
+  });
+
+  const toggle = el('label', { style: { fontSize: '12px', color: 'var(--text-muted)', display: 'flex', gap: '5px', alignItems: 'center', marginLeft: 'auto' } },
+    el('input', Object.assign({ type: 'checkbox', onchange: (e) => { AL_HEALTH_ALL = e.target.checked; loadAlerts(); } },
+      AL_HEALTH_ALL ? { checked: '' } : {})),
+    '정상 단계도 표시');
+
+  return el('div', { style: { borderTop: AL_HAIR, marginTop: '20px', paddingTop: '12px' } },
+    el('div', { style: { display: 'flex', alignItems: 'baseline', gap: '10px' } },
+      el('span', { style: { fontWeight: 700, fontSize: '12px' } }, '단계 정체'),
+      el('span', { style: { fontSize: '12px', color: stalledTotal ? 'var(--danger)' : 'var(--text-muted)' } },
+        stalledTotal
+          ? `${stalledTotal}개 단계 정체 — 원인 ${rootTotal}건 (${cfg.threshold_days || 1}일 임계)`
+          : `전 제품 정상 (임계 ${cfg.threshold_days || 1}일)`),
+      toggle,
+    ),
+    el('div', { class: 'hint', style: { margin: '4px 0 6px' } },
+      'raw → event → feature → ML_TABLE(내부) → flow 발행본 → SEND_FORM(prefix 분리) → S3 전송 순. '
+      + 'raw·event 는 데이터 날짜, 그 뒤는 마지막 산출 시각, S3 는 마지막 전송 성공 시각이 기준입니다. '
+      + '앞 단계가 밀린 여파는 알람으로 보내지 않고 여기에만 표시합니다 — '
+      + '원인 단계를 고치면 같이 풀립니다. 같은 내용이 매칭알람으로 flow 에도 전달됩니다.'),
+    alTable(['vehicle', 'product', '단계', '소스', '최신 데이터', '지연', '앞 단계 대비',
+      '마지막 산출', '사유', '상태'], rows),
+  );
+}
+
+// ⚙ 단계 정체 알람 — 임계 일수와 감시 대상 단계 (pipeline.yaml stall_alert)
+function alStallEditor(health) {
+  const cfg = health?.config || {};
+  const on = el('input', Object.assign({ type: 'checkbox' },
+    cfg.enabled === false ? {} : { checked: '' }));
+  const thr = el('input', { type: 'number', value: String(cfg.threshold_days || 1),
+    min: '1', max: '60', style: { width: '54px' } });
+  const boxes = {};
+  const picks = STAGE_ORDER.map((s) => {
+    const cb = el('input', Object.assign({ type: 'checkbox' },
+      (cfg.stages || STAGE_ORDER).includes(s) ? { checked: '' } : {}));
+    boxes[s] = cb;
+    return el('label', { style: { display: 'flex', gap: '4px', alignItems: 'center' } }, cb, s);
+  });
+  return el('div', { style: { borderTop: AL_HAIR, marginTop: '20px', paddingTop: '12px' } },
+    alSub('⚙ 단계 정체 알람',
+      '오늘 파티션은 하루가 지나야 차므로 임계 1일 = "어제까지는 정상, 그저께가 최신이면 알람". '
+      + 'flow 매칭알람 화면에도 같은 기준으로 표시됩니다'),
+    el('div', { style: { fontSize: '12px', display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' } },
+      el('label', { style: { display: 'flex', gap: '4px', alignItems: 'center' } }, on, '사용'),
+      '임계', thr, '일', '감시 단계', ...picks,
+      el('button', { class: 'btn', onclick: async (ev) => {
+        ev.target.disabled = true;
+        try {
+          await api.put('/api/pipeline/config/stall', {
+            enabled: on.checked,
+            threshold_days: Number(thr.value) || 1,
+            stages: STAGE_ORDER.filter((s) => boxes[s].checked),
+          });
+        } catch (e) { alert(e.message); }
+        loadAlerts();
+      } }, '저장'),
+    ),
+  );
+}
 
 function alAlertTable(data) {
   // 전송 열은 ⚙ 설정(unmatched_scan.alert_cols)을 그대로 따른다 — flow 화면과 동일 구성
@@ -2923,6 +3646,8 @@ function alAlertTable(data) {
   const exText = (a) => (a.examples || [])
     .map((e) => [e.root_lot_id, e.wafer_id].filter(Boolean).join('·')).join(', ');
   const rows = data.alerts
+    // 단계 정체는 열 구성이 전혀 달라 위쪽 '단계 정체' 표가 따로 그린다
+    .filter((a) => a.type !== 'stage_stall')
     .filter((a) => AL_SHOW_SUPPRESSED || a.status === 'active')
     .map((a) => {
       const t = AL_TYPE[a.type] || { label: a.type, color: 'inherit' };
@@ -2993,8 +3718,8 @@ function alRunLog(data) {
       el('td', { class: 'mono', style: { fontWeight: 700 } }, r.vehicle || '-'),
       el('td', {}, RUN_MODE[r.mode] || r.mode || '-'),
       // 성공 / 취소 / 부분 실패(raw 유닛 일부 실패 — 재시도 큐에 남음) / 중단(단계가 못 돎)
-      el('td', { style: { color: r.ok ? '#30a46c' : (r.cancelled ? 'var(--text-muted)'
-        : (r.error ? '#e5484d' : '#f5a524')), fontWeight: 700 }, title: r.error || '' },
+      el('td', { style: { color: r.ok ? 'var(--ok)' : (r.cancelled ? 'var(--text-muted)'
+        : (r.error ? 'var(--danger)' : 'var(--warn)')), fontWeight: 700 }, title: r.error || '' },
         r.ok ? '성공' : (r.cancelled ? '취소' : (r.error ? '중단' : '부분 실패'))),
       el('td', { class: 'mono' }, `${r.elapsed_sec ?? '-'}s`),
       el('td', { style: { display: 'flex', gap: '10px', flexWrap: 'wrap' } }, ...bar),
@@ -3123,7 +3848,7 @@ function alCsvSync(info) {
     const row = el('tr', {},
       el('td', {}, key),
       el('td', {}, dest),
-      el('td', { class: 'mono', style: { fontSize: '11px', color: st.status === 'error' || st.status === 'missing' ? '#e5484d' : 'var(--text-muted)' } }, stTxt),
+      el('td', { class: 'mono', style: { fontSize: '11px', color: st.status === 'error' || st.status === 'missing' ? 'var(--danger)' : 'var(--text-muted)' } }, stTxt),
       el('td', {}, el('button', { class: 'btn', onclick: () => { row.remove(); fileRows.splice(fileRows.indexOf(entry), 1); } }, '✕')),
     );
     const entry = { key, dest, row };
@@ -3263,7 +3988,7 @@ function alSourcesEditor(sources) {
         onchange: (e) => { draft[name].columns = e.target.value; } })),
       el('td', {}, sel),
       el('td', { class: 'mono', style: { fontSize: '11px',
-        color: s.error ? '#e5484d' : 'var(--text-muted)' } },
+        color: s.error ? 'var(--danger)' : 'var(--text-muted)' } },
         s.error ? '설정 오류' : (s.resolved_time_col || '-')),
     ));
   });
@@ -3354,7 +4079,7 @@ function applyTheme(mode) {
 
   try {
     STATE.health = await api.get('/api/health');
-    $('#modeBadge').textContent = STATE.health.lake_mode;
+    $('#modeBadge').textContent = 'REAL';
   } catch (e) { console.warn('health', e); }
   try {
     STATE.version = await api.get('/api/version');

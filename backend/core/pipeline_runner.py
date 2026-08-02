@@ -40,10 +40,12 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import os
 import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 from backend.core.feature_pipeline import FeaturePipeline
 from backend.core.pipeline_retry import PipelineRetryStore
@@ -66,6 +68,64 @@ class PipelineCancelled(RuntimeError):
     """사용자가 큐에서 취소 — 안전 지점(유닛/단계 경계)에서 중단됐다."""
 
 
+class InterProcessLock:
+    """threading.Lock 호환 + 같은 DB root를 쓰는 다른 프로세스까지 직렬화."""
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._thread = threading.Lock()
+        self._fh = None
+
+    def _try_os_lock(self) -> bool:
+        fh = open(self.path, "a+b")
+        try:
+            if fh.seek(0, os.SEEK_END) == 0:
+                fh.write(b"0")
+                fh.flush()
+            fh.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self._fh = fh
+            return True
+        except (OSError, IOError):
+            fh.close()
+            return False
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        deadline = None if timeout is None or timeout < 0 else time.monotonic() + timeout
+        while True:
+            if self._thread.acquire(blocking=False):
+                if self._try_os_lock():
+                    return True
+                self._thread.release()
+            if not blocking or (deadline is not None and time.monotonic() >= deadline):
+                return False
+            time.sleep(0.05)
+
+    def release(self):
+        fh, self._fh = self._fh, None
+        if fh is not None:
+            try:
+                fh.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            finally:
+                fh.close()
+        self._thread.release()
+
+    def locked(self) -> bool:
+        return self._thread.locked()
+
+
 class PipelineRunner:
     def __init__(self, pipe: FeaturePipeline, run_log: RunLog | None = None):
         self.pipe = pipe
@@ -77,7 +137,9 @@ class PipelineRunner:
         self.on_vehicle_done = None  # Callable[[str, dict], None] — 알람 발행 훅
         self._lock = threading.Lock()       # progress 보호
         # 산출물(event/feature/wide/send)을 쓰는 모든 진입점의 공용 락 — 모듈 docstring 참조
-        self._run_lock = threading.Lock()
+        lock_root = pipe.db_root() if callable(getattr(pipe, "db_root", None)) \
+            else (Path(pipe.root) / "db")
+        self._run_lock = InterProcessLock(lock_root / ".valve_pipeline.lock")
         self._raw_sem = threading.BoundedSemaphore(3)  # 전역 raw 동시 상한 (run_all 시 재설정)
         self._loop_count = 0
         # 작업 큐 — 실행/대기/최근 작업을 한 곳에서 보고 취소한다 (/api/pipeline/queue)
@@ -443,7 +505,8 @@ class PipelineRunner:
                     self._prog(vehicle, raw_done=done, source=src)
             stages["raw"] = {"sec": round(time.time() - ts, 2), "units": len(units),
                              "rows": rows, "errors": errors, "recovered": recovered,
-                             "cancelled_units": cancelled_units}
+                             "cancelled_units": cancelled_units,
+                             "pruned": self.pipe.prune_raw(vehicle)}
 
             # 2) EVENT — 취소는 여기(단계 경계)까지만. raw 만 갱신된 채 끝나도
             # 다음 실행에서 event 가 따라잡는다 (파티션 신선도 비교).
@@ -464,24 +527,45 @@ class PipelineRunner:
             ts = time.time()
             ev_dates = self.pipe.event_date_count(vehicle)
             self._prog(vehicle, stage="feature", event_dates=ev_dates)
-            feature = self.pipe.run_feature(vehicle)
-            stages["feature"] = {
-                "sec": round(time.time() - ts, 2), "counts": feature["features"],
-                "event_dates": ev_dates,
-                "skipped": feature.get("skipped") or [],
-                "agg_overrides": feature.get("agg_overrides") or [],
-                "knob_miss": len(feature.get("knob_miss") or []),
-                "knob_skip": len(feature.get("knob_skip") or []),
-            }
+            if ev_dates == 0:
+                # 조회는 끝났는데 event 가 한 건도 없다 = 그 구간에 lot 이 없다
+                # (새 제품·비가동 구간·조건에 맞는 데이터 없음).
+                # run_feature 는 이때 RuntimeError 를 내는데, 그대로 두면 '데이터 없음' 이
+                # 매 회차 critical 알람이 된다. 데이터가 없는 것은 고장이 아니다 —
+                # 단계를 건너뛰고 기록만 남긴다 (기존 feature/ML_TABLE 도 보존).
+                feature = {"features": {}, "empty": True}
+                stages["feature"] = {"sec": 0.0, "counts": {}, "event_dates": 0,
+                                     "skipped": ["event 0건 — 조회 구간에 데이터가 없습니다"]}
+                self._prog(vehicle, stage="feature_skipped", event_dates=0)
+            else:
+                feature = self.pipe.run_feature(vehicle)
+                stages["feature"] = {
+                    "sec": round(time.time() - ts, 2), "counts": feature["features"],
+                    "event_dates": ev_dates,
+                    "skipped": feature.get("skipped") or [],
+                    "agg_overrides": feature.get("agg_overrides") or [],
+                    "knob_miss": len(feature.get("knob_miss") or []),
+                    "knob_skip": len(feature.get("knob_skip") or []),
+                }
 
-            # 4) WIDE — feature 전부를 ML_TABLE 로 병합
+            # 4) WIDE — raw 일부라도 실패한 회차는 이전 정상 ML_TABLE을 보존한다.
+            # event/feature 진단은 계속 수행하지만 부분 입력으로 정상본을 덮지 않는다.
             self._checkpoint("wide")
             ts = time.time()
-            self._prog(vehicle, stage="wide")
-            wide = self.pipe.run_wide(vehicle)
-            stages["wide"] = {"sec": round(time.time() - ts, 2),
-                              **{k: wide.get(k) for k in ("rows", "features", "path")
-                                 if k in wide}}
+            if errors or feature.get("empty"):
+                self._prog(vehicle, stage="wide_skipped")
+                wide = ({"skipped": "event 0건 — 이전 ML_TABLE 보존"} if feature.get("empty")
+                        else {"skipped": "raw 조회 실패로 이전 정상본 보존",
+                              "raw_errors": len(errors)})
+                stages["wide"] = {"sec": 0.0, **wide}
+            else:
+                self._prog(vehicle, stage="wide")
+                wide = self.pipe.run_wide(vehicle)
+                stages["wide"] = {"sec": round(time.time() - ts, 2),
+                                  **{k: wide.get(k) for k in ("rows", "features", "path")
+                                     if k in wide}}
+                # Flow가 읽는 db_root/ML_TABLE_{product}.parquet도 같은 성공 회차에서만 교체.
+                stages["wide"]["flow_publish"] = self.pipe.run_flow_tables()
 
             self._prog(vehicle, stage="done", elapsed=round(time.time() - t0, 2))
             result = {
@@ -567,17 +651,19 @@ class PipelineRunner:
                         results[v] = {"vehicle": v, "error": str(e)[:300]}
                         self._prog(v, stage="error", error=str(e)[:200])
 
-            # 5) SEND FORM — 전 vehicle ML_TABLE 병합 → prefix 그룹 분리 (KNOB/FAB+MASK/VM/INLINE)
-            # 취소됐으면 산출물 일부만으로 send form 을 덮어쓰지 않는다.
+            # 5) SEND FORM — 전 vehicle가 모두 정상인 회차에서만 교체한다.
             cancelled = self._cancelled()
-            if cancelled:
-                send_form = {"skipped": "취소됨"}
+            run_errors = any("error" in r or r.get("errors") for r in results.values())
+            if cancelled or run_errors:
+                send_form = {"skipped": "취소됨" if cancelled else
+                             "일부 vehicle raw/파이프라인 실패 — 이전 정상본 보존"}
             else:
                 with self._lock:
                     self.progress["send_form"] = "running"
                     self.progress["ts"] = time.time()
                 try:
                     send_form = self.pipe.run_send_form()
+                    send_form["flow_publish"] = self.pipe.run_flow_tables()
                 except Exception as e:
                     send_form = {"error": str(e)[:300]}
                 with self._lock:
@@ -653,7 +739,9 @@ class PipelineRunner:
     def run_wide_once(self, vehicle: str) -> dict:
         task = self._enter(f"{vehicle} wide 병합", "wide", [vehicle])
         try:
-            return self.pipe.run_wide(vehicle)
+            out = self.pipe.run_wide(vehicle)
+            out["flow_publish"] = self.pipe.run_flow_tables()
+            return out
         finally:
             self._leave(task)
 
@@ -708,6 +796,7 @@ class PipelineRunner:
             if not cancelled:
                 try:
                     self.pipe.run_send_form()
+                    self.pipe.run_flow_tables()
                 except Exception as e:
                     errors["send_form"] = str(e)[:300]
             out = {"ok": not errors and not cancelled, "cancelled": cancelled,

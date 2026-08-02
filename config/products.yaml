@@ -16,6 +16,11 @@ products:
     table: RAW_VM_DATA
     shard_hierarchy: []
     target_chunk_rows: 300000
+  - name: ET
+    table: f_et_test
+    shard_hierarchy:
+    - root_lot_id
+    target_chunk_rows: 200000
   params_template:
     product_code:
       op: eq
@@ -36,6 +41,15 @@ products:
     target_chunk_rows: 500000
   - name: INLINE
     table: RAW_INLINE_DATA
+    shard_hierarchy:
+    - root_lot_id
+    target_chunk_rows: 200000
+  - name: VM
+    table: RAW_VM_DATA
+    shard_hierarchy: []
+    target_chunk_rows: 300000
+  - name: ET
+    table: f_et_test
     shard_hierarchy:
     - root_lot_id
     target_chunk_rows: 200000

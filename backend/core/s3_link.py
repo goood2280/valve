@@ -38,6 +38,8 @@ def build_annotator(csv_sync=None, s3=None, s3queue=None):
         if s3 is None:
             return False
         try:
+            if hasattr(s3, "is_configured"):
+                return s3.is_configured()
             return s3._is_fake() or s3._s3_client is not None
         except Exception:
             return bool(getattr(s3, "bucket", None))

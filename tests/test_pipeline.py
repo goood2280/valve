@@ -8,7 +8,7 @@ import yaml
 from backend.core.alert_store import AlertStore
 from backend.core.csv_sync import CsvSync
 from backend.core.feature_pipeline import FeaturePipeline
-from backend.core.pipeline_runner import PipelineRunner
+from backend.core.pipeline_runner import InterProcessLock, PipelineRunner
 from backend.core.runtime_env import plan_workers
 from backend.core.s3_up import S3Uploader
 
@@ -18,6 +18,10 @@ REPO = Path(__file__).parent.parent
 @pytest.fixture()
 def pipe(tmp_path):
     shutil.copytree(REPO / "config", tmp_path / "config")
+    pipeline_path = tmp_path / "config" / "pipeline.yaml"
+    pipeline_cfg = yaml.safe_load(pipeline_path.read_text(encoding="utf-8")) or {}
+    pipeline_cfg["db_root"] = "db"
+    pipeline_path.write_text(yaml.safe_dump(pipeline_cfg, allow_unicode=True, sort_keys=False), encoding="utf-8")
     # knob 룰북은 기준본으로 고정 — 운영 중 flow 판정이 repo config 에 반영되면
     # (csv_sync) 데모 미매핑 ppid 가 전부 매핑되어 knob-miss/알람 테스트가 흔들린다.
     (tmp_path / "config" / "feature_rules" / "ppid_knob.csv").write_text(
@@ -103,7 +107,7 @@ def test_et_reformatter_edit_reflected_next_run(pipe):
 
 def test_source_columns_config_is_applied(pipe):
     import polars as pl
-    # FAB 컬럼에서 ppid 제거 → raw 에서 빠지고, KNOB feature 는 사유와 함께 skip
+    # RAW는 전체 컬럼을 보존하고, EVENT에서 설정 컬럼만 선택한다.
     cfg = pipe.global_cfg()
     fab_cols = [c for c in cfg["sources"]["FAB"]["columns"] if c != "ppid"]
     cfg["sources"]["FAB"]["columns"] = fab_cols
@@ -113,15 +117,97 @@ def test_source_columns_config_is_applied(pipe):
     stats = pipe.run_raw_query("VH_PRODA")
     assert stats["tables"]["FAB"] == "MY_FAB_TABLE"
     raw = pl.read_parquet(next(pipe.raw_dir("VH_PRODA", "FAB").glob("date=*/data.parquet")))
-    assert "ppid" not in raw.columns
+    assert "ppid" in raw.columns
     assert set(fab_cols) <= set(raw.columns)
 
     pipe.run_event("VH_PRODA")
+    event = pl.read_parquet(next(pipe.event_dir("VH_PRODA", "FAB").glob("date=*/data.parquet")))
+    assert "ppid" not in event.columns
     r = pipe.run_feature("VH_PRODA")
     assert r["features"]["knob"] == 0
     assert any(s["feature"] == "KNOB_*" for s in r["skipped"])
     # 나머지 카테고리는 정상 산출
     assert r["features"]["fab"] > 0 and r["features"]["inline"] > 0
+
+
+def test_real_raw_query_uses_getdata_shape_and_preserves_all_columns(pipe):
+    from datetime import date
+    import polars as pl
+
+    class FullLake:
+        def __init__(self):
+            self.calls = []
+
+        async def query(self, params, custom_col):
+            self.calls.append((dict(params), list(custom_col)))
+            return pl.DataFrame({
+                "root_lot_id": ["R001"], "wafer_id": ["1"],
+                "tkout_time": ["2026-07-30 12:00:00"],
+                "extra_raw_column": ["keep-me"],
+            })
+
+    lake = FullLake()
+    pipe.lake_api = lake
+    cfg = pipe.vehicle_cfg("VH_PRODA")
+    rows = pipe._run_raw_unit(cfg, "FAB", date(2026, 7, 30), date(2026, 7, 31),
+                              "2026-07-30~2026-07-31")
+
+    assert rows == 1
+    params, custom_col = lake.calls[0]
+    assert params == {
+        "table_name": "RAW_FAB_DATA",
+        "datefrom": "2026-07-30",
+        "dateto": "2026-07-31",
+        "process_id": "P100",
+        "line_id": ["L1"],
+    }
+    assert custom_col == []
+    raw = pl.read_parquet(pipe.raw_dir("VH_PRODA", "FAB") /
+                          "date=2026-07-30" / "data.parquet")
+    assert raw["extra_raw_column"].to_list() == ["keep-me"]
+
+
+def test_event_loader_unions_schema_drift_by_column_name(pipe):
+    """날짜별로 all-null 열이 빠져도 event 전체 로드는 중단되지 않는다."""
+    import polars as pl
+
+    root = pipe.event_dir("VH_PRODA", "INLINE")
+    for day, data in (
+        ("2026-07-30", {"root_lot_id": ["R1"], "wafer_id": [1],
+                         "item_id": ["CD"], "value": [1.0], "tkout_time": ["t1"]}),
+        ("2026-07-31", {"root_lot_id": ["R2"], "wafer_id": [2],
+                         "item_id": ["CD"], "value": [2.0]}),
+    ):
+        p = root / f"date={day}"
+        p.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame(data).write_parquet(p / "data.parquet")
+
+    event = pipe._load_event("VH_PRODA", "INLINE")
+    assert event.height == 2
+    assert "tkout_time" in event.columns
+    assert event.filter(pl.col("root_lot_id") == "R2")["tkout_time"].item() is None
+
+
+def test_event_applies_vehicle_matching_step_desc(pipe):
+    """flow가 승인한 step_id→function step을 raw 설명 대신 event에 적용한다."""
+    import polars as pl
+
+    mapping = pipe.root / "config" / "step_matching" / "vehicle_matching.csv"
+    mapping.write_text(mapping.read_text(encoding="utf-8")
+                       + "VH_PRODA,PRODA,CC999900,GATE_ETCH\n", encoding="utf-8")
+    raw_dir = pipe.raw_dir("VH_PRODA", "FAB") / "date=2026-07-31"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({
+        "root_lot_id": ["R_NEW"], "wafer_id": ["1"],
+        "tkout_time": ["2026-07-31 10:00:00"], "step_id": ["CC999900"],
+        "step_desc": ["RAW_DESCRIPTION"], "ppid": ["PP_GE_A1"],
+        "split": ["2026-07-31~2026-08-01"],
+    }).write_parquet(raw_dir / "data.parquet")
+
+    pipe.run_event("VH_PRODA")
+    event = pl.read_parquet(pipe.event_dir("VH_PRODA", "FAB") /
+                            "date=2026-07-31" / "data.parquet")
+    assert event["step_desc"].to_list() == ["GATE_ETCH"]
 
 
 def test_full_run_produces_all_categories(pipe):
@@ -646,6 +732,28 @@ def test_wide_form_merges_vehicle_features(pipe):
         < min(i for i, c in enumerate(cols) if c.startswith("FAB_"))
 
 
+def test_feature_store_is_replaced_as_current_rule_snapshot(pipe):
+    """삭제된 룰/과거 세대의 parquet은 다음 feature 실행 뒤 남지 않는다."""
+    import polars as pl
+
+    pipe.run_raw_query("VH_PRODA")
+    pipe.run_event("VH_PRODA")
+    pipe.run_feature("VH_PRODA")
+    stale = pipe.feature_dir("VH_PRODA") / "FAB_REMOVED_RULE_old.parquet"
+    pl.DataFrame({"root_lot_id": ["R_STALE"], "wafer_id": [1],
+                  "FAB_REMOVED_RULE_old": ["must-disappear"]}).write_parquet(stale)
+    assert stale.exists()
+
+    pipe.run_feature("VH_PRODA")
+
+    assert not stale.exists()
+    assert not list(pipe.feature_dir("VH_PRODA").parent.glob(".VH_PRODA.build-*"))
+    wide = pipe.run_wide("VH_PRODA")
+    assert wide["features"] > 0
+    assert "FAB_REMOVED_RULE_old" not in pl.read_parquet(
+        pipe.wide_dir() / "ML_TABLE_VH_PRODA.parquet").columns
+
+
 def test_send_form_groups_split_with_mask_in_fab(pipe):
     import polars as pl
     pipe.run_all("VH_PRODA")
@@ -666,6 +774,65 @@ def test_send_form_groups_split_with_mask_in_fab(pipe):
     assert set(fab["PRODUCT"].unique().to_list()) == {"PRODA", "PRODB"}
     for g, fname in (("0.KNOB", "KNOB"), ("1.FAB", "FAB"), ("2.VM", "VM"), ("3.INLINE", "INLINE")):
         assert (pipe.send_dir() / g / f"{fname}_ML_TABLE.csv").exists()
+
+
+def test_flow_tables_are_product_named_at_db_root(pipe):
+    import polars as pl
+
+    pipe.run_all("VH_PRODA")
+    pipe.run_all("VH_PRODB")
+    out = pipe.run_flow_tables()
+    assert set(out["files"]) == {"ML_TABLE_PRODA.parquet", "ML_TABLE_PRODB.parquet"}
+    for product in ("PRODA", "PRODB"):
+        fp = pipe.db_root() / f"ML_TABLE_{product}.parquet"
+        assert fp.exists()
+        assert pl.read_parquet(fp)["PRODUCT"].unique().to_list() == [product]
+
+
+def test_pipeline_lock_is_shared_between_runner_instances(pipe):
+    a = InterProcessLock(pipe.db_root() / ".lock-test")
+    b = InterProcessLock(pipe.db_root() / ".lock-test")
+    assert a.acquire(blocking=False)
+    try:
+        assert not b.acquire(blocking=False)
+    finally:
+        a.release()
+    assert b.acquire(blocking=False)
+    b.release()
+
+
+def test_raw_failure_preserves_previous_flow_ml_table(pipe, monkeypatch):
+    from datetime import date
+
+    pipe.run_all("VH_PRODA")
+    pipe.run_flow_tables()
+    published = pipe.db_root() / "ML_TABLE_PRODA.parquet"
+    before = published.read_bytes()
+
+    monkeypatch.setattr(pipe, "_raw_units", lambda _cfg: [
+        ("FAB", date.today(), date.today(), "failed-unit")])
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("lake unavailable")
+
+    monkeypatch.setattr(pipe, "_run_raw_unit", fail)
+    result = PipelineRunner(pipe).run_vehicle_once("VH_PRODA")
+
+    assert result["errors"]
+    assert result["wide"]["skipped"].startswith("raw 조회 실패")
+    assert published.read_bytes() == before
+
+
+def test_partition_retention_removes_only_expired_dates(pipe):
+    old = pipe.raw_dir("VH_PRODA", "FAB") / "date=2020-01-01"
+    recent = pipe.raw_dir("VH_PRODA", "FAB") / "date=2026-08-01"
+    old.mkdir(parents=True)
+    recent.mkdir(parents=True)
+    removed = pipe._prune_date_partitions(
+        pipe.raw_dir("VH_PRODA", "FAB"), keep_days=7,
+        today=__import__("datetime").date(2026, 8, 1))
+    assert removed == ["2020-01-01"]
+    assert not old.exists() and recent.exists()
 
 
 def test_custom_feature_funcs_from_config_file(pipe):

@@ -26,6 +26,11 @@ def deps(jobs):
     _jobs = jobs
 
 
+def jobs():
+    """주입된 S3Jobs (미주입이면 None) — 다른 라우터가 상태만 읽을 때 쓴다."""
+    return _jobs
+
+
 def _j():
     if _jobs is None:
         raise HTTPException(500, "s3_jobs not initialized")

@@ -1,7 +1,6 @@
 {
   "lake_api": {
-    "mode": "mock",
-    "module": "valve.mock:query",
+    "module": "backend.core.real_lake_adapter:query",
     "user": "pipe-runner",
     "timeout_sec": 290,
     "min_interval_sec": 1,
@@ -23,6 +22,7 @@
     ]
   },
   "s3": {
+    "enabled": false,
     "endpoint_url": "",
     "bucket": "flow-datalake",
     "prefix": "",
@@ -60,6 +60,15 @@
     "config_prefix": "valve-config",
     "max_per_hour": 60,
     "dedupe_window_sec": 60
+  },
+  "llm": {
+    "enabled": false,
+    "api_url": "",
+    "model": "gpt-oss-120b",
+    "auth_mode": "bearer",
+    "token": "",
+    "format": "openai",
+    "timeout_s": 20
   },
   "_root": "D:\\semi all\\Valve"
 }

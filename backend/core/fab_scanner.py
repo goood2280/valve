@@ -108,25 +108,25 @@ class LakeFabDbClient(FabDbClient):
         query_days = int(scan_cfg.get("scan_query_days") or vehicle_cfg.get("QueryTimeSpan", 6))
         sources = self.pipe.sources_cfg()
         fab_src = sources.get("FAB", {})
-        table = fab_src.get("table", "RAW_FAB_DATA")
+        table = fab_src.get("table_name") or fab_src.get("table") or "RAW_FAB_DATA"
         base = ["step_id", "root_lot_id", "wafer_id", "ppid"]
         extra: list[str] = scan_cfg.get("extra_columns") or []
         columns = list(dict.fromkeys(base + extra))
         today = datetime.today()
         date_from = (today - timedelta(days=query_days)).strftime("%Y-%m-%dT00:00:00")
         date_to = today.strftime("%Y-%m-%dT23:59:59")
-        params: dict = {"table": table, "dateFrom": date_from, "dateTo": date_to}
+        params: dict = {"table_name": table, "datefrom": date_from, "dateto": date_to}
         line_id = vehicle_cfg.get("line_id")
         if line_id:
             ids = line_id if isinstance(line_id, list) else [line_id]
-            params["line_id"] = {"op": "in", "value": ids}
+            params["line_id"] = ids
         process_id = vehicle_cfg.get("process_id")
         if process_id:
-            params["process_id"] = {"op": "eq", "value": process_id}
+            params["process_id"] = process_id
         eqp_filter: list[str] = scan_cfg.get("eqp_filter") or []
         eqp_mode = str(scan_cfg.get("eqp_filter_mode", "eqp_id"))
         if eqp_filter:
-            params[eqp_mode] = {"op": "in", "value": eqp_filter}
+            params[eqp_mode] = list(eqp_filter)
         df = self._run_query(params, columns)
         # 해당 기간에 데이터가 없으면 어댑터가 빈 df(컬럼 없음)를 줄 수 있다 —
         # 스캐너가 step_id/root_lot_id 를 바로 참조하므로 요청 컬럼 스키마를 보장한다.

@@ -23,6 +23,38 @@ from pathlib import Path
 from typing import Any
 
 
+def product_table_name(product: str, source_cfg: dict) -> str:
+    """제품의 sources 항목에 저장된 실제 테이블명을 그대로 반환한다."""
+    table_name = source_cfg.get("table_name") or source_cfg.get("table")
+    if not isinstance(table_name, str) or not table_name.strip():
+        source = source_cfg.get("name") or "?"
+        raise ValueError(
+            f"table_name is required in products.yaml for product={product!r}, "
+            f"source={source!r}"
+        )
+    return table_name
+
+
+def raw_query_params(product: str, source_cfg: dict, prod_cfg: dict,
+                     product_filters: dict[str, dict], datefrom, dateto) -> dict:
+    """bigdataquery RAW 조회 규약. 필터 값은 op 래퍼 없이 그대로 전달한다."""
+    params = {
+        "table_name": product_table_name(product, source_cfg),
+        "datefrom": datefrom,
+        "dateto": dateto,
+    }
+    configured = product_filters.get(product) or {}
+    for key in ("process_id", "line_id"):
+        value = source_cfg.get(key)
+        if value is None:
+            value = prod_cfg.get(key)
+        if value is None:
+            value = configured.get(key)
+        if value is not None and value != "" and value != []:
+            params[key] = value
+    return params
+
+
 @dataclass
 class Chunk:
     chunk_id: str
@@ -66,10 +98,12 @@ class ChunkPlan:
 
 
 class Planner:
-    def __init__(self, lake_api, settings: dict, cache_path: Path):
+    def __init__(self, lake_api, settings: dict, cache_path: Path,
+                 product_filters: dict[str, dict] | None = None):
         self.api = lake_api
         self.settings = settings
         self.cache_path = cache_path
+        self.product_filters = product_filters or {}
         self.cache_path.parent.mkdir(parents=True, exist_ok=True)
         self._cache: dict[str, dict] = self._load_cache()
 
@@ -112,6 +146,8 @@ class Planner:
 
     # ─── main ───
     async def build_plan(self, product: str, source_cfg: dict, prod_cfg: dict, date: str) -> ChunkPlan:
+        # 제품별 실제 테이블 설정을 계획 단계에서 먼저 검증한다. 소스명으로 추정하지 않는다.
+        product_table_name(product, source_cfg)
         # 제품/소스별 probe skip — probe 가 상습 실패하는 소스에 대해 아예 안 걸고 단일 chunk 시도
         skip_probe = bool(source_cfg.get("probe_skip") or prod_cfg.get("probe_skip"))
         strategy = "none" if skip_probe else self.settings.get("probe", {}).get("strategy", "sample_window")
@@ -156,12 +192,8 @@ class Planner:
         t0 = datetime.fromisoformat(f"{date}T00:00:00")
         t1 = t0 + timedelta(hours=hours)
 
-        params = {
-            **prod_cfg.get("params_template", {}),
-            "table": source_cfg["table"],
-            "dateFrom": t0.isoformat(),
-            "dateTo": t1.isoformat(),
-        }
+        params = raw_query_params(product, source_cfg, prod_cfg, self.product_filters,
+                                  t0.isoformat(), t1.isoformat())
         custom_col = [first_shard] if first_shard else ["time"]
 
         try:
@@ -195,12 +227,8 @@ class Planner:
         t0 = datetime.fromisoformat(f"{date}T00:00:00")
         t1 = t0 + timedelta(days=1)
 
-        params = {
-            **prod_cfg.get("params_template", {}),
-            "table": source_cfg["table"],
-            "dateFrom": t0.isoformat(),
-            "dateTo": t1.isoformat(),
-        }
+        params = raw_query_params(product, source_cfg, prod_cfg, self.product_filters,
+                                  t0.isoformat(), t1.isoformat())
         custom_col = (shard_keys[:2] if shard_keys else []) + ["time"]
         custom_col = list(dict.fromkeys(custom_col))  # dedupe preserve order
 

@@ -5,10 +5,12 @@
   <meta name="viewport" content="width=device-width,initial-scale=1.0">
   <title>Valve</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="preload" href="/fonts/PretendardVariable.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/fonts/JetBrainsMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/style.css">
-  <meta name="theme-color" content="#FF5E00">
+  <meta name="theme-color" content="#E25822">
 </head>
-<body>
+<body class="valve-app valve-carbon">
   <header class="nav">
     <div class="brand" title="turn the valve · feed the flow">
       valve<span class="brand-dot">.</span>
@@ -16,6 +18,7 @@
     <nav class="tabs">
       <button class="tab active" data-tab="monitor"><span class="tab-ico">📊</span>모니터</button>
       <button class="tab" data-tab="products"><span class="tab-ico">📦</span>제품</button>
+      <button class="tab" data-tab="diagnose"><span class="tab-ico">🩺</span>진단</button>
       <button class="tab" data-tab="logs"><span class="tab-ico">📜</span>로그</button>
       <button class="tab" data-tab="settings"><span class="tab-ico">⚙️</span>설정</button>
       <button class="tab" data-tab="browser"><span class="tab-ico">📂</span>탐색기</button>
@@ -23,7 +26,7 @@
     </nav>
     <div class="status">
       <span class="status-item">
-        <span class="mode-badge" id="modeBadge">mock</span>
+        <span class="mode-badge" id="modeBadge">REAL</span>
       </span>
       <span class="status-item" title="실시간 이벤트 연결">
         <span class="sse-dot" id="sseDot"></span>
@@ -42,7 +45,7 @@
     <span class="foot-sep">·</span>
     <a href="/docs" target="_blank">API docs</a>
     <span class="foot-sep">·</span>
-    <span>pairs with <span class="flow-mark">flow<span style="color:#1e293b">.</span></span></span>
+    <span>pairs with <span class="flow-mark">flow<span style="color:var(--text-muted)">.</span></span></span>
   </footer>
 
   <script src="/app.js"></script>

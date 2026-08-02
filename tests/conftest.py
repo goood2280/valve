@@ -25,8 +25,7 @@ if str(ROOT) not in sys.path:
 def sample_settings():
     return {
         "lake_api": {
-            "mode": "mock",
-            "module": "",
+            "module": "backend.core.real_lake_adapter:query",
             "user": "test",
             "timeout_sec": 10,
             "min_interval_sec": 0.0,
@@ -110,8 +109,8 @@ class FakeLakeAPI:
         # 1h 샘플이면 3000 행, 하루면 72000 행 흉내
         from datetime import datetime, timedelta
         try:
-            t0 = datetime.fromisoformat(params["dateFrom"])
-            t1 = datetime.fromisoformat(params["dateTo"])
+            t0 = datetime.fromisoformat(params.get("datefrom") or params["dateFrom"])
+            t1 = datetime.fromisoformat(params.get("dateto") or params["dateTo"])
             hours = max((t1 - t0).total_seconds() / 3600.0, 0.01)
         except Exception:
             hours = 24.0

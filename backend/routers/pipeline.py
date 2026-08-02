@@ -14,6 +14,10 @@
   PUT  /api/pipeline/config/sources      소스별 테이블/컬럼 저장
   PUT  /api/pipeline/config/exclude      미매칭 스캔 exclude 패턴 저장
   PUT  /api/pipeline/config/alert-cols   매칭알람 전송 열/예시 개수 저장 (알람 탭 ⚙)
+  PUT  /api/pipeline/config/stall        단계 정체 알람 임계/대상 단계 저장 (알람 탭 ⚙)
+  GET  /api/pipeline/health              제품별 단계 진행 현황 (raw→event→feature→wide 정체 판정)
+  GET  /api/pipeline/diagnose/{vehicle}  단계별 진단 — 검사마다 열어볼 parquet(view) 동봉
+  POST /api/pipeline/diagnose/{vehicle}/summary  진단 요약 (사내 LLM 있으면 문장, 없으면 규칙)
   GET  /api/pipeline/queue               작업 큐 — 실행 중/락 대기/예정
   POST /api/pipeline/queue/cancel        작업 취소 (안전 지점에서 중단)
   GET  /api/pipeline/retries             재시도 큐 (blocked = 자동 재시도 중단)
@@ -22,13 +26,18 @@
 """
 from __future__ import annotations
 
+import time
+
 from fastapi import APIRouter, Body, HTTPException
 
+from backend.core import diagnose_ai
 from backend.core.alert_store import AlertStore
 from backend.core.csv_sync import CsvSync
+from backend.core.diagnose import diagnose
 from backend.core.feature_pipeline import DEFAULT_SOURCES, FeaturePipeline
 from backend.core.pipeline_runner import PipelineBusy, PipelineRunner
 from backend.core.runtime_env import plan_dict
+from backend.core.stage_health import ALL_STAGES, stage_health, stall_cfg
 
 router = APIRouter()
 
@@ -37,17 +46,34 @@ _alerts: AlertStore | None = None
 alerts: AlertStore | None = None  # app.py 가 startup 에서 주기 발행 loop 를 제어
 runner: PipelineRunner | None = None  # 병렬 실행/스케줄러 (app.py startup 에서 loop 제어)
 csv_sync: CsvSync | None = None  # app.py 가 startup 에서 background loop 를 제어
+s3_jobs = None  # S3 전송 엔진 (app.py 가 attach_s3_jobs 로 주입 — 정체 감시/진단이 읽는다)
+
+# 마지막 진단 결과 (vehicle → (ts, result)). AI 요약이 화면과 같은 결과를 보게 하려는 것 —
+# 클라이언트가 보낸 진단 결과를 믿지 않고, 그렇다고 요약 때마다 parquet 을 다시 읽지도 않는다.
+_last_diag: dict = {}
+_DIAG_CACHE_SEC = 600
 
 
-def deps(root, settings, s3_uploader):
+def deps(root, settings, s3_uploader, lake_api=None):
     global _pipe, _alerts, alerts, runner, csv_sync
-    _pipe = FeaturePipeline(root, settings)
+    _pipe = FeaturePipeline(root, settings, lake_api=lake_api)
     _alerts = AlertStore(_pipe, s3_uploader, settings, root)
     alerts = _alerts
     runner = PipelineRunner(_pipe)
     runner.on_vehicle_done = lambda v, _r: _alerts.publish(v)  # 실행 후 알람 S3 발행
     csv_sync = CsvSync(root, s3_uploader)
     csv_sync.on_updated = _refresh_after_sync   # legacy 경로 (s3_jobs 미이관 환경)
+
+
+def attach_s3_jobs(jobs) -> None:
+    """S3 전송 엔진을 알람/진단에 연결 (app.py startup — s3jobs 가 나중에 생긴다).
+
+    로컬 단계가 전부 최신이어도 업로드가 멈추면 flow 는 옛 데이터를 계속 본다 —
+    전송도 감시 대상이라 정체 판정과 진단이 이 참조를 쓴다."""
+    global s3_jobs
+    s3_jobs = jobs
+    if _alerts is not None:
+        _alerts.s3_jobs = jobs
 
 
 def on_config_downloaded(paths: list) -> None:
@@ -340,6 +366,73 @@ def put_alert_hint(body: dict = Body(...)):
     cfg.setdefault("unmatched_scan", {})["hint"] = hint
     _p().save_global_cfg(cfg)
     return {"ok": True, "hint": hint}
+
+
+@router.put("/api/pipeline/config/stall")
+def put_stall_cfg(body: dict = Body(...)):
+    """단계 정체 알람 설정 저장 — {enabled, threshold_days, stages}
+    (알람 탭 ⚙ · pipeline.yaml stall_alert)."""
+    stages = []
+    for s in (body.get("stages") or []):
+        s = str(s).strip().lower()
+        if s and s in ALL_STAGES and s not in stages:
+            stages.append(s)
+    if not stages:
+        raise HTTPException(400, "감시할 단계를 하나 이상 지정하세요")
+    try:
+        thr = max(1, min(60, int(body.get("threshold_days") or 1)))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "threshold_days 는 숫자")
+    stall = {"enabled": bool(body.get("enabled", True)),
+             "threshold_days": thr,
+             "stages": [s for s in ALL_STAGES if s in stages]}
+    cfg = _p().global_cfg()
+    cfg["stall_alert"] = stall
+    _p().save_global_cfg(cfg)
+    return {"ok": True, "stall_alert": stall}
+
+
+@router.get("/api/pipeline/diagnose/{vehicle}")
+def diagnose_vehicle(vehicle: str):
+    """단계별 진단 — raw 가 되는가 → event 가 정확한가 → feature/매칭테이블이 오는가.
+
+    각 검사는 그 자리에서 열어볼 parquet(view: root/file/sql)을 같이 돌려준다 —
+    진단 탭이 그 값으로 탐색기를 열어 사람이 눈으로 확인한다."""
+    p = _p()
+    if vehicle not in p.vehicles():
+        raise HTTPException(404, f"알 수 없는 vehicle: {vehicle}")
+    result = diagnose(p, vehicle, s3_jobs=s3_jobs, csv_sync=csv_sync)
+    _last_diag[vehicle] = (time.time(), result)
+    return result
+
+
+@router.post("/api/pipeline/diagnose/{vehicle}/summary")
+def diagnose_summary(vehicle: str):
+    """진단 결과 한 덩어리 요약 — 사내 LLM 이 연결돼 있으면 문장으로, 아니면 규칙으로.
+
+    **AI 없이도 답이 나온다** (`source: "rules"`). 요약 재료는 방금 화면이 받은
+    진단 결과를 그대로 쓰되, 클라이언트가 보낸 값을 믿지 않고 서버 캐시에서
+    꺼낸다. 캐시가 낡았으면 다시 검사한다 — 진단은 parquet 조회라 공짜가 아니다."""
+    p = _p()
+    if vehicle not in p.vehicles():
+        raise HTTPException(404, f"알 수 없는 vehicle: {vehicle}")
+    ts, cached = _last_diag.get(vehicle) or (0.0, None)
+    if cached is None or time.time() - ts > _DIAG_CACHE_SEC:
+        cached = diagnose(p, vehicle, s3_jobs=s3_jobs, csv_sync=csv_sync)
+        _last_diag[vehicle] = (time.time(), cached)
+        ts = time.time()
+    out = diagnose_ai.summarize(cached)
+    out["diagnosed_at"] = ts
+    return out
+
+
+@router.get("/api/pipeline/health")
+def health():
+    """제품별 단계 진행 현황(raw→event→feature→wide) — 정체 판정 근거 그대로.
+    매칭알람 payload 의 health 블록과 같은 계산이다 (backend/core/stage_health.py)."""
+    p = _p()
+    return {"config": stall_cfg(p.global_cfg()),
+            "vehicles": {v: stage_health(p, v, s3_jobs=s3_jobs) for v in p.vehicles()}}
 
 
 @router.post("/api/pipeline/wide/{vehicle}")

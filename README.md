@@ -9,8 +9,8 @@
                               │  (rate limit · 5분 제한 · HY000 간헐)
                               ▼
                       ╔════════════════════╗
-                      ║        Valve       ║   ← 운영 대시보드 6탭
-                      ║  · Probe → Plan    ║     (모니터 · 제품 · 로그
+                      ║        Valve       ║   ← 운영 대시보드 7탭
+                      ║  · Probe → Plan    ║     (모니터 · 제품 · 진단 · 로그
                       ║  · Execute ×3      ║      · 설정 · 탐색기 · 알람)
                       ║  · raw → event     ║
                       ║    → feature       ║
@@ -70,13 +70,13 @@ uvicorn app:app --host 0.0.0.0 --port 8090 --reload
 | pip 이 아주 낮은 버전을 골라 설치 | 파이썬이 낡아 최신 wheel 을 못 받는 것 — 3.10+ 환경에서 다시 설치 |
 | 사내망이라 pip 이 외부를 못 봄 | 외부 PC 에서 `pip download -r requirements.txt -d wheels/` 후 반입 → `pip install --no-index --find-links wheels/ -r requirements.txt` |
 
-### Mock → 사내 실 API 전환
+### 사내 실 API 연결
 
-기본값은 **Mock 모드** (가짜 데이터 · HY000 5% 확률 · 1% 확률 6분 timeout 주입).
-웹 **설정 탭**에서 `lake_api.mode` 를 `real` 로 바꾸면 전환된다. 이때 `lake_api.module` 이
-실제로 호출할 함수를 가리켜야 한다.
+Valve는 **실 API 전용**이며 Mock 모드와 모드 전환 설정은 없다. `lake_api.module`은
+실제로 호출할 함수를 가리킨다.
 
-- 형식은 **`패키지.모듈:함수`** (`importlib` 로 동적 로드). 기본값 `valve.mock:query` 는 자리표시자다.
+- 형식은 **`패키지.모듈:함수`** (`importlib` 로 동적 로드). 기본값은
+  `backend.core.real_lake_adapter:query`이며 사내 `bigdataquery.getData`를 호출한다.
 - Valve 가 기대하는 시그니처는 **`query(params, custom_col, user)`** — 반환은 pandas/polars DataFrame.
 - **인증 정보는 `user_name` 하나뿐이다.** 사내 DataLake query API 는 키/토큰을 받지 않는다 —
   설정 탭의 `lake_api.user` 가 그대로 `getData(user_name=…)` 로 간다. (v0.3.9 에서 쓰지도 않던
@@ -128,7 +128,7 @@ Valve/
 ├── docs/                        설계 문서 · 매뉴얼 PDF
 ├── scripts/smoke_test.py        stdlib 만으로 핵심 라우트 검증
 ├── scripts/gen_manual_pdf.py    docs/valve_manual.pdf 생성
-└── tests/                       pytest (187개 · `python -m pytest tests -q` · 약 3분)
+└── tests/                       pytest (239개 · `python -m pytest tests -q` · 약 3분 30초)
 ```
 
 ### `config/` — 있어야 도는 파일들
@@ -138,11 +138,11 @@ Valve/
 
 | 파일 | 필수 | 누가 쓰나 | 내용 |
 |---|---|---|---|
-| `pipeline.yaml` | ✅ 전체 | 웹(모니터 ⚙ 실행 관리 · 알람 탭) | `db_root` · `runtime`(워커·주기·**실행 금지 시간대**·재시도) · `sources`(테이블/컬럼/**파티션 기준 열**) · 룰북 경로 · `unmatched_scan`(제외 규칙 · 알람 전송 열 · **function step 추천 컨텍스트**) · `knob_skip` |
+| `pipeline.yaml` | ✅ 전체 | 웹(모니터 ⚙ 실행 관리 · 알람 탭) | `db_root` · `runtime`(워커·주기·**실행 금지 시간대**·재시도) · `sources`(테이블/컬럼/**파티션 기준 열**) · 룰북 경로 · `unmatched_scan`(제외 규칙 · 알람 전송 열 · **function step 추천 컨텍스트**) · **`stall_alert`**(단계 정체 임계 · 감시 단계 raw→…→send·s3 전송) · `knob_skip` |
 | `vehicles.yaml` | ✅ 전체 | 웹(제품별 주기) | vehicle 정의 — `product` `process_id` `line_id` `QueryTimeSpan` `SplitTimeSpan` `event_days_back` `event_lot_startwith` `runs_per_day` |
-| `settings.json` | ✅ 전체 | 웹(설정 탭) | `lake_api`(mode·module·**user_name**·timeout·retry — 인증은 user 하나뿐) · `s3`(bucket·key) · `schedule` · `probe` · `alerts` |
+| `settings.json` | ✅ 전체 | 웹(설정 탭 · **`s3` 는 탐색기 ⚙ › 연결**) | `lake_api`(mode·module·**user_name**·timeout·retry — 인증은 user 하나뿐) · `s3`(bucket·key) · `schedule` · `probe` · `alerts` |
 | `products.yaml` | ✅ 모니터 백필 | 웹(제품 탭) | 제품 × 소스 테이블 · `shard_hierarchy` · `target_chunk_rows` · `params_template` |
-| `source_types.yaml` | ✅ 제품 편집기 | 웹(설정 › Source types) | 소스 메타 — 컬럼 풀 · 기본 shard · 색 · 힌트 |
+| `source_types.yaml` | ✅ 제품 편집기 | 웹(설정 › Source types) | 소스 메타 — `table_template` · 컬럼 풀 · 기본 shard · 색 · 힌트. **웹에서 저장하면 이 소스를 쓰는 제품(`products.yaml`)의 `table`·소스명(이름 변경 시)·손대지 않은 `shard_hierarchy` 까지 함께 갱신** (제품에서 직접 지정한 `table` 은 확인받은 뒤에만 덮어씀) |
 | `step_matching/vehicle_matching.csv` | ✅ event·feature | **flow → S3 ↓** | `vehicle,product,step_id,step_desc` — 이게 없으면 event DB 가 비어 feature 도 안 나온다 |
 | `feature_rules/fab.csv` | FAB feature | **flow → S3 ↓** | `step_desc,feature_name,agg` |
 | `feature_rules/ppid_knob.csv` | KNOB feature | **flow → S3 ↓** | 사내 룰 형식 `feature_name,function_step,rule_order,operator,value,category[,use]`. flow 판정 결과가 반영되는 마스터 룰북 |
@@ -198,7 +198,7 @@ Valve/
 | `pipeline_retry.py` | raw 실패 유닛 영구 재시도 큐 (severity 3단계 · 상한 도달 시 blocked) |
 | `run_log.py` | 실행 이력 (vehicle 1회 = 1레코드, append-only JSONL) |
 | `runtime_env.py` | 호스트 코어/메모리 → 워커 수 산정 (`auto` 값의 근거) |
-| `lake_api.py` | 사내 DataLake `query()` 어댑터 — Mock/Real · rate limit · retry · timeout |
+| `lake_api.py` | 사내 DataLake 실 `query()` 어댑터 — rate limit · retry · timeout |
 | `planner.py` | probe → chunk plan (7일 캐시) |
 | `executor.py` | asyncio chunk worker (`max_concurrent=3`) + 머지 + completeness |
 | `state.py` | plan/chunk/partition 상태 + SSE broadcast + crash recovery |
@@ -220,10 +220,33 @@ Valve/
 | `ops.py` · `agent.py` · `aipd_bridge.py` | Prometheus 메트릭 + webhook · 에이전트 스캐폴딩 · aipd 연결 |
 | `fab_scan.py` | 스텁 — `scanner.py` 로 통합됨 |
 
-## S3 업/다운로드 — 탐색기 ⚙
+## 탐색기 — 화면 구성
 
-전송은 **항목(item)** 단위다. "로컬 어디" ↔ "S3 어느 key" 를 짝지어 두고 방향·명령·주기를 각각 준다.
-탐색기 우상단 **⚙** 에서 관리한다 (flow 의 s3_ingest 와 같은 사용 모델).
+flow 파일탐색기와 같은 규격이다. 왼쪽 사이드바가 **범위 칩 → 루트 → 현재 폴더(breadcrumb)** 순서고,
+오른쪽이 SQL 바 · 가이드 · 결과다. 파일 한 줄은 이름 아래에 **S3 신호등 · 확장자 · 크기**가 붙는다.
+
+| 범위 칩 | 들어있는 루트 |
+|---|---|
+| 💾 **데이터** | `db`(파이프라인 산출물) · `staging` |
+| 📁 **설정·연동** | `config`(설정파일) · `outbox`(알람) · `s3_local` |
+
+parquet/csv 는 SQL(polars) 로, yaml/json/txt 는 텍스트로 연다. `통합 보기` 는 WIDE FORM 의 FAB·INLINE·VM 을 한 번에 본다.
+
+## S3 설정·업다운로드 — 탐색기 ⚙
+
+**S3 는 전부 탐색기 ⚙ 한 곳에 있다** (v0.3.12 — 설정 탭에 있던 ☁ S3 섹션도 여기로 옮겼다.
+올릴 파일을 보면서 어디로 가는지 같이 봐야 하는 설정이다).
+
+| 탭 | 무엇 |
+|---|---|
+| **연결** | 접속 정보 — `settings.json` 의 `s3.*`(기본 연결) + 추가 S3 연결(다른 버킷/계정) |
+| **전송 규칙** | root 별 기본 명령(cp/sync)과 올릴 위치. 목록의 `⇧ S3` 버튼이 이 규칙을 따른다 |
+| **항목 / + 추가** | 주기·수동 업다운로드 항목 (아래) |
+| **설정파일** | `config/` 파일을 개별 전송. 이름을 누르면 탐색기에서 그 파일이 열린다 |
+| **이력** | 최근 실행 100건 |
+
+전송은 **항목(item)** 단위다. "로컬 어디" ↔ "S3 어느 key" 를 짝지어 두고 방향·명령·주기를 각각 준다
+(flow 의 s3_ingest 와 같은 사용 모델).
 
 ```yaml
 # config/s3_jobs.yaml — ⚙ 에서 편집하면 여기에 쓰인다
@@ -398,6 +421,87 @@ flow 서버에는 FAB raw DB 가 없다 — 근거는 Valve 가 알람에 실어
   에 먼저 추가**해야 한다 (알람 탭 ⚙ *조회 컬럼*) — 사내 테이블에 없는 열을 조회에 넣으면
   FAB raw 쿼리가 통째로 실패하므로 기본 조회 컬럼에는 넣지 않았다.
 - 이웃은 **이미 매칭된 step** 만이다. 매칭 테이블에 아직 없는 step 은 추천 근거가 못 된다.
+
+### 단계 정체 알람 — "제품별 raw/event/feature 가 며칠째 멈췄다"
+
+미매칭 step 알람은 **raw 가 들어와야** 생긴다. 그래서 파이프라인이 통째로 멈추면
+flow 화면은 조용해지는데, 그 조용함이 "문제 없음" 인지 "공급이 끊김" 인지 구분이 안 된다.
+같은 알람 채널에 단계 정체(`stage_stall`)를 같이 실어 그 둘을 가른다 (payload `schema: 3`).
+
+```jsonc
+{ "schema": 3,
+  "alerts": [
+    { "id": "stall|VH_PRODA|raw|FAB", "type": "stage_stall", "stage": "raw", "source": "FAB",
+      "latest_date": "2026-07-30", "lag_days": 3, "behind_of": null, "behind_days": null,
+      "age_hours": 75.2, "threshold_days": 1, "cascade": false,
+      "reason": "최신 데이터가 3일 전(2026-07-30)" } ],
+  "health": {                                  // 정체가 없어도 항상 실린다
+    "threshold_days": 1, "stalled_count": 6, "root_cause_count": 2,
+    "stages": [ { "stage": "event", "source": "FAB", "label": "event DB화",
+                  "latest_date": "2026-07-30", "lag_days": 3,
+                  "behind_of": "raw", "behind_days": 0,
+                  "stalled": true, "cascade": true } ] } }
+```
+
+감시 단계는 파이프라인 전 구간이다:
+
+```
+raw ─→ event ─→ feature ─→ wide(내부 ML_TABLE) ─┬─→ flow(db 루트 ML_TABLE_{product})
+                                                └─→ send(5.SEND_FORM prefix 분리)
+
+                                  s3 (주기 전송 항목 — 만든 걸 실제로 보내고 있는가)
+```
+
+- **`flow`** — flow 는 db 루트 직하의 `ML_TABLE_{product}.parquet` **만** 제품으로
+  인식한다. 내부 wide 가 새로 만들어져도 이게 안 바뀌면 flow 는 옛 데이터를 본다.
+- **`send`** — wide 를 prefix 그룹(KNOB / FAB+MASK / VM / INLINE)으로 쪼갠 최종 산출물.
+  **전 제품을 합쳐 만들므로 제품 하나에 매이지 않는다** (`scope: "global"`) — 알람 id 가
+  `stall|-|send|{group}` 로 vehicle 을 안 쓰고, 제품별 JSON 마다 같은 id 로 들어간다
+  (파일 하나만 봐도 상태를 알 수 있게). **소비 측이 id 로 중복을 제거한다.**
+- **`s3`** — 주기가 걸린 S3 전송 항목(ML_TABLE 업로드·매칭알람 outbox·매칭 csv 다운로드)이
+  실제로 계속 나가고 있는가. **산출과 전송은 다른 고장이다** — 앞 단계가 전부 초록이어도
+  전송이 멈추면 flow 는 옛 데이터를 계속 본다. 마지막 **성공** 시각과 "보낼 로컬 파일이
+  그보다 새로운가" 를 본다. 수동 전용(주기 0)·꺼둔 항목은 감시하지 않는다 (영구 빨간불 방지).
+
+판정 기준은 단계마다 다르다 — **raw·event 는 데이터 날짜**(`date=` 파티션),
+**그 뒤는 마지막 산출 시각**(파일에 날짜 컬럼이 없다). 오늘 파티션은 하루가
+지나야 차므로 기본 임계 1일은 *"어제까지는 정상, 그저께가 최신이면 알람"* 이다.
+
+- **`cascade`** — raw 가 3일 밀리면 event·feature·wide·flow·send 가 전부 3일 오래된다.
+  원인 하나에 알람이 여섯 뜨지 않도록 **여파 단계는 알람 행을 만들지 않고** `health` 에만
+  남긴다. 판정은 "오래됐나" 가 아니라 **"앞 단계보다 뒤처졌나"**(`behind_days`) 다 —
+  raw 는 멀쩡한데 event 만 뒤처졌거나, wide 는 새로 만들었는데 prefix 분리가 안 돌았으면
+  그건 그 단계 자신의 문제라 알람이 나간다. (뒤처짐은 내림 — 반나절 차이로 뜨지 않는다.)
+- `health` 는 정체가 없어도 항상 실린다 — flow 가 *"지금 어디까지의 데이터를 받았나"* 를
+  알람 유무와 무관하게 보여줄 수 있어야 한다.
+- 구버전 Valve(`schema` 2 이하)는 `health` 를 안 보낸다. flow 는 그 경우 카드를 감춘다
+  (없는 걸 "정상" 으로 만들지 않는다).
+
+| 항목 | 값 | 어디서 |
+|---|---|---|
+| 사용 여부 · 임계 일수 · 감시 단계 | `stall_alert` | 알람 탭 ⚙ *단계 정체 알람* |
+| 계산 | `backend/core/stage_health.py` | `GET /api/pipeline/health` |
+| flow 표시 | 매칭알람 탭 › **Valve 파이프라인 상태** | `backend/core/valve_alerts.py` |
+
+## 진단 탭 — 사내 반입 시 "어디서 막혔는지"
+
+`raw 가 된다` → `event 가 정확하다` → `feature·매칭 테이블이 S3 에서 온다` 를 순서대로
+검사한다. **검사마다 그 자리에서 열어볼 parquet 을 같이 준다** — 「📊 뷰어」 를 누르면
+탐색기가 그 파일을 SQL 까지 걸어 연다. 숫자만 보여주고 끝내지 않는 것이 이 화면의 규칙이다.
+
+| 단계 | 무엇을 보는가 |
+|---|---|
+| 1. raw 수집 | 실 어댑터 연결(= mock 이 아닌가) · 파티션/행 존재 · 조회 컬럼 수신 여부 · **파티션 기준 열 날짜가 파티션과 일치**하는가 · KEY null |
+| 2. event 정확도 | 매칭 파일의 이 제품 step 수 · **root_lot prefix 통과율** · **step_id 매칭률(미매칭 step 예시 포함)** · event 행 수 · step_desc 채움 · 매칭 파일 변경 후 재생성 여부 |
+| 3. feature · 매칭 테이블 | **매칭 csv 의 S3 다운로드 항목별 마지막 결과** · 룰 파일 행 수 · 카테고리별 feature 수 · 룰은 있는데 산출이 0인 카테고리 · 내부 ML_TABLE · **flow 발행본 `ML_TABLE_{product}.parquet`**(내부보다 오래되면 경고) |
+| 4. SEND_FORM · prefix 분리 | 그룹별(`0.KNOB`/`1.FAB`/`2.VM`/`3.INLINE`) parquet·csv 존재 · 행 수 · **wide 에 있는데 분리본에서 빠진 컬럼 이름** · wide 보다 오래됐는지. 전 제품 합산이라 vehicle 과 무관하다 |
+| 5. S3 전송 (Valve → flow) | 자동 업로드 마스터 스위치 · 항목별 마지막 결과/주기 · **로컬이 마지막 전송보다 새로운지**. 수동 전용 항목은 `해당없음` |
+
+그룹이 비는 게 정상인 경우도 있다 — 그 prefix 의 feature 가 아예 없으면 `해당없음` 으로
+넘어가고, **wide 에 그 prefix 컬럼이 있는데 산출물이 없을 때만** 실패로 본다.
+
+앞 단계가 실패해도 뒤 단계까지 전부 돈다 — *어디까지 되는지* 를 한 번에 봐야 하기 때문이다.
+`GET /api/pipeline/diagnose/{vehicle}` · `backend/core/diagnose.py`.
 - 발행 payload 에는 `schema` 버전이 붙는다. Valve 를 올리면 알람 구성이 그대로여도
   한 번은 다시 발행된다 — 새 필드가 flow 에 전달되도록.
 

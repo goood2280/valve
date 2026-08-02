@@ -21,6 +21,7 @@ if sys.version_info < (3, 10):
     )
 
 import json
+import mimetypes
 from pathlib import Path
 
 import yaml
@@ -55,7 +56,7 @@ import os
 ROOT = Path(os.environ.get("VALVE_ROOT") or Path(__file__).parent).resolve()
 CONFIG_DIR = ROOT / "config"
 LOGS_DIR = ROOT / "logs"
-STAGING_DIR = ROOT / "staging"
+STAGING_DIR = ROOT / "staging"  # config 로드 후 db_root/0.STAGING 으로 재지정
 S3_LOCAL_DIR = ROOT / "s3_local"
 FRONTEND_DIR = ROOT / "frontend"
 PROBE_CACHE = CONFIG_DIR / "probe_cache.json"
@@ -72,6 +73,18 @@ def _boot_alert(evt: dict):
 # 1차: 로컬 settings/products 를 일단 읽음 (S3 부트스트랩에 필요)
 SETTINGS = json.loads((CONFIG_DIR / "settings.json").read_text(encoding="utf-8"))
 PRODUCTS = yaml.safe_load((CONFIG_DIR / "products.yaml").read_text(encoding="utf-8")) or {"products": []}
+
+
+def _normalize_real_lake_settings(settings: dict) -> None:
+    """구 설치/S3 설정의 mock mode·module을 실 API 기본값으로 마이그레이션."""
+    lake = settings.setdefault("lake_api", {})
+    lake.pop("mode", None)
+    module = str(lake.get("module") or "").strip()
+    if not module or "mock" in module.lower():
+        lake["module"] = "backend.core.real_lake_adapter:query"
+
+
+_normalize_real_lake_settings(SETTINGS)
 
 
 def _migrate_params_template(products: dict) -> bool:
@@ -130,6 +143,7 @@ _sync_result = {
 # 동기화로 파일이 바뀌었으면 메모리 재로드
 if _sync_result["settings"]["changed"]:
     SETTINGS = json.loads((CONFIG_DIR / "settings.json").read_text(encoding="utf-8"))
+    _normalize_real_lake_settings(SETTINGS)
     # fake_local_path 절대화 재적용
     _fl2 = (SETTINGS.get("s3") or {}).get("fake_local_path") or ""
     if _fl2 and not Path(_fl2).is_absolute():
@@ -142,13 +156,44 @@ if _sync_result["products"]["changed"]:
         (CONFIG_DIR / "products.yaml").write_text(
             yaml.safe_dump(PRODUCTS, allow_unicode=True, sort_keys=False), encoding="utf-8")
 
+# 파이프라인/직접 쿼리 산출물은 모두 같은 외부 DB 루트 아래에 둔다.
+pipeline_router.deps(ROOT, SETTINGS, s3, api)
+_DB_ROOT = pipeline_router._pipe.db_root()
+STAGING_DIR = _DB_ROOT / "0.STAGING"
+
 state = StateStore(LOGS_DIR / "jobs.jsonl")
-planner = Planner(api, SETTINGS, PROBE_CACHE)
-executor = ChunkExecutor(api, planner, s3, state, SETTINGS, STAGING_DIR)
+_PRODUCT_VEHICLES: dict[str, list[str]] = {}
+_PRODUCT_FILTERS: dict[str, dict] = {}
+try:
+    _VEHICLES = pipeline_router._pipe.vehicles()
+except (FileNotFoundError, ValueError):
+    _VEHICLES = {}
+for _vehicle, _vcfg in _VEHICLES.items():
+    _product = str(_vcfg.get("product") or _vehicle)
+    _PRODUCT_VEHICLES.setdefault(_product, []).append(_vehicle)
+    _filters = _PRODUCT_FILTERS.setdefault(_product, {"process_id": [], "line_id": []})
+    for _key in ("process_id", "line_id"):
+        _values = _vcfg.get(_key)
+        _values = _values if isinstance(_values, list) else [_values]
+        for _value in _values:
+            if _value is not None and _value != "" and _value not in _filters[_key]:
+                _filters[_key].append(_value)
+for _filters in _PRODUCT_FILTERS.values():
+    if len(_filters["process_id"]) == 1:
+        _filters["process_id"] = _filters["process_id"][0]
+planner = Planner(api, SETTINGS, PROBE_CACHE, product_filters=_PRODUCT_FILTERS)
+executor = ChunkExecutor(api, planner, s3, state, SETTINGS, STAGING_DIR,
+                         db_root=_DB_ROOT, product_vehicles=_PRODUCT_VEHICLES)
+executor.product_filters = _PRODUCT_FILTERS
 
 # S3 업로드 큐 (immediate 모드면 enqueue 안 됨 — 단순 초기화만)
 from backend.core import s3_queue as _s3queue
 _s3queue.configure(s3, SETTINGS, state, LOGS_DIR / "s3_queue.jsonl", alert_cb=_boot_alert)
+
+# 사내 LLM — 있으면 진단 요약을 문장으로 받고, 없으면 규칙 요약으로 그대로 동작한다.
+# SETTINGS dict 참조를 넘긴다: 설정 탭에서 저장하면 재기동 없이 반영된다.
+from backend.core import llm as _llm
+_llm.configure(SETTINGS)
 
 
 # ─── FastAPI ───
@@ -169,7 +214,6 @@ probe_preview_router.deps(planner, PRODUCTS)
 ops_router.deps(state, SETTINGS, s3)
 SETTINGS["_root"] = str(ROOT)  # agent 가 products.yaml 경로 역추적할 때 사용
 agent_router.deps(state, SETTINGS, PRODUCTS, planner, executor, LOGS_DIR / "agent_audit.jsonl")
-pipeline_router.deps(ROOT, SETTINGS, s3)
 scanner_router.deps(ROOT, SETTINGS, s3, pipeline_router._pipe, api)
 
 # browser: csv/설정파일(config) · 파이프라인 산출물(db) 탐색 + S3 연동 신호등.
@@ -182,10 +226,6 @@ _OUTBOX_SYNC_DIR = pipeline_router.alerts.outbox_sync_dir()
 _OUTBOX_PREFIX = pipeline_router.alerts.prefix
 if _OUTBOX_SYNC_DIR:
     _OUTBOX_SYNC_DIR.mkdir(parents=True, exist_ok=True)
-
-# 파이프라인 DB 루트 — pipeline.yaml db_root (절대경로면 다른 드라이브도 가능,
-# 사내: 앱은 C: 바탕화면, DB 는 D:/Valve_DB)
-_DB_ROOT = pipeline_router._pipe.db_root()
 
 browser_router.deps(
     STAGING_DIR, S3_LOCAL_DIR,
@@ -228,8 +268,15 @@ if _migrated:
 # db 폴더와 같은 전송 엔진(탐색기 ⚙)이 주기 sync 한다.
 if s3jobs.ensure_outbox_item(_OUTBOX_PREFIX):
     print("[valve] s3_jobs: 매칭알람 outbox 업로드 항목 시드 (up_valve_alerts)")
+_ml_products = [str(v.get("product") or name) for name, v in _VEHICLES.items()]
+_ml_seeded = s3jobs.ensure_ml_table_items(_ml_products)
+if _ml_seeded:
+    print(f"[valve] s3_jobs: Flow ML_TABLE 업로드 항목 {_ml_seeded}개 시드")
 s3_jobs_router.deps(s3jobs)
 app.include_router(s3_jobs_router.router)
+# 단계 정체 감시가 S3 전송까지 본다 — 로컬 단계가 다 초록이어도 업로드가 멈추면
+# flow 는 옛 데이터를 계속 본다. AlertStore 는 s3jobs 보다 먼저 만들어지므로 여기서 꽂는다.
+pipeline_router.attach_s3_jobs(s3jobs)
 
 # aipd 브리지 (선택) — aipd 패키지가 함께 배포된 경우 순환 데모/검토큐 연동 활성화
 try:
@@ -251,7 +298,7 @@ async def _on_startup():
         except Exception:
             pass
     await ops_router.flush_pending_alerts()
-    if (SETTINGS.get("s3") or {}).get("upload_mode") == "interval":
+    if s3.is_configured() and (SETTINGS.get("s3") or {}).get("upload_mode") == "interval":
         _s3queue.start_background()
     # S3 항목 주기 실행 (업/다운로드) — 탐색기 ⚙ 에서 항목별 주기 설정
     s3jobs.start_background()
@@ -281,8 +328,11 @@ def health():
     return {
         "ok": True,
         "version": "0.1.0",
-        "lake_mode": SETTINGS["lake_api"].get("mode"),
-        "s3_fake": bool(SETTINGS["s3"].get("fake_local_path") and not SETTINGS["s3"].get("endpoint_url")),
+        "lake_mode": "real",
+        "db_root": str(_DB_ROOT),
+        "s3_fake": bool(s3.is_configured() and SETTINGS["s3"].get("fake_local_path")
+                        and not SETTINGS["s3"].get("endpoint_url")),
+        "s3_configured": s3.is_configured(),
         "staging": str(STAGING_DIR),
     }
 
@@ -299,6 +349,12 @@ def version():
 
 
 # ─── frontend static (v0.2 에서 index.html 추가 예정) ───
+# Windows 는 레지스트리에서 MIME 을 읽는데 .woff2 가 등록돼 있지 않은 PC 가 많다 —
+# 그러면 번들된 웹폰트가 text/plain 으로 나가고, CSP 나 프록시가 끼면 폰트가 통째로
+# 안 뜬다 (사내망은 CDN 폴백도 없다). 등록되지 않은 채로 두지 않는다.
+mimetypes.add_type("font/woff2", ".woff2")
+mimetypes.add_type("font/woff", ".woff")
+
 if FRONTEND_DIR.exists() and any(FRONTEND_DIR.iterdir()):
     # no-cache = 매 요청 재검증(304) — 업데이트 후 브라우저가 구버전 app.js 를
     # 계속 쓰는 문제 방지 (내용이 같으면 304 라 비용은 거의 없다)

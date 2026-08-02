@@ -234,8 +234,11 @@ Code("# mycorp/valve_adapter.py  →  module: mycorp.valve_adapter:query\n"
 # ══════════════════════════════════════════════════════════════════
 # 5. Settings — S3 업로드
 # ══════════════════════════════════════════════════════════════════
-H1("5. Settings › ☁ S3 업로드")
-P("staging 에 쌓인 parquet 을 S3 로 언제 어떻게 올릴지 정합니다. "
+H1("5. 탐색기 ⚙ › ☁ S3 연결")
+P("v0.3.12 부터 <b>S3 설정은 탐색기 탭 오른쪽 위 ⚙ 안</b>에 있습니다 "
+  "(연결 · 전송 규칙 · 항목 · 설정파일 · 이력). 설정 탭의 ☁ S3 자리에는 이동 안내만 남습니다 — "
+  "올릴 파일을 보면서 어디로 가는지 같이 봐야 하는 설정이라 파일 화면 안으로 옮겼습니다.")
+P("아래는 <b>연결</b> 탭 (settings.json 의 s3.*) — staging 에 쌓인 parquet 을 S3 로 언제 어떻게 올릴지. "
   "<b>upload_mode</b> 3종을 이해하는 게 핵심.")
 Row([
     ["필드", "의미"],
@@ -347,15 +350,20 @@ P("내장 3종: <b>FAB · INLINE · VM</b>. "
 Row([
     ["필드", "의미"],
     ["name", "대문자 유일 키. 파티션 폴더/S3 prefix 에 그대로 쓰임."],
-    ["table_template", "기본 테이블명. {name} 토큰은 name 으로 치환."],
+    ["table_template", "기본 테이블명. {name} 토큰은 name 으로 치환. 저장 시 이 소스를 쓰는 제품 table 에 전파."],
     ["columns", "이 소스에서 추출 가능한 컬럼 풀 (제품 편집기 드롭다운)."],
-    ["default_shard", "신규 소스 추가 시 제안되는 기본 shard_hierarchy."],
+    ["default_shard", "신규 소스 추가 시 제안되는 기본 shard_hierarchy. 제품이 기본값 그대로면 저장 시 함께 갱신."],
     ["accent", "hint 박스와 히트맵 테두리 색상 (HEX)."],
     ["hint", "가이드 문구. ` ` 로 감싸면 inline code 렌더."],
 ], widths=[4 * cm, 13.5 * cm], header=True)
 
 P("저장하면 <code>config/source_types.yaml</code> 로 기록되고 "
   "<code>/api/schedule/source-types</code> GET/POST 로도 프로그램 접근 가능.", "Hint")
+P("저장은 <b>제품 설정까지 함께 고칩니다</b> — 이 소스를 쓰는 모든 제품의 <code>table</code>(새 template), "
+  "이름을 바꿨다면 제품의 소스명, 그리고 제품이 기본값 그대로 두었던 <code>shard_hierarchy</code>. "
+  "제품에서 직접 다르게 적은 <code>table</code> 은 그대로 두고 저장 후 목록으로 보여준 뒤 "
+  "확인해야 덮어씁니다. 레지스트리에서 소스를 지워도 그 소스를 쓰던 제품 설정은 지우지 않고 경고만 합니다 "
+  "(이미 쌓인 파티션 때문). 이름을 바꿔도 <b>이미 쌓인 옛 이름 파티션 폴더는 옮기지 않습니다</b>.", "Hint")
 
 story.append(PageBreak())
 

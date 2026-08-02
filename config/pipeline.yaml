@@ -84,6 +84,26 @@
 #                   — area 를 쓰려면 sources.FAB.columns 에 먼저 추가할 것(⚙ 조회 컬럼)
 #     value_limit   열 하나에 실을 unique 값 상한
 #
+# stall_alert — 단계 정체 알람 (알람 탭 ⚙) -----------------------------
+#   제품별 raw→event→feature→wide→flow→send 와 S3 전송이 임계 일수를 넘게 안 늘면 매칭알람 채널로
+#   같이 내보낸다. flow 는 이걸로 "Valve 가 언제까지의 데이터를 넘겨줬는지"를
+#   자기 화면에서 본다 (payload 의 health 블록은 정체가 없어도 항상 실린다).
+#     enabled         끄면 정체 알람도 health 블록도 만들지 않는다
+#     threshold_days  이 일수를 "넘게" 안 늘면 정체. 오늘 파티션은 하루가 지나야
+#                     차므로 기본 1 은 "어제까지는 정상, 그저께가 최신이면 알람".
+#     stages          감시할 단계 — raw / event / feature / wide(내부 ML_TABLE) /
+#                     flow(db 루트의 ML_TABLE_{product} = flow 가 읽는 유일한 파일) /
+#                     send(5.SEND_FORM 의 prefix 분리본, 전 제품 합산) /
+#                     s3(주기 전송 항목 — 만든 걸 실제로 계속 보내고 있는가.
+#                        수동 전용·비활성 항목은 감시하지 않는다)
+#   판정 축은 단계마다 다르다 — raw·event 는 데이터 날짜(date= 파티션), 그 뒤는
+#   산출 시각(파일에 날짜 컬럼이 없다). 그리고 단계마다 "앞 단계보다 며칠 뒤에
+#   만들어졌나" 를 이어서 본다 (raw→event→feature→wide→{flow, send}). s3 는 산출이
+#   아니라 전송이라 따로 본다 — 마지막 성공 시각과 "보낼 로컬 파일이 그보다 새로운가".
+#   앞 단계가 밀려서 같이 오래된 단계는 알람을 내지 않고 현황에만 남긴다 —
+#   원인 하나에 알람이 여섯 뜨면 무엇을 고쳐야 하는지가 안 보인다.
+#   계산은 backend/core/stage_health.py.
+#
 # knob_skip — knob step 미통과(값이 빈) wafer 처리 -----------------------
 #   명시: ppid_knob.csv 의 AND 블록(같은 feature+rule_order 복수 행, category=SKIP,
 #         예: "다음 main step not_null") 이 있으면 그 조건대로.
@@ -93,7 +113,7 @@
 #     min_support     뒤쪽 step 판별에 필요한 공동 통과 wafer 최소 수
 #     after_fraction  그 중 시간이 뒤인 비율 임계
 # ══════════════════════════════════════════════════════════════════════
-db_root: db
+db_root: D:/Valve_DB
 runtime:
   raw_days: 5
   split_days: 1
@@ -205,6 +225,17 @@ unmatched_scan:
     days: 7
     neighbors: 3
     value_limit: 12
+stall_alert:
+  enabled: true
+  threshold_days: 1
+  stages:
+  - raw
+  - event
+  - feature
+  - wide
+  - flow
+  - send
+  - s3
 knob_skip:
   enabled: true
   auto: true
