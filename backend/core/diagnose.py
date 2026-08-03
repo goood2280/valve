@@ -612,7 +612,7 @@ def _diag_s3_upload(pipe, s3_jobs) -> dict:
             continue
         if not it.get("s3_configured"):
             checks.append(_check(name, FAIL, f"S3 연결이 설정되지 않았습니다 · {where}",
-                                 fix="설정 탭 → S3 (bucket·자격증명) 을 채우세요."))
+                                 fix="탐색기 ⚙ → 연결 (bucket·자격증명) 을 채우세요."))
             continue
         if not last:
             checks.append(_check(name, WARN, f"아직 한 번도 실행되지 않았습니다 · {where}",

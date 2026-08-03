@@ -91,6 +91,19 @@ def test_normalize_keeps_real_rows_and_adds_split(pipe_factory):
     assert df.height == 1 and df["split"][0] == "S1"
 
 
+def test_empty_root_lot_probe_does_not_run_unfiltered_query(pipe_factory):
+    from datetime import date
+
+    lake = EmptyLake()
+    pipe = pipe_factory(lake)
+    df = pipe._query_raw(
+        pipe.vehicle_cfg(VEHICLE), "INLINE", date(2026, 8, 1), date(2026, 8, 2)
+    )
+
+    assert df.height == 0
+    assert lake.calls == 1
+
+
 # ── event / feature / wide ─────────────────────────────────
 def test_whole_run_is_not_a_failure_when_there_is_no_data(pipe_factory):
     """전 구간이 비어도 실행 한 회차가 성공으로 끝나야 한다 —
@@ -135,7 +148,7 @@ def test_planner_makes_single_chunk_when_probe_finds_nothing(tmp_path, sample_se
     plan = asyncio.run(planner.build_plan(prod["product"], src, prod, "2026-08-01"))
     assert len(plan.chunks) == 1
     assert plan.chunks[0].expected_rows == 0
-    assert plan.chunks[0].shard_filters == {}      # in () 로 나가면 사내 API 가 에러다
+    assert plan.chunks[0].shard_filters == {"root_lot_id": []}
 
 
 def test_empty_chunks_are_success_not_completeness_failure(tmp_path, sample_settings,

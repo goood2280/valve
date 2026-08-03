@@ -156,15 +156,51 @@ def test_real_raw_query_uses_getdata_shape_and_preserves_all_columns(pipe):
     params, custom_col = lake.calls[0]
     assert params == {
         "table_name": "RAW_FAB_DATA",
-        "datefrom": "2026-07-30",
-        "dateto": "2026-07-31",
+        "dateFrom": "2026-07-30",
+        "dateTo": "2026-07-31",
         "process_id": "P100",
         "line_id": ["L1"],
     }
-    assert custom_col == []
+    assert custom_col == pipe.sources_cfg()["FAB"]["columns"]
     raw = pl.read_parquet(pipe.raw_dir("VH_PRODA", "FAB") /
                           "date=2026-07-30" / "data.parquet")
     assert raw["extra_raw_column"].to_list() == ["keep-me"]
+
+
+def test_root_lot_source_queries_ids_first_then_fetches_in_batches(pipe):
+    from datetime import date
+    import polars as pl
+
+    class ShardedLake:
+        def __init__(self):
+            self.calls = []
+
+        async def query(self, params, custom_col):
+            self.calls.append((dict(params), list(custom_col)))
+            if custom_col == ["root_lot_id"]:
+                return pl.DataFrame({"root_lot_id": ["R002", "R001", None]})
+            return pl.DataFrame({
+                "root_lot_id": ["R001", "R002"],
+                "wafer_id": [1, 2],
+                "time": ["2026-07-30 01:00:00", "2026-07-30 02:00:00"],
+                "item_id": ["I1", "I2"],
+                "value": [1.0, 2.0],
+            })
+
+    lake = ShardedLake()
+    pipe.lake_api = lake
+    cfg = pipe.vehicle_cfg("VH_PRODA")
+    frame = pipe._query_raw(cfg, "INLINE", date(2026, 7, 30), date(2026, 7, 31))
+
+    assert frame.height == 2
+    assert len(lake.calls) == 2
+    probe_params, probe_cols = lake.calls[0]
+    fetch_params, fetch_cols = lake.calls[1]
+    assert probe_cols == ["root_lot_id"]
+    assert "root_lot_id" not in probe_params
+    assert set(fetch_params["root_lot_id"]) == {"R001", "R002"}
+    assert fetch_cols == pipe.sources_cfg()["INLINE"]["columns"]
+    assert "product_code" not in fetch_params
 
 
 def test_event_loader_unions_schema_drift_by_column_name(pipe):

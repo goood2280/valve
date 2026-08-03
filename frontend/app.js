@@ -840,7 +840,6 @@ function renderHint(st) {
   return el('div', { class: 'source-hint', style: { borderColor: accent, background: accent + '14' } },
     '💡 ', ...renderInlineHintText(st.hint));
 }
-const PARAM_OPS = ['eq', 'ne', 'in', 'lt', 'le', 'gt', 'ge', 'like', 'notLike'];
 const _columnCache = {};
 
 async function getSourceColumns(product, source) {
@@ -893,7 +892,7 @@ async function renderProducts() {
         shard_hierarchy: [...(getSourceType(SOURCE_NAMES[0] || 'FAB')?.default_shard || [])],
         target_chunk_rows: 500000,
       }],
-      params_template: { product_code: { op: 'eq', value: newName } },
+      params_template: {},
       custom_col: ['lot_id', 'wafer_id', 'time', 'value'],
     });
     STATE.productsSelected = newName;
@@ -1031,7 +1030,7 @@ function productDetailView(p, draft, rerender) {
       el('button', { class: 'btn ghost small', onclick: deleteProduct }, '🗑 제품 삭제'),
     ),
 
-    // 제품 공통 기본 (process_id/line_id/product_code)
+    // 사내 API 공통 필터 (process_id / line_id)
     productKeyFieldsEditor(p, rerender),
 
     // 소스 탭 + 선택된 소스만 상세 표시
@@ -1080,19 +1079,21 @@ function productDetailView(p, draft, rerender) {
 // productCard 는 더 이상 사용하지 않음 (productDetailView 로 대체). 호환성 보관.
 
 // ─────────────────────────────────────────────────
-// 신 포맷: params_template[column_name] = {op, value}. column 을 키로 직접 사용.
-// process_id / line_id / product_code 는 1급 필드로 승격.
+// 사내 API 포맷: params_template[column_name] = value.
+// 여러 값은 배열이며 op 래퍼와 product_code는 사용하지 않는다.
 // ─────────────────────────────────────────────────
 function productKeyFieldsEditor(p, rerender) {
   p.params_template = p.params_template || {};
 
   const getValue = (col) => {
     const entry = p.params_template[col];
-    if (!entry) return '';
-    return Array.isArray(entry.value) ? entry.value.join(', ') : String(entry.value ?? '');
+    if (entry == null) return '';
+    const value = entry && typeof entry === 'object' && !Array.isArray(entry)
+      ? entry.value : entry;
+    return Array.isArray(value) ? value.join(', ') : String(value ?? '');
   };
 
-  const setValue = (col, rawValue, op = 'eq') => {
+  const setValue = (col, rawValue) => {
     const trimmed = (rawValue || '').trim();
     if (!trimmed) {
       delete p.params_template[col];
@@ -1101,13 +1102,8 @@ function productKeyFieldsEditor(p, rerender) {
     const value = trimmed.includes(',')
       ? trimmed.split(',').map(x => x.trim()).filter(Boolean)
       : trimmed;
-    const usedOp = Array.isArray(value) ? 'in' : op;
-    p.params_template[col] = { op: usedOp, value };
+    p.params_template[col] = value;
   };
-
-  // 1급 필드 외의 추가 필터 (컬럼명 기준)
-  const keyFieldCols = new Set(['process_id', 'line_id', 'product_code']);
-  const extraCols = Object.keys(p.params_template).filter(col => !keyFieldCols.has(col));
 
   return el('div', { class: 'product-keyfields' },
     el('div', { class: 'subsection-title' },
@@ -1138,26 +1134,6 @@ function productKeyFieldsEditor(p, rerender) {
           onchange: e => { setValue('line_id', e.target.value); rerender(); },
         }),
       ),
-      // product_code
-      el('div', { class: 'keyfield' },
-        el('label', { class: 'keyfield-label' }, 'product_code',
-          el('span', { class: 'hint' }, '보통 제품명과 동일')),
-        el('input', {
-          type: 'text', class: 'keyfield-input',
-          value: getValue('product_code'),
-          placeholder: p.product || '(없음)',
-          onchange: e => { setValue('product_code', e.target.value); rerender(); },
-        }),
-      ),
-    ),
-
-    // 추가 필터
-    el('details', { class: 'subsection-collapsible extra-filters', ...(extraCols.length ? { open: '' } : {}) },
-      el('summary', {},
-        el('span', { class: 'subsection-title-inline' }, '⧗ 추가 필터'),
-        el('span', { class: 'hint' }, `${extraCols.length}건 · 다른 컬럼에 대한 WHERE 조건`),
-      ),
-      paramsEditor(p, rerender, { skipColumns: ['process_id', 'line_id', 'product_code'] }),
     ),
   );
 }
@@ -1214,14 +1190,16 @@ function queryPreview(p, s) {
              : Array.isArray(p.custom_col) ? p.custom_col : [];
   const table = s.table || sourceTypeTable(s.name);
 
-  // params_template — key 가 컬럼명, value 가 {op, value}. 빈 값은 제외.
+  // 사내 API는 op 래퍼 없이 필터 값을 직접 받는다. product_code는 전달하지 않는다.
   const paramEntries = [];
-  for (const [col, e] of Object.entries(p.params_template || {})) {
-    if (!e || typeof e !== 'object') continue;
-    const isEmpty = e.value === '' || e.value == null
-                 || (Array.isArray(e.value) && e.value.length === 0);
+  for (const col of ['process_id', 'line_id']) {
+    const entry = (p.params_template || {})[col];
+    const value = entry && typeof entry === 'object' && !Array.isArray(entry)
+      ? entry.value : entry;
+    const isEmpty = value === '' || value == null
+                 || (Array.isArray(value) && value.length === 0);
     if (isEmpty) continue;
-    paramEntries.push([col, e]);
+    paramEntries.push([col, value]);
   }
 
   const pyVal = (v) => {
@@ -1230,27 +1208,20 @@ function queryPreview(p, s) {
     if (typeof v === 'boolean') return v ? 'True' : 'False';
     return `"${String(v ?? '').replace(/"/g, '\\"')}"`;
   };
-  const pyDict = (entry) => {
-    const parts = [];
-    parts.push(`"op": "${entry.op || 'eq'}"`);
-    parts.push(`"value": ${pyVal(entry.value)}`);
-    return `{${parts.join(', ')}}`;
-  };
-
   const paramLines = [
     `    "table_name": "${table}",`,
     `    "dateFrom": "{dateFrom}",          # YYYY-MM-DDT00:00:00`,
     `    "dateTo":   "{dateTo}",            # 다음 날 00:00:00`,
   ];
-  for (const [col, e] of paramEntries) {
-    paramLines.push(`    "${col}": ${pyDict(e)},`);
+  for (const [col, value] of paramEntries) {
+    paramLines.push(`    "${col}": ${pyVal(value)},`);
   }
 
   const shardKeys = s.shard_hierarchy || [];
   if (shardKeys.length) {
     paramLines.push(
       `    # planner 가 chunk 마다 shard 를 해당 컬럼명에 직접 주입:`,
-      `    # "${shardKeys[0]}": {"op": "in", "value": ["R001", "R002", ...]}`,
+      `    # "${shardKeys[0]}": ["R001", "R002", ...]`,
     );
   }
 
@@ -1258,17 +1229,22 @@ function queryPreview(p, s) {
     ? '[' + cols.map(c => `"${c}"`).join(', ') + ']'
     : '[]';
 
+  const queryLines = shardKeys[0] === 'root_lot_id'
+    ? [
+        'root_lots = getData(params, custom_columns=["root_lot_id"], user_name="{settings.lake_api.user}")',
+        'root_lot_ids = root_lots["root_lot_id"].dropna().unique().tolist()',
+        `Query = getData({**params, "root_lot_id": root_lot_ids}, custom_columns=${colsPy}, user_name="{settings.lake_api.user}") if root_lot_ids else root_lots.iloc[0:0]`,
+      ]
+    : [`Query = getData(params, custom_columns=${colsPy}, user_name="{settings.lake_api.user}")`];
+
   const snippet = [
-    '# Valve 는 다음 호출로 DataLake 에서 데이터를 가져와 staging parquet 으로 저장.',
-    '# (settings.lake_api.module 에서 로드한 실 API query 함수)',
+    'from bigdataquery import *',
     '',
-    'df: pandas.DataFrame = query(',
-    '    params={',
+    'params = {',
     ...paramLines,
-    '    },',
-    `    custom_col=${colsPy},`,
-    `    user="{settings.lake_api.user}",   # = 사내 getData 의 user_name (인증은 이것뿐)`,
-    ')',
+    '}',
+    '',
+    ...queryLines,
   ].join('\n');
 
   return el('details', { class: 'query-preview', open: '' },
@@ -1292,7 +1268,7 @@ function productDefaultsEditor(p, rerender) {
       pool.forEach(c => union.add(c));
     }
     // default 필수: lot_id, wafer_id, time
-    ['lot_id', 'wafer_id', 'time', 'value', 'product_code'].forEach(c => union.add(c));
+    ['lot_id', 'wafer_id', 'time', 'value'].forEach(c => union.add(c));
     p.custom_col.forEach((c, i) => {
       chips.append(el('span', { class: 'chip' }, c,
         el('span', { class: 'chip-x', onclick: () => { p.custom_col.splice(i, 1); rerender(); } }, '✕'),
@@ -1384,96 +1360,6 @@ function customColsEditor(p, s, rerender) {
   })();
 
   return el('div', { class: 'custom-cols' }, label, chips);
-}
-
-function paramsEditor(p, rerender, opts = {}) {
-  // 신 포맷: params_template[column_name] = {op, value}. 키=컬럼명 (사내 API 규약).
-  // opts.skipColumns: 이 컬럼명은 제외 (1급 필드에서 편집).
-  const skipCols = new Set((opts.skipColumns || []).map(c => c.toLowerCase()));
-  p.params_template = p.params_template || {};
-  const tbl = el('table', { class: 'tbl params-tbl' },
-    el('thead', {}, el('tr', {},
-      el('th', { style: { width: '30%' } }, 'Column (key)'),
-      el('th', { style: { width: '100px' } }, 'Op'),
-      el('th', {}, 'Value'),
-      el('th', { style: { width: '40px' } }, ''),
-    )),
-    el('tbody', {}),
-  );
-  const tbody = tbl.querySelector('tbody');
-
-  (async () => {
-    const allCols = new Set();
-    for (const s of (p.sources || [])) {
-      const pool = await getSourceColumns(p.product, s.name);
-      pool.forEach(c => allCols.add(c));
-    }
-    const colOptions = [...allCols];
-
-    const cols = Object.keys(p.params_template).filter(c => !skipCols.has(c.toLowerCase()));
-    cols.forEach((col) => {
-      const entry = p.params_template[col] || {};
-      const hasCurrent = colOptions.includes(col);
-
-      // 컬럼명 변경: 기존 키 지우고 새 키로 이동
-      const colSel = el('select', { class: 'inline-input', onchange: e => {
-        const newCol = e.target.value;
-        if (!newCol || newCol === col) return;
-        p.params_template[newCol] = entry;
-        delete p.params_template[col];
-        rerender();
-      }},
-        el('option', { value: col }, col + (hasCurrent ? '' : ' (custom)')),
-        ...colOptions.filter(c => c !== col).map(c => el('option', { value: c }, c)),
-      );
-      const opSel = el('select', { class: 'inline-input', onchange: e => {
-        entry.op = e.target.value;
-        // in/notLike 로 바뀌면 value 형태 자동 조정은 사용자가 값 재입력하게 둠
-        rerender();
-      }},
-        ...PARAM_OPS.map(o => el('option', { value: o, ...(o === entry.op ? { selected: 'selected' } : {}) }, o)),
-      );
-      const valStr = Array.isArray(entry.value) ? entry.value.join(', ') : String(entry.value ?? '');
-      const placeholder = entry.op === 'in' ? '쉼표 구분 (예: L1, L2)'
-                       : (entry.op === 'like' || entry.op === 'notLike') ? "예: %AA% (SQL LIKE 패턴)"
-                       : '';
-      const valInp = el('input', { type: 'text', class: 'inline-input', value: valStr,
-        placeholder,
-        onchange: e => {
-          const raw = e.target.value;
-          entry.value = entry.op === 'in'
-            ? raw.split(',').map(x => x.trim()).filter(Boolean)
-            : raw;
-          p.params_template[col] = entry;
-        }});
-      const delBtn = el('button', { class: 'btn ghost small', onclick: () => {
-        delete p.params_template[col]; rerender();
-      }, title: `${col} 제거` }, '🗑');
-      tbody.append(el('tr', {},
-        el('td', {}, colSel),
-        el('td', {}, opSel),
-        el('td', {}, valInp),
-        el('td', {}, delBtn),
-      ));
-    });
-    if (!cols.length) {
-      tbody.append(el('tr', {}, el('td', { colspan: '4', class: 'hint', style: { textAlign: 'center', padding: '12px' } },
-        '필터 없음 — 아래 버튼으로 추가')));
-    }
-  })();
-
-  const addRow = () => {
-    // 아직 사용하지 않은 컬럼 중 첫 번째, 없으면 'cata' 로 시작
-    const used = new Set(Object.keys(p.params_template));
-    const candidates = ['cata', 'catb', 'catc', 'catd', 'new_col'];
-    const seed = candidates.find(c => !used.has(c)) || `col_${Object.keys(p.params_template).length}`;
-    p.params_template[seed] = { op: 'eq', value: '' };
-    rerender();
-  };
-
-  return el('div', {}, tbl,
-    el('button', { class: 'btn ghost small', onclick: addRow, style: { marginTop: '6px' } }, '+ 필터 추가'),
-  );
 }
 
 // ─────────────────────────────────────
@@ -1844,9 +1730,8 @@ async function renderSettings() {
       ['lake_api.retry.backoff_sec', 'csv', null,  '쉼표 구분 int (예: 10,30,120)'],
       ['lake_api.retryable_errors', 'csv', null,   'HY000, TimeoutError 등'],
     ]},
-    // ☁ S3 는 탐색기 ⚙ 로 옮겼다 — 연결·전송 규칙·업로드 항목이 한 화면에 있어야
-    // "어디로 무엇이 올라가는지" 가 읽힌다. 여기엔 이동 안내만 남긴다.
-    { key: 's3', label: '☁ S3', custom: renderS3Moved },
+    // ☁ S3 는 탐색기 ⚙ 한 곳에서만 편집한다 — 연결·전송 규칙·업로드 항목이 한 화면에
+    // 있어야 "어디로 무엇이 올라가는지" 가 읽힌다. 여기엔 자리도 두지 않는다.
     { key: 'schedule', label: '📅 스케줄', rows: [
       ['schedule.backfill_days', 'number', null, '오늘 + 과거 N일 (권장 3~5). 제품별 override 는 제품 탭에서.'],
       ['schedule.interval_hours', 'number', null, '자동 스케줄 (v0.2 구현)'],
@@ -1917,19 +1802,6 @@ async function renderSettings() {
     ),
     btnBar,
     ...Object.values(sectionEls),
-  );
-}
-
-// 설정 탭에 남는 S3 자리 — 실제 편집은 탐색기 ⚙ 에서 한다.
-function renderS3Moved(_draft) {
-  return el('div', { class: 'card' },
-    el('div', { class: 'card-title' }, '☁ S3 설정은 탐색기로 옮겼습니다'),
-    el('div', { class: 'section-desc' },
-      '접속 정보(연결) · root 별 전송 규칙 · 업/다운로드 항목 · 이력을 탐색기 탭 오른쪽 위 ⚙ 한 곳에서 봅니다. '
-      + '올릴 파일을 보면서 어디로 가는지 같이 보라고 옮겼습니다.'),
-    el('div', { class: 'row', style: { marginTop: '10px' } },
-      el('button', { class: 'btn primary', onclick: () => { route('browser'); setTimeout(openS3Modal, 80); } },
-        '📂 탐색기에서 S3 설정 열기')),
   );
 }
 
@@ -2388,8 +2260,11 @@ async function renderBrowser() {
         el('div', { class: 'fb-side-head' },
           el('span', {}, '파일 탐색기'),
           el('span', { class: 'fb-count', id: 'brCount' }, ''),
-          el('button', { class: 'btn gear-btn', title: 'S3 설정 — 연결(key)·전송 규칙·업/다운로드 항목·이력',
-            onclick: openS3Modal }, '⚙'),
+          // 톱니는 flow 의 공용 톱니(PageGearButton) 와 같은 규격 — 40×40 원형 ⚙️.
+          // 두 앱을 나란히 쓰는 화면이라 "설정은 이 동그란 톱니" 로 같이 읽혀야 한다.
+          el('button', { class: 'gear-btn', type: 'button', 'aria-label': 'S3 설정',
+            title: 'S3 설정 — 연결(key)·전송 규칙·업/다운로드 항목·이력',
+            onclick: openS3Modal }, '⚙️'),
         ),
         el('div', { class: 'fb-scope', id: 'brScope' }),
         el('div', { class: 'fb-side-body' },
@@ -2494,8 +2369,14 @@ function syncBadge(sync) {
 // S3 업/다운로드 항목 모달 (탐색기 ⚙)
 //   항목 = 로컬 경로 ↔ S3 key 한 쌍. 방향/명령/주기를 각각 준다.
 //   수동 ▶ 실행 · ■ 중지 (파일 경계에서 취소) · 5초 폴링으로 진행률
+//
+// 화면 규격은 flow 의 톱니 패널과 같다 (flow 파일탐색기 ⚙ · 캐시 예산 ⚙):
+//   머리(제목 + 닫기) → 탭 줄(선택 탭은 accent-glow) → 본문.
+//   본문에서 무언가를 조절하는 단위는 항상 **카드 한 장 = 제목 + 설명 + 입력**이다.
+//   설명 없이 입력만 있는 줄은 두지 않는다 — "이 값이 뭘 바꾸는지" 를 같은 카드에서 읽어야 한다.
 // ─────────────────────────────────────
-const S3M = { open: false, tab: 'items', form: null, hist: [], timer: null, keyBrowse: null, settings: null };
+const S3M = { open: false, tab: 'items', form: null, hist: [], timer: null, keyBrowse: null,
+  settings: null, onKey: null };
 
 // 자동 갱신해도 되는 탭 = 입력 폼이 없는 탭. 나머지는 다시 그리면 입력 중인 값이 날아간다.
 const S3M_LIVE_TABS = ['items', 'history'];
@@ -2508,13 +2389,26 @@ function openS3Modal() {
     if (!S3M.open) return closeS3Modal();
     if (S3M_LIVE_TABS.includes(S3M.tab)) renderS3Modal(true);
   }, 5000);
+  // Esc 로 닫기 — flow 톱니 패널과 같은 동작
+  S3M.onKey = (e) => { if (e.key === 'Escape') closeS3Modal(); };
+  window.addEventListener('keydown', S3M.onKey);
 }
 
 function closeS3Modal() {
   S3M.open = false;
   if (S3M.timer) { clearInterval(S3M.timer); S3M.timer = null; }
+  if (S3M.onKey) { window.removeEventListener('keydown', S3M.onKey); S3M.onKey = null; }
   document.getElementById('s3modal')?.remove();
   loadBrowserRoots();
+}
+
+// 조절 단위 한 장 — flow 톱니 패널의 카드와 같은 구성(제목 → 설명 → 입력).
+function s3Card(title, desc, ...kids) {
+  return el('div', { class: 's3-card' },
+    el('div', { class: 's3-card-title' }, title),
+    desc ? el('div', { class: 's3-card-desc' }, desc) : null,
+    ...kids,
+  );
 }
 
 async function renderS3Modal(quiet) {
@@ -2530,44 +2424,52 @@ async function renderS3Modal(quiet) {
   }
 
   document.getElementById('s3modal')?.remove();
-  const tabBtn = (id, label) => el('button', {
-    class: 'seg' + (S3M.tab === id ? ' on' : ''),
+  const tabBtn = ([id, label]) => el('button', {
+    class: 's3-tab' + (S3M.tab === id ? ' on' : ''), type: 'button',
+    title: S3M_TAB[id].desc,
     onclick: () => { S3M.tab = id; renderS3Modal(); },
-  }, label);
+  }, label, id === 'items' ? el('span', { class: 's3-tab-count' }, String(data.items.length)) : null);
 
   const body = S3M.tab === 'add' ? s3FormView(data, dests)
     : S3M.tab === 'history' ? s3HistoryView()
       : S3M.tab === 'conn' ? s3ConnView()
-        : S3M.tab === 'rules' ? el('div', { id: 's3RulesBox' })
-          : S3M.tab === 'files' ? el('div', { id: 's3FilesBox' })
+        : S3M.tab === 'rules' ? s3Card(S3M_TAB.rules.title, S3M_TAB.rules.desc, el('div', { id: 's3RulesBox' }))
+          : S3M.tab === 'files' ? s3Card(S3M_TAB.files.title, S3M_TAB.files.desc, el('div', { id: 's3FilesBox' }))
             : s3ItemsView(data);
 
   const modal = el('div', { id: 's3modal', class: 's3-modal-back',
     onclick: (e) => { if (e.target.id === 's3modal') closeS3Modal(); } },
     el('div', { class: 's3-modal' },
-      el('div', { class: 'row', style: { gap: '6px', alignItems: 'center', marginBottom: '4px', flexWrap: 'wrap' } },
-        el('span', { style: { fontWeight: 800, marginRight: '4px' } }, '⚙ S3 설정'),
-        tabBtn('conn', '연결'), tabBtn('rules', '전송 규칙'),
-        tabBtn('items', `항목 ${data.items.length}`), tabBtn('add', '+ 추가'),
-        tabBtn('files', '설정파일'), tabBtn('history', '이력'),
-        el('div', { class: 'spacer' }),
-        el('button', { class: 'btn', onclick: closeS3Modal }, '닫기'),
+      el('div', { class: 's3-modal-head' },
+        el('span', { class: 's3-modal-title' }, '⚙️ S3 설정'),
+        el('span', { class: 's3-modal-sub' }, S3M_TAB[S3M.tab]?.title || ''),
+        el('span', { class: 'spacer' }),
+        el('button', { class: 's3-modal-x', type: 'button', title: '닫기 (Esc)',
+          'aria-label': '닫기', onclick: closeS3Modal }, '✕'),
       ),
-      el('div', { class: 'hint', style: { marginBottom: '10px' } }, S3M_TAB_HINT[S3M.tab] || ''),
-      body,
+      el('div', { class: 's3-modal-tabs' }, ...Object.entries(S3M_TAB).map(([id, t]) => tabBtn([id, t.label]))),
+      el('div', { class: 's3-modal-body' }, body),
     ));
   document.body.append(modal);
   if (S3M.tab === 'rules') loadS3RulesSection('rules');
   if (S3M.tab === 'files') loadConfigFilesSection();
 }
 
-const S3M_TAB_HINT = {
-  conn: 'S3 접속 정보 — 기본 연결(default)은 파이프라인 업로드에도 그대로 쓰인다. 다른 버킷/계정이 필요하면 아래에 연결을 더 등록한다.',
-  rules: 'root 별 기본 전송 방식(cp/sync)과 올릴 위치. 탐색기 목록의 ⇧ S3 버튼이 이 규칙을 따른다.',
-  items: '주기·수동으로 도는 업/다운로드 항목. ▶ 실행 / ■ 중지 는 안전 지점(파일 경계)에서만 끊는다.',
-  add: '항목 추가·수정 — 로컬 경로 ↔ S3 key 한 쌍.',
-  files: '설정파일을 S3 로 개별 전송. 이름을 누르면 탐색기에서 그 파일이 열린다.',
-  history: '최근 실행 이력 100건.',
+// 탭 = 조절 대상 하나. title/desc 는 본문 카드의 제목·설명으로 그대로 쓴다
+// (flow 톱니처럼 "지금 무엇을 조절하는 중인지" 를 본문 안에서 읽게 한다).
+const S3M_TAB = {
+  conn: { label: '연결', title: 'S3 접속 정보',
+    desc: '기본 연결(default)은 파이프라인 업로드에도 그대로 쓰인다. 다른 버킷/계정이 필요하면 아래에 연결을 더 등록한다.' },
+  rules: { label: '전송 규칙', title: 'root 별 전송 규칙',
+    desc: 'root 별 기본 전송 방식(cp/sync)과 올릴 위치. 탐색기 목록의 ⇧ S3 버튼이 이 규칙을 따른다.' },
+  items: { label: '항목', title: '업/다운로드 항목',
+    desc: '주기·수동으로 도는 업/다운로드 항목. ▶ 실행 / ■ 중지 는 안전 지점(파일 경계)에서만 끊는다.' },
+  add: { label: '+ 추가', title: '항목 추가·수정',
+    desc: '로컬 경로 ↔ S3 key 한 쌍. 방향·명령·주기를 각각 정한다.' },
+  files: { label: '설정파일', title: '설정파일 → S3 개별 전송',
+    desc: '설정파일을 S3 로 하나씩 전송한다. 이름을 누르면 탐색기에서 그 파일이 열린다.' },
+  history: { label: '이력', title: '최근 실행 이력',
+    desc: '최근 100건. 실패한 항목은 오류 열에 이유가 남는다.' },
 };
 
 // 연결 탭 — settings.json 의 s3.* (구 설정 탭 ☁ 섹션) + 추가 S3 연결(destinations).
@@ -2588,22 +2490,21 @@ function s3ConnView() {
       ['s3.retry_failed_sec', 'number', null, '업로드 실패 항목 재시도 간격. 기본 120초'],
     ];
     box.append(
-      el('div', { class: 'subsection-title' }, '기본 연결 (default)'),
-      ...rows.map((row) => settingsRow(row, draft)),
-      el('div', { class: 'row', style: { justifyContent: 'flex-end', marginBottom: '12px' } },
-        el('button', { class: 'btn primary small', onclick: async (e) => {
-          const btn = e.target;
-          try {
-            await api.post('/api/settings', { s3: draft.s3 });
-            STATE.settings = null;   // 설정 탭 재조회
-            S3M.settings = null;
-            btn.textContent = '✓ 저장됨';
-            setTimeout(() => { btn.textContent = '💾 연결 저장'; }, 1500);
-          } catch (err) { alert(`저장 실패: ${err.message}`); }
-        } }, '💾 연결 저장')),
-      el('div', { class: 'subsection-title' }, '추가 S3 연결',
-        el('span', { class: 'hint' }, '전송 규칙에서 이름으로 고른다')),
-      el('div', { id: 's3ConnBox' }),
+      s3Card('기본 연결 (default)', S3M_TAB.conn.desc,
+        ...rows.map((row) => settingsRow(row, draft)),
+        el('div', { class: 's3-card-foot' },
+          el('button', { class: 'btn primary small', onclick: async (e) => {
+            const btn = e.target;
+            try {
+              await api.post('/api/settings', { s3: draft.s3 });
+              STATE.settings = null;   // 설정 탭 재조회
+              S3M.settings = null;
+              btn.textContent = '✓ 저장됨';
+              setTimeout(() => { btn.textContent = '💾 연결 저장'; }, 1500);
+            } catch (err) { alert(`저장 실패: ${err.message}`); }
+          } }, '💾 연결 저장'))),
+      s3Card('추가 S3 연결', '기본 연결 외에 다른 버킷·계정을 쓸 때 등록한다. 전송 규칙에서 이 이름으로 고른다.',
+        el('div', { id: 's3ConnBox' })),
     );
     loadS3RulesSection('conn');
   };
@@ -2665,8 +2566,8 @@ function s3ItemsView(data) {
     );
   });
 
-  return el('div', {},
-    el('div', { class: 'row', style: { gap: '8px', marginBottom: '8px', fontSize: '11px' } },
+  return s3Card(S3M_TAB.items.title, S3M_TAB.items.desc,
+    el('div', { class: 'row', style: { gap: '8px', flexWrap: 'wrap' } },
       pill(data.auto_download_enabled, '⬇ 자동 다운로드', { auto_download_enabled: !data.auto_download_enabled }),
       pill(data.auto_upload_enabled, '⬆ 자동 업로드', { auto_upload_enabled: !data.auto_upload_enabled }),
       el('span', { class: 'hint' }, '주기가 0(수동)이면 마스터가 켜져 있어도 자동 실행되지 않는다'),
@@ -2714,7 +2615,7 @@ function s3FormView(data, dests) {
   // key 를 골라 폼이 다시 그려진 뒤에도 탐색 목록이 그대로 남아야 한다
   if (S3M.keyBrowse) renderKeys(S3M.keyBrowse);
 
-  return el('div', {},
+  return s3Card(S3M.form?.id ? `항목 수정 — ${S3M.form.id}` : S3M_TAB.add.title, S3M_TAB.add.desc,
     row('방향', seg('direction', [['download', '⬇ 받기 (S3→Valve)'], ['upload', '⬆ 올리기 (Valve→S3)']])),
     row('id', inp('id', '영문/숫자/_/- 64자', '200px'),
       el('span', { class: 'hint' }, '항목 식별자 — 중복 불가')),
@@ -2758,8 +2659,9 @@ function s3HistoryView() {
     el('td', { class: 'mono' }, `옮김 ${h.moved ?? 0} · 생략 ${h.skipped ?? 0} · 실패 ${h.failed ?? 0}`),
     el('td', { style: { color: 'var(--danger)', fontSize: '11px' } }, h.error || ''),
   ));
-  return el('div', { style: { maxHeight: '56vh', overflow: 'auto' } },
-    alTable(['시각', 'id', '결과', '소요', '방향', '건수', '오류'], rows));
+  return s3Card(S3M_TAB.history.title, S3M_TAB.history.desc,
+    el('div', { style: { maxHeight: '56vh', overflow: 'auto' } },
+      alTable(['시각', 'id', '결과', '소요', '방향', '건수', '오류'], rows)));
 }
 
 // 탐색기 하단 범례 — 화살표가 무슨 뜻인지 화면에서 바로 읽히게

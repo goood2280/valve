@@ -1,4 +1,4 @@
-"""params_template 스키마 마이그레이션 — 구 포맷 {slot: {column,op,value}} → 신 포맷 {column: {op,value}}."""
+"""Legacy filter wrappers migrate to flat getData parameter values."""
 from __future__ import annotations
 
 import importlib
@@ -54,11 +54,8 @@ def test_migration_converts_old_params_template(tmp_path):
     migrated = yaml.safe_load((tmp_path / "config" / "products.yaml").read_text(encoding="utf-8"))
     tpl = migrated["products"][0]["params_template"]
 
-    # 신 포맷: column 명이 키, column 필드는 사라짐
-    assert "product_code" in tpl
-    assert "process_id" in tpl
-    assert tpl["product_code"] == {"op": "eq", "value": "LEGACY"}
-    assert tpl["process_id"] == {"op": "in", "value": ["P1", "P2"]}
+    assert "product_code" not in tpl
+    assert tpl["process_id"] == ["P1", "P2"]
     assert "cata" not in tpl
     assert "catb" not in tpl
 
@@ -69,9 +66,11 @@ def test_new_format_untouched(tmp_path):
     new_fmt = {
         "products": [{
             "product": "X",
-            "params_template": {"product_code": {"op": "eq", "value": "X"}},
+            "params_template": {"process_id": "P100", "line_id": ["L1", "L2"]},
         }]
     }
     changed = _migrate_params_template(new_fmt)
     assert changed is False
-    assert new_fmt["products"][0]["params_template"] == {"product_code": {"op": "eq", "value": "X"}}
+    assert new_fmt["products"][0]["params_template"] == {
+        "process_id": "P100", "line_id": ["L1", "L2"],
+    }

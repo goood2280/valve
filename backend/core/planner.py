@@ -36,18 +36,23 @@ def product_table_name(product: str, source_cfg: dict) -> str:
 
 
 def raw_query_params(product: str, source_cfg: dict, prod_cfg: dict,
-                     product_filters: dict[str, dict], datefrom, dateto) -> dict:
+                     product_filters: dict[str, dict], date_from, date_to) -> dict:
     """bigdataquery RAW 조회 규약. 필터 값은 op 래퍼 없이 그대로 전달한다."""
     params = {
         "table_name": product_table_name(product, source_cfg),
-        "datefrom": datefrom,
-        "dateto": dateto,
+        "dateFrom": date_from,
+        "dateTo": date_to,
     }
     configured = product_filters.get(product) or {}
+    template = prod_cfg.get("params_template") or {}
     for key in ("process_id", "line_id"):
         value = source_cfg.get(key)
         if value is None:
             value = prod_cfg.get(key)
+        if value is None:
+            value = template.get(key)
+        if isinstance(value, dict):
+            value = value.get("value")
         if value is None:
             value = configured.get(key)
         if value is not None and value != "" and value != []:
@@ -190,7 +195,9 @@ class Planner:
         first_shard = shard_keys[0] if shard_keys else None
 
         t0 = datetime.fromisoformat(f"{date}T00:00:00")
-        t1 = t0 + timedelta(hours=hours)
+        # A shard probe must cover the whole requested day. Otherwise an empty
+        # first hour could be mistaken for an empty day and skip valid lots.
+        t1 = t0 + (timedelta(days=1) if first_shard else timedelta(hours=hours))
 
         params = raw_query_params(product, source_cfg, prod_cfg, self.product_filters,
                                   t0.isoformat(), t1.isoformat())
@@ -199,14 +206,14 @@ class Planner:
         try:
             df = await self.api.query(params, custom_col)
             n_sample = len(df)
-            est = int(n_sample * (24.0 / max(hours, 1e-6)))
+            est = n_sample if first_shard else int(n_sample * (24.0 / max(hours, 1e-6)))
             shards: list = []
             if first_shard and first_shard in df.columns:
                 # 해당 날짜에 lot 이 하나도 없으면 그대로 빈 목록 — 단일 chunk 로 진행
                 shards = [str(s) for s in df[first_shard].drop_nulls().unique().to_list()]
             return {
                 "strategy": "sample_window",
-                "sample_hours": hours,
+                "sample_hours": 24.0 if first_shard else hours,
                 "sample_rows": n_sample,
                 "estimated_rows": est,
                 "shards": shards[:1000],
@@ -229,8 +236,7 @@ class Planner:
 
         params = raw_query_params(product, source_cfg, prod_cfg, self.product_filters,
                                   t0.isoformat(), t1.isoformat())
-        custom_col = (shard_keys[:2] if shard_keys else []) + ["time"]
-        custom_col = list(dict.fromkeys(custom_col))  # dedupe preserve order
+        custom_col = [shard_keys[0]] if shard_keys else ["time"]
 
         try:
             df = await self.api.query(params, custom_col)
@@ -260,8 +266,8 @@ class Planner:
         target = int(source_cfg.get("target_chunk_rows") or 500_000)
         shard_keys = list(source_cfg.get("shard_hierarchy") or [])
 
-        # case A: probe 실패 or shard 없음 → 단일 chunk 로 시도 (timeout 나면 executor 가 fallback)
-        if not shard_keys or not shards:
+        # case A: shard를 쓰지 않는 소스 또는 probe 실패 → 단일 chunk fallback.
+        if not shard_keys or (not shards and probe_meta.get("error")):
             return [Chunk(
                 chunk_id=f"{product}-{source_cfg['name']}-{date}-00",
                 product=product,
@@ -270,13 +276,29 @@ class Planner:
                 expected_rows=est_rows,
             )]
 
-        # case B: 크기가 작으면 단일 chunk
+        first_shard = shard_keys[0]
+
+        # A successful full-range probe with no root lot is a valid empty result.
+        # Keep one explicit empty chunk so the executor can finish successfully
+        # without issuing an unfiltered full-table query.
+        if not shards:
+            return [Chunk(
+                chunk_id=f"{product}-{source_cfg['name']}-{date}-00",
+                product=product,
+                source=source_cfg["name"],
+                date=date,
+                shard_filters={first_shard: []},
+                expected_rows=0,
+            )]
+
+        # case B: 크기가 작아도 probe에서 얻은 root lot 목록으로 제한한다.
         if est_rows > 0 and est_rows <= target:
             return [Chunk(
                 chunk_id=f"{product}-{source_cfg['name']}-{date}-00",
                 product=product,
                 source=source_cfg["name"],
                 date=date,
+                shard_filters={first_shard: shards},
                 expected_rows=est_rows,
             )]
 
@@ -287,7 +309,6 @@ class Planner:
         for i, s in enumerate(shards):
             groups[i % n_chunks].append(s)
 
-        first_shard = shard_keys[0]
         chunks = []
         for i, g in enumerate(groups):
             chunks.append(Chunk(

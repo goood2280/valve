@@ -403,16 +403,41 @@ class FeaturePipeline:
         src = self.product_source_cfg(str(cfg["product"]), source)
         params = {
             "table_name": src.get("table_name") or src.get("table"),
-            "datefrom": q_from.isoformat(),
-            "dateto": q_to.isoformat(),
+            "dateFrom": q_from.isoformat(),
+            "dateTo": q_to.isoformat(),
         }
         for key in ("process_id", "line_id"):
             value = cfg.get(key)
             if value is not None and value != "" and value != []:
                 params[key] = value
 
+        custom_columns = list(dict.fromkeys(self.sources_cfg()[source].get("columns") or []))
+        shard_keys = list(src.get("shard_hierarchy") or [])
+
         async def invoke():
-            return await self.lake_api.query(params, [])
+            if "root_lot_id" not in shard_keys:
+                return await self.lake_api.query(params, custom_columns)
+
+            # Query only root_lot_id first, then constrain every raw-data call
+            # to the returned roots. An empty probe is a valid empty result and
+            # must not fall through to an unfiltered full-table query.
+            probe = await self.lake_api.query(params, ["root_lot_id"])
+            if probe is None or probe.height == 0 or "root_lot_id" not in probe.columns:
+                return pl.DataFrame()
+            roots = [str(value) for value in
+                     probe.get_column("root_lot_id").drop_nulls().unique().to_list()
+                     if str(value).strip()]
+            if not roots:
+                return pl.DataFrame()
+
+            batch_size = max(1, int(src.get("root_lot_batch_size") or 100))
+            frames: list[pl.DataFrame] = []
+            for offset in range(0, len(roots), batch_size):
+                query_params = {**params, "root_lot_id": roots[offset:offset + batch_size]}
+                frame = await self.lake_api.query(query_params, custom_columns)
+                if frame is not None and frame.height:
+                    frames.append(frame)
+            return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
 
         try:
             asyncio.get_running_loop()

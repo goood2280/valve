@@ -88,9 +88,7 @@ _normalize_real_lake_settings(SETTINGS)
 
 
 def _migrate_params_template(products: dict) -> bool:
-    """구 포맷 {slot: {column, op, value}} → 신 포맷 {column: {op, value}}.
-    slot 명과 실제 컬럼명이 혼동되는 버그를 근본 해결. 변경 발생하면 True.
-    """
+    """Normalize saved filters to the flat internal ``getData`` contract."""
     changed = False
     for p in products.get("products", []):
         tpl = p.get("params_template")
@@ -98,15 +96,17 @@ def _migrate_params_template(products: dict) -> bool:
             continue
         new_tpl = {}
         for key, entry in tpl.items():
-            if not isinstance(entry, dict):
-                continue
-            if "column" in entry:
-                # old format: slot 을 무시하고 column 을 키로 승격
-                col = entry.get("column") or key
-                new_tpl[col] = {k: v for k, v in entry.items() if k != "column"}
+            col = entry.get("column") or key if isinstance(entry, dict) else key
+            value = entry.get("value") if isinstance(entry, dict) else entry
+            if col not in {"process_id", "line_id"}:
                 changed = True
-            else:
-                new_tpl[key] = entry
+                continue
+            if value is None or value == "" or value == []:
+                changed = True
+                continue
+            new_tpl[col] = value
+            if key != col or entry != value:
+                changed = True
         p["params_template"] = new_tpl
     return changed
 

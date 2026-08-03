@@ -72,9 +72,11 @@ class ChunkExecutor:
                 chunk, status="in_progress", started_at=time.time()))
 
             params = self._build_params(chunk, prod_cfg, source_cfg)
+            custom_columns = self._custom_columns(prod_cfg, source_cfg)
             t_start = time.time()
             try:
-                df = await self.api.query(params, [])
+                has_empty_shard = any(not values for values in (chunk.shard_filters or {}).values())
+                df = pl.DataFrame() if has_empty_shard else await self.api.query(params, custom_columns)
                 rows = 0 if df is None else len(df)   # '데이터 없음' 은 실패가 아니다
                 self._save_staging(chunk, df)
                 self.state.update_chunk(chunk.chunk_id, self._chunk_meta(
@@ -137,6 +139,15 @@ class ChunkExecutor:
             if vals:
                 params[col] = list(vals)
         return params
+
+    @staticmethod
+    def _custom_columns(prod_cfg: dict, source_cfg: dict) -> list[str]:
+        """Resolve getData's ``custom_columns`` with a source override."""
+        configured = (source_cfg.get("custom_col")
+                      if "custom_col" in source_cfg else prod_cfg.get("custom_col"))
+        return list(dict.fromkeys(
+            str(column).strip() for column in (configured or []) if str(column).strip()
+        ))
 
     # ─── staging ───
     def _staging_date_dir(self, plan: ChunkPlan) -> Path:

@@ -17,9 +17,7 @@ Valve · lake_api
         from bigdataquery import getData
 
         def query(params, custom_col, user):
-            if custom_col:                      # 빈 리스트면 전체 컬럼 (인자 자체를 뺀다)
-                return getData(params, custom_columns=custom_col, user_name=user)
-            return getData(params, user_name=user)
+            return getData(params, custom_columns=custom_col, user_name=user)
 
 공통 보증:
   - rate limit (min_interval_sec, 전역 lock)
@@ -36,6 +34,36 @@ from typing import Callable
 
 import pandas as pd
 import polars as pl
+
+
+_PARAM_ALIASES = {
+    "table": "table_name",
+    "datefrom": "dateFrom",
+    "date_from": "dateFrom",
+    "datgeFrom": "dateFrom",
+    "dateto": "dateTo",
+    "date_to": "dateTo",
+}
+
+
+def normalize_query_params(params: dict | None) -> dict:
+    """Return the flat parameter shape accepted by ``bigdataquery.getData``."""
+    normalized: dict = {}
+    for raw_key, raw_value in dict(params or {}).items():
+        key = _PARAM_ALIASES.get(str(raw_key), str(raw_key))
+        if key in {"op", "product_code"}:
+            continue
+        value = raw_value
+        if isinstance(value, dict) and "value" in value:
+            value = value.get("value")
+        if value is None or value == "" or value == []:
+            continue
+        normalized[key] = value
+
+    table_name = str(normalized.get("table_name") or "").strip()
+    if table_name:
+        normalized["table_name"] = table_name
+    return normalized
 
 
 class HY000Error(Exception):
@@ -80,10 +108,7 @@ class LakeAPI:
         None 이면 settings.lake_api.user 기본값."""
         # 모든 어댑터와 조회 경로가 동일한 사내 API 규약을 사용하게 한다.
         # 구 코드의 ``table``은 받아주되 외부 함수에는 ``table_name``만 전달한다.
-        params = dict(params or {})
-        table_name = params.get("table_name") or params.pop("table", None)
-        if table_name:
-            params["table_name"] = table_name
+        params = normalize_query_params(params)
         if not str(params.get("table_name") or "").strip():
             raise ValueError(
                 "table_name could not be resolved; set a source name/table or use the "

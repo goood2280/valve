@@ -115,7 +115,7 @@ class LakeFabDbClient(FabDbClient):
         today = datetime.today()
         date_from = (today - timedelta(days=query_days)).strftime("%Y-%m-%dT00:00:00")
         date_to = today.strftime("%Y-%m-%dT23:59:59")
-        params: dict = {"table_name": table, "datefrom": date_from, "dateto": date_to}
+        params: dict = {"table_name": table, "dateFrom": date_from, "dateTo": date_to}
         line_id = vehicle_cfg.get("line_id")
         if line_id:
             ids = line_id if isinstance(line_id, list) else [line_id]

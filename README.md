@@ -86,17 +86,17 @@ Valve는 **실 API 전용**이며 Mock 모드와 모드 전환 설정은 없다.
 
 ```python
 # mycorp/valve_adapter.py   →   설정 탭에 module: mycorp.valve_adapter:query
-from bigdataquery import getData
+from bigdataquery import *
 
 def query(params, custom_col, user):
-    if custom_col:                      # 빈 리스트면 전체 컬럼 (인자 자체를 뺀다)
-        return getData(params, custom_columns=custom_col, user_name=user)
-    return getData(params, user_name=user)
+    return getData(params, custom_columns=custom_col, user_name=user)
 ```
 
 `user` 는 `lake_api.user` 기본값이 넘어오고, 호출 측에서 `api.query(params, cols, user="다른계정")`
-처럼 건당 덮어쓸 수 있다. `params` 키(`table_name`·`dateFrom`·`dateTo`·shard 컬럼)는
-제품 탭의 params 템플릿이 만들어 준다 — `reference/Ref_raw_query.py` 와 같은 모양이다.
+처럼 건당 덮어쓸 수 있다. `params`는 `table_name`·`dateFrom`·`dateTo`·`process_id`·
+`line_id`와 실행 시 추가되는 shard 컬럼만 사용한다. 값은 `op/value` 래퍼 없이 직접 넣고,
+`product_code`는 전달하지 않는다. `root_lot_id` shard 소스는 해당 컬럼만 먼저 조회한 뒤
+얻은 ID 목록으로 본 조회를 나누며, 목록이 비면 오류 없이 빈 결과로 종료한다.
 
 ## 파일 구조
 

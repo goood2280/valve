@@ -53,11 +53,11 @@ async def test_partition_uses_table_name_persists_db_and_skips_disabled_s3(tmp_p
 
     params = lake.calls[0][0]
     assert params["table_name"] == "RAW_FAB_DATA"
-    assert params["datefrom"] == "2026-07-31T00:00:00"
-    assert params["dateto"] == "2026-08-01T00:00:00"
+    assert params["dateFrom"] == "2026-07-31T00:00:00"
+    assert params["dateTo"] == "2026-08-01T00:00:00"
     assert params["process_id"] == "P100"
     assert params["line_id"] == ["L1"]
-    assert lake.calls[0][1] == []
+    assert lake.calls[0][1] == ["ROOT_LOT_ID", "WAFER_ID", "FAB_CD"]
     assert "product_code" not in params
     assert "table" not in params
     assert result["ok"] is True
@@ -86,7 +86,7 @@ def test_real_adapter_normalizes_legacy_table_key(monkeypatch):
 
     real_query({"table": "RAW_VM_DATA"}, [], "tester")
     assert seen == {"table_name": "RAW_VM_DATA"}
-    assert seen_kwargs == {"user_name": "tester"}
+    assert seen_kwargs == {"custom_columns": [], "user_name": "tester"}
 
 
 @pytest.mark.asyncio
@@ -106,9 +106,21 @@ async def test_lake_api_normalizes_table_for_any_configured_adapter(monkeypatch)
         "retryable_errors": [],
     }})
 
-    await api.query({"table": "RAW_FAB_DATA"}, [])
+    await api.query({
+        "table": "RAW_FAB_DATA",
+        "datefrom": "2026-07-31",
+        "dateto": "2026-08-01",
+        "line_id": {"op": "in", "value": ["L1", "L2"]},
+        "product_code": {"op": "eq", "value": "PRODA"},
+        "op": "eq",
+    }, [])
 
-    assert seen == {"table_name": "RAW_FAB_DATA"}
+    assert seen == {
+        "table_name": "RAW_FAB_DATA",
+        "dateFrom": "2026-07-31",
+        "dateTo": "2026-08-01",
+        "line_id": ["L1", "L2"],
+    }
 
 
 def test_executor_requires_product_table_name_instead_of_guessing(tmp_path):

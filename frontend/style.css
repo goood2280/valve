@@ -716,7 +716,7 @@ main {
 .product-keyfields { margin-bottom: 8px; }
 .keyfield-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
   padding: 10px 12px;
   background: var(--bg-hover);
@@ -1323,7 +1323,8 @@ textarea { resize: vertical; min-height: 60px; font-family: var(--font-mono); }
 }
 .fb-side-head {
   display: flex; align-items: center; gap: 8px;
-  padding: 10px 12px;
+  padding: 6px 10px;          /* 40px 톱니(flow 규격) 가 들어와 위아래 여백을 줄였다 */
+  min-height: 52px;
   border-bottom: 1px solid var(--border);
   font-size: 12px; font-weight: 700;
 }
@@ -1479,20 +1480,78 @@ textarea { resize: vertical; min-height: 60px; font-family: var(--font-mono); }
 .s3dir-down .arw { color: #1d4ed8; background: rgba(59,130,246,0.14); }
 .s3dir-up   .arw { color: #15803d; background: rgba(34,197,94,0.14); }
 .s3dir-both .arw { color: #6d28d9; background: rgba(139,92,246,0.14); }
-/* S3 업/다운로드 모달 (탐색기 ⚙) */
-.gear-btn { font-size: 16px; line-height: 1; padding: 5px 9px; }
+/* ─── 탐색기 ⚙ (S3 설정) — flow 의 톱니와 같은 규격 ───
+   버튼은 flow 공용 PageGearButton 과 같은 40×40 원형 ⚙️ (Carbon 이 각져도 톱니만은 원형이다 —
+   두 앱에서 "설정은 이 동그란 버튼" 으로 같이 읽혀야 한다).
+   패널은 flow 파일탐색기 ⚙ 와 같은 3단: 머리(제목) → 탭 줄 → 본문.
+   본문의 조절 단위는 카드 한 장(.s3-card = 제목 + 설명 + 입력)으로 통일한다. */
+.gear-btn {
+  flex: 0 0 auto; width: 40px; height: 40px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--border); border-radius: 50%;
+  background: var(--bg-secondary); color: var(--text-secondary);
+  font-size: 18px; line-height: 1; cursor: pointer;
+  box-shadow: var(--shadow-sm);
+}
+.gear-btn:hover { border-color: var(--text-secondary); background: var(--bg-hover); }
+
 .s3-modal-back {
   position: fixed; inset: 0; background: rgba(15,23,42,0.45); z-index: 200;
-  display: flex; align-items: flex-start; justify-content: center; padding: 40px 16px;
+  display: flex; align-items: flex-start; justify-content: center; padding: 6vh 16px;
   overflow: auto;
 }
 .s3-modal {
-  background: var(--bg, #fff); border: 1px solid var(--border); border-radius: 10px;
-  box-shadow: 0 12px 40px rgba(0,0,0,0.25); padding: 16px; width: min(1040px, 96vw);
+  display: flex; flex-direction: column; max-height: 86vh; width: min(1040px, 96vw);
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.25); overflow: hidden;
 }
+.s3-modal-head {
+  display: flex; align-items: center; gap: 8px; flex: 0 0 auto;
+  padding: 12px 16px; border-bottom: 1px solid var(--border); background: var(--bg-secondary);
+}
+.s3-modal-title { font-family: var(--font-mono); font-size: 14px; font-weight: 700; color: var(--accent); }
+.s3-modal-sub { font-size: 12px; color: var(--text-secondary); min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.s3-modal-x {
+  flex: 0 0 auto; padding: 0 4px; border: 0; background: none; line-height: 1;
+  color: var(--text-secondary); font-size: 16px; cursor: pointer;
+}
+.s3-modal-x:hover { color: var(--text-primary); }
+.s3-modal-tabs {
+  display: flex; gap: 4px; flex-wrap: wrap; flex: 0 0 auto;
+  padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--bg-primary);
+}
+.s3-tab {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 5px 12px; border: 1px solid transparent; border-radius: 5px;
+  background: transparent; color: var(--text-secondary); font-size: 12px; cursor: pointer;
+}
+.s3-tab:hover { background: var(--bg-hover); }
+.s3-tab.on { background: var(--accent-glow); color: var(--accent); font-weight: 700; }
+.s3-tab-count { font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); }
+.s3-tab.on .s3-tab-count { color: var(--accent); }
+.s3-modal-body { flex: 1; min-height: 0; overflow: auto; padding: 12px 16px; background: var(--bg-primary); }
+.s3-card {
+  display: grid; gap: 8px; padding: 12px 14px;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--bg-secondary);
+}
+.s3-card + .s3-card { margin-top: 12px; }
+.s3-card-title { font-size: 14px; font-weight: 800; color: var(--text-primary); }
+.s3-card-desc { font-size: 12px; line-height: 1.5; color: var(--text-secondary); }
+.s3-card-foot { display: flex; justify-content: flex-end; gap: 6px; }
+.s3-card .form-row:last-of-type { margin-bottom: 0; }
 .s3-modal .tbl { width: 100%; }
 .s3-modal .clickable { cursor: pointer; padding: 1px 2px; border-radius: 3px; }
 .s3-modal .clickable:hover { background: rgba(59,130,246,0.12); }
+
+/* 항목 탭의 자동 실행 마스터 스위치 등 — 단독 .seg 에도 규칙이 있어야 한다
+   (이전엔 .cfg-mode .seg 만 있어서 브라우저 기본 버튼으로 보였다) */
+.seg {
+  padding: 3px 9px; border: 1px solid var(--border); border-radius: 5px;
+  background: var(--bg-card); color: var(--text-secondary); font-size: 11px; cursor: pointer;
+}
+.seg:hover { background: var(--bg-hover); }
+.seg.on { background: var(--accent-glow); border-color: var(--accent-dim); color: var(--accent-dim); font-weight: 700; }
 
 .tree-item .ic { font-size: 11px; opacity: 0.6; }
 .tree-item .sz { margin-left: auto; font-family: var(--font-mono); color: var(--text-muted); font-size: 11px; }
@@ -1938,6 +1997,7 @@ textarea { resize: vertical; min-height: 60px; font-family: var(--font-mono); }
 
 .valve-carbon .prod-item,
 .valve-carbon .source-tab,
+.valve-carbon .seg,
 .valve-carbon .dbhm-period .seg,
 .valve-carbon .cfg-mode .seg,
 .valve-carbon .query-preview,
@@ -1949,12 +2009,29 @@ textarea { resize: vertical; min-height: 60px; font-family: var(--font-mono); }
 
 .valve-carbon .prod-item.active,
 .valve-carbon .source-tab.active,
+.valve-carbon .seg.on,
 .valve-carbon .dbhm-period .seg.on,
 .valve-carbon .cfg-mode .seg.on {
   border-color: var(--brand-line);
   background: var(--brand-50);
   color: var(--brand);
 }
+
+/* 탐색기 ⚙ — Carbon 은 각지고 글자는 Carbon 타입 스케일을 따른다.
+   톱니 버튼만은 flow 와 같은 원형을 유지한다(위 .gear-btn). */
+.valve-carbon .s3-card,
+.valve-carbon .s3-tab { border-radius: 0; }
+.valve-carbon .s3-card { border-color: var(--line); }
+.valve-carbon .s3-card-title {
+  font-size: 16px; line-height: 24px; font-weight: 600; letter-spacing: 0;
+}
+.valve-carbon .s3-card-desc {
+  font-size: 12px; line-height: 16px; font-weight: 400; letter-spacing: 0.32px;
+}
+.valve-carbon .s3-tab { font-size: 14px; line-height: 18px; letter-spacing: 0.16px; }
+.valve-carbon .s3-tab.on { background: var(--brand-50); color: var(--brand); }
+.valve-carbon .s3-modal-head,
+.valve-carbon .s3-modal-tabs { border-color: var(--line); }
 
 .valve-carbon .heatmap tr.prod-head-row td.prod-head-cell {
   border-color: var(--brand-line);

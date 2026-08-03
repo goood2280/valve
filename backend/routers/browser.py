@@ -42,7 +42,7 @@ def deps(staging_root: Path, s3_local_root: Path | None, extra_roots: dict[str, 
 
 # ── S3 전송 규칙 (config/s3_transfer.yaml) ──
 #   destinations : 이름별 S3 연결 (bucket/endpoint/access·secret key …).
-#                  default = settings.json 의 s3 (앱 기본 연결 — 수정은 설정 탭).
+#                  default = settings.json 의 s3 (앱 기본 연결 — 수정은 탐색기 ⚙ › 연결).
 #   rules        : root 별 mode(cp/sync) + targets[{dest, prefix}].
 #                  같은 root 를 여러 S3 연결/이름으로 동시 전송 가능.
 #   · cp   : 항상 덮어쓰기 업로드 — 설정파일용

@@ -21,10 +21,7 @@ products:
     shard_hierarchy:
     - root_lot_id
     target_chunk_rows: 200000
-  params_template:
-    product_code:
-      op: eq
-      value: PRODA
+  params_template: {}
   custom_col:
   - lot_id
   - wafer_id
@@ -53,10 +50,7 @@ products:
     shard_hierarchy:
     - root_lot_id
     target_chunk_rows: 200000
-  params_template:
-    product_code:
-      op: eq
-      value: PRODB
+  params_template: {}
   custom_col:
   - lot_id
   - wafer_id
